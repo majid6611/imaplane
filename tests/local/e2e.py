@@ -28,7 +28,7 @@ IMAGE = 'dovecot/dovecot:2.3.21@sha256:1c18c756f20d03867077a1b509a6e2e3008ab1eaf
 PASSWORD = 'imaplane-test-only'
 # Test-only lever: IMAPLANE_TEST_STREAM_THRESHOLD=0 makes every generated config set
 # stream_threshold_bytes, so the whole suite can run in forced-streaming mode.
-STREAM_EXTRA = f"stream_threshold_bytes = {os.environ['IMAPLANE_TEST_STREAM_THRESHOLD']}\n" if os.environ.get('IMAPLANE_TEST_STREAM_THRESHOLD') else ''
+STREAM_EXTRA = f"stream_threshold_bytes = {os.environ['IMAPLANE_TEST_STREAM_THRESHOLD']}\nspool_allow_memory_backed = true\n" if os.environ.get('IMAPLANE_TEST_STREAM_THRESHOLD') else ''
 
 def command(*args, **kw):
     return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw).stdout.strip()
@@ -212,6 +212,9 @@ class ProtocolServer:
         self.xoauth2_token = None  # when set, AUTH=XOAUTH2 is offered and checked
         self.truncate_dest_fetch_at = None  # destination body FETCH: send this many bytes, then close
         self.drop_reply_after_commit = False  # APPEND is stored but the reply is never sent
+        self.truncate_source_fetch_at = None  # source body FETCH: send this many bytes, then close
+        self.stall_source_fetch_at = None  # source body FETCH: send this many bytes, then go silent
+        self.stall_append_after = None  # APPEND: read this many literal bytes, then stop reading and go silent
         self.idle_drop = None  # seconds; destination connection silently closes when idle this long
         self.drop_on_append = False  # destination closes without a reply when APPEND arrives
         self.throttle_code = b'THROTTLED'
@@ -325,6 +328,10 @@ class ProtocolServer:
                                         threading.Thread(target=restart,daemon=True).start()
                                         return
                                     payload = prefix+b' FLAGS (\\Seen) INTERNALDATE "02-Jan-2020 03:04:05 +0000" BODY[] {'+str(len(body)).encode()+b'}\r\n'+body+b')\r\n'
+                                    if user == 'source' and self.stall_source_fetch_at is not None and len(payload) > self.stall_source_fetch_at:
+                                        client.sendall(payload[:self.stall_source_fetch_at]); time.sleep(30); return
+                                    if user == 'source' and self.truncate_source_fetch_at is not None and len(payload) > self.truncate_source_fetch_at:
+                                        client.sendall(payload[:self.truncate_source_fetch_at]); return
                                     if user == 'destination' and self.truncate_dest_fetch_at is not None and len(payload) > self.truncate_dest_fetch_at:
                                         client.sendall(payload[:self.truncate_dest_fetch_at]); return
                                     if self.slow:
@@ -346,6 +353,8 @@ class ProtocolServer:
                             self.reject_once = False
                             client.sendall((b'wrong-tag' if self.wrong_rejection_tag else tag)+b' NO [OVERQUOTA] PRIVATE quota\r\n'); continue
                         client.sendall(b'+ ready\r\n')
+                        if self.stall_append_after is not None:
+                            reader.read(min(self.stall_append_after, n)); time.sleep(30); return
                         if self.slow_upload:
                             chunks=[]; left=n+2; chunk_number=0
                             while left:

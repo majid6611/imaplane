@@ -68,6 +68,15 @@ pub struct Config {
     /// Not part of the job binding, so it can be changed between runs.
     #[serde(default)]
     pub stream_threshold_bytes: Option<usize>,
+    /// Directory for spooled large source messages (those above `stream_threshold_bytes`).
+    /// Default: `state_dir`. It must be a private (mode 0700) directory you own on a local
+    /// filesystem that supports O_TMPFILE. Spooled mail is PLAINTEXT on that storage until
+    /// the kernel reclaims it; O_TMPFILE does not encrypt. Not part of the job binding.
+    #[serde(default)]
+    pub spool_dir: Option<PathBuf>,
+    /// Accept a tmpfs/ramfs `spool_dir`, which keeps spooled mail in RAM. Default false.
+    #[serde(default)]
+    pub spool_allow_memory_backed: bool,
 }
 fn rejection_limit() -> u32 {
     3
@@ -114,6 +123,11 @@ impl Config {
                 if p.is_relative() {
                     *p = base.join(&*p);
                 }
+            }
+        }
+        if let Some(dir) = &mut c.spool_dir {
+            if dir.is_relative() {
+                *dir = base.join(&*dir);
             }
         }
         if c.state_dir.is_relative() {

@@ -2,7 +2,9 @@ use crate::{
     config::Config,
     job::Job,
     journal::{AppendMetadata, Journal, MessageKey, Record},
-    transport::{Destination, Selected, Source, valid_flag},
+    transport::{
+        Destination, Message, Selected, Source, SpoolConfig, SpooledMessage, Transfer, valid_flag,
+    },
 };
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -422,6 +424,30 @@ fn preflight(c: &Config, s: &mut SourceReader<'_>, d: &mut DestinationReader<'_>
     Ok(())
 }
 
+/// A source message being transferred: small ones live in memory, large ones in a verified spool.
+enum Payload {
+    Buffered(Message),
+    Spooled(SpooledMessage),
+}
+impl Payload {
+    fn date(&self) -> chrono::DateTime<chrono::FixedOffset> {
+        match self {
+            Payload::Buffered(m) => m.date,
+            Payload::Spooled(s) => s.date,
+        }
+    }
+    fn flags(&self) -> &[String] {
+        match self {
+            Payload::Buffered(m) => &m.flags,
+            Payload::Spooled(s) => &s.flags,
+        }
+    }
+    /// Only a buffered message can be empty: a spooled one is, by definition, above the threshold.
+    fn is_empty_body(&self) -> bool {
+        matches!(self, Payload::Buffered(m) if m.body.is_empty())
+    }
+}
+
 pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
     require_mappings(c)?;
     let mut job = Job::open(c, true)?;
@@ -439,6 +465,10 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
         "live destination content, INTERNALDATE and supported flags against the durable source UID snapshot",
     );
     let mut circuit = RejectionCircuit::default();
+    let spool_config = SpoolConfig {
+        dir: c.spool_dir.clone().unwrap_or_else(|| c.state_dir.clone()),
+        allow_memory_backed: c.spool_allow_memory_backed,
+    };
     let mut known = dest.read(|d| d.folders())?;
     for (folder, validity, uids) in job.journal.snapshots()? {
         let mapping = c
@@ -515,8 +545,12 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     continue;
                 }
             }
-            let message = match source.read(|s| s.message(*uid)) {
-                Ok(Some(m)) => m,
+            let threshold = c.stream_threshold_bytes;
+            let mut payload = match source
+                .read(|s| s.read_for_transfer(*uid, threshold, &spool_config))
+            {
+                Ok(Some(Transfer::Buffered(m))) => Payload::Buffered(m),
+                Ok(Some(Transfer::Spooled(m))) => Payload::Spooled(m),
                 Ok(None) => {
                     report.entries.push(entry(
                         &key,
@@ -535,6 +569,22 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     ));
                     continue;
                 }
+                // The spool could not be created, filled or verified. This happens before any
+                // journal write or destination byte, so nothing is uncertain: the run stops and
+                // the operator fixes the spool directory (space, filesystem, permissions).
+                Err(e) if e.is::<crate::spool::SpoolError>() => {
+                    report.entries.push(entry(
+                        &key,
+                        None,
+                        "failed",
+                        format!(
+                            "source spool unavailable: {e:#}; nothing was written to the journal or the destination"
+                        ),
+                    ));
+                    report.interrupted |= stop.load(Ordering::Relaxed);
+                    report.finish();
+                    return Ok(report);
+                }
                 Err(e) => {
                     report.entries.push(entry(
                         &key,
@@ -551,7 +601,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
             if old
                 .as_ref()
                 .and_then(|r| r.date)
-                .is_some_and(|date| date != message.date.timestamp())
+                .is_some_and(|date| date != payload.date().timestamp())
             {
                 report.entries.push(entry(
                     &key,
@@ -572,43 +622,64 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     .next
                     .context("destination omitted UIDNEXT; cannot track append baseline")?,
             );
-            let (flags, omitted) = transfer_flags(&message.flags, &current.flags);
+            let (flags, omitted) = transfer_flags(payload.flags(), &current.flags);
             if stop.load(Ordering::Relaxed) {
                 report.interrupted = true;
                 break;
             }
-            let r = job.journal.prepare_append(
-                &key,
-                &message.body,
-                AppendMetadata {
-                    date: message.date.timestamp(),
-                    flags: &flags,
-                    omitted: &omitted,
-                    baseline,
-                },
-            )?;
+            let metadata = AppendMetadata {
+                date: payload.date().timestamp(),
+                flags: &flags,
+                omitted: &omitted,
+                baseline,
+            };
+            // The same single FULL preparation commit either way; a spooled message was fully
+            // read, verified and hashed before this point, so its fingerprint is already known.
+            let r = match &payload {
+                Payload::Buffered(m) => job.journal.prepare_append(&key, &m.body, metadata)?,
+                Payload::Spooled(s) => {
+                    job.journal
+                        .prepare_append_fingerprint(&key, s.sha256(), metadata)?
+                }
+            };
             // Empty literals could be committed without any body bytes; authorize
             // those BEFORE sending even the APPEND command prefix.
-            if message.body.is_empty() {
+            let empty_body = payload.is_empty_body();
+            if empty_body {
                 job.journal.authorize_literal(&key)?;
             }
             crate::fault::point("before_append");
             // NEVER retry this operation. Its state is durable before sending bytes.
-            let appended = dest.destination.append(
-                &mapping.destination,
-                &message,
-                r.flags.as_ref().context("missing planned flags")?,
-                || {
-                    crate::fault::point("after_append_continuation");
-                    if !message.body.is_empty() {
-                        job.journal.authorize_literal(&key).map_err(|_| {
-                            std::io::Error::other("cannot durably authorize APPEND literal")
-                        })?;
-                    }
-                    crate::fault::point("before_literal_send");
-                    Ok(())
-                },
-            );
+            let planned_flags = r.flags.as_ref().context("missing planned flags")?;
+            // Durable authorization after the continuation and before the first body byte; the
+            // same guard for both paths.
+            let guard = || {
+                crate::fault::point("after_append_continuation");
+                if !empty_body {
+                    job.journal.authorize_literal(&key).map_err(|_| {
+                        std::io::Error::other("cannot durably authorize APPEND literal")
+                    })?;
+                }
+                crate::fault::point("before_literal_send");
+                Ok(())
+            };
+            let mut streamed_phase = None;
+            let appended = match &mut payload {
+                Payload::Buffered(message) => {
+                    dest.destination
+                        .append(&mapping.destination, message, planned_flags, guard)
+                }
+                Payload::Spooled(spooled) => {
+                    let out = dest.destination.append_spooled(
+                        &mapping.destination,
+                        spooled,
+                        planned_flags,
+                        guard,
+                    );
+                    streamed_phase = Some(out.phase);
+                    out.result
+                }
+            };
             dest.touch();
             match appended {
                 Ok((dv, du)) => {
@@ -619,7 +690,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                         );
                     }
                     circuit.success();
-                    drop(message); // Release source content before destination verification.
+                    drop(payload); // Release source content (and any spool) before verification.
                     job.journal.acknowledge(&key, dv, du)?;
                     dest.advance_baseline(du);
                     let r = job.journal.record(&key)?.unwrap();
@@ -683,12 +754,22 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     continue;
                 }
                 Err(e) => {
+                    // The streaming phase is information for the operator only; every unsettled
+                    // APPEND stays uncertain and manual, exactly as before.
+                    let phase = streamed_phase
+                        .map(|p| {
+                            format!(
+                                " (streamed APPEND reached: {})",
+                                crate::transport::phase_name(p)
+                            )
+                        })
+                        .unwrap_or_default();
                     report.entries.push(entry(
                         &key,
                         Some(&r),
                         "uncertain",
                         format!(
-                            "{e:#}; rerun to inspect destination candidates, do not blindly retry"
+                            "{e:#}{phase}; rerun to inspect destination candidates, do not blindly retry"
                         ),
                     ));
                     // The connection may be out of sync, and no further writes are safe.

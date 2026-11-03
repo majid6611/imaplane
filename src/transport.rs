@@ -1121,7 +1121,7 @@ fn append_from_spool<T: Read + Write>(
         body_bytes_sent: out.body_bytes_sent,
     }
 }
-fn phase_name(phase: imap::AppendPhase) -> &'static str {
+pub(crate) fn phase_name(phase: imap::AppendPhase) -> &'static str {
     use imap::AppendPhase::*;
     match phase {
         NotAuthorized => "not_authorized",

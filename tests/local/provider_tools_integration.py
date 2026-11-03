@@ -24,7 +24,7 @@ SCRIPTS = ROOT / 'scripts'
 UNICODE_FOLDER = 'Archive/Éléments 📬'
 UNICODE_WIRE = 'Archive/&AMk-l&AOk-ments &2D3c7A-'   # as printed by `imap_snapshot.py list`
 FAILED = []
-EXTRA = f"stream_threshold_bytes = {os.environ['IMAPLANE_TEST_STREAM_THRESHOLD']}\n" if os.environ.get('IMAPLANE_TEST_STREAM_THRESHOLD') else ''
+EXTRA = f"stream_threshold_bytes = {os.environ['IMAPLANE_TEST_STREAM_THRESHOLD']}\nspool_allow_memory_backed = true\n" if os.environ.get('IMAPLANE_TEST_STREAM_THRESHOLD') else ''
 
 
 def check(name, fn):
