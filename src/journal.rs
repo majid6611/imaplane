@@ -5,7 +5,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+const SUPPORTED_SCHEMAS: [i64; 4] = [1, 2, 3, SCHEMA_VERSION];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageKey {
@@ -22,6 +23,8 @@ pub struct Summary {
     pub uncertain: u64,
     pub accepted: u64,
     pub confirmed: u64,
+    /// Planned messages an operator has explicitly skipped. They are NOT migrated.
+    pub skipped: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -98,7 +101,7 @@ impl Journal {
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![1, 2, SCHEMA_VERSION].contains(&version) {
+        if !SUPPORTED_SCHEMAS.contains(&version) {
             bail!("unsupported journal schema {version}");
         }
         Ok(Self(conn))
@@ -107,7 +110,7 @@ impl Journal {
     fn configure(mut conn: Connection, path: Option<&Path>) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![1, 2, SCHEMA_VERSION].contains(&version) {
+        if !SUPPORTED_SCHEMAS.contains(&version) {
             bail!("unsupported journal schema {version}");
         }
         conn.pragma_update(None, "synchronous", "FULL")?;
@@ -132,7 +135,7 @@ impl Journal {
             tx.pragma_update(None, "user_version", 2)?;
             crate::fault::point("v1_upgrade_before_commit");
             tx.commit()?;
-        } else if version != 2 && version != SCHEMA_VERSION {
+        } else if !(2..=SCHEMA_VERSION).contains(&version) {
             bail!("unsupported journal schema {version}; expected {SCHEMA_VERSION}");
         }
         conn.pragma_update(None, "synchronous", "FULL")?;
@@ -141,10 +144,19 @@ impl Journal {
             tx.execute_batch("CREATE TABLE append_attempts (folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('prepared','literal_authorized')), PRIMARY KEY(folder,validity,uid));
                 CREATE TABLE recovery_events (folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL, observed_at TEXT NOT NULL, evidence TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS append_rejections (folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL, observed_at TEXT NOT NULL, evidence TEXT NOT NULL);")?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.pragma_update(None, "user_version", 3)?;
             crate::fault::point("schema_upgrade_before_commit");
             tx.commit()?;
             crate::fault::point("after_schema_upgrade");
+        }
+        if version < 4 {
+            // Additive and audit-only: an append-only event log, no existing row changes.
+            let tx = conn.transaction()?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS operator_skip_events (folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL, action TEXT NOT NULL CHECK(action IN ('skip','unskip')), observed_at TEXT NOT NULL, reason TEXT NOT NULL, fingerprint TEXT NOT NULL, rejection_evidence TEXT NOT NULL);")?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            crate::fault::point("skip_schema_upgrade_before_commit");
+            tx.commit()?;
+            crate::fault::point("after_skip_schema_upgrade");
         }
         conn.pragma_update(None, "trusted_schema", false)?;
         Ok(Self(conn))
@@ -168,7 +180,12 @@ impl Journal {
                 key.uid_validity,
                 key.uid,
                 chrono::Utc::now().to_rfc3339(),
-                format!("matching tagged {} [{}]", proof.status, proof.code)
+                format!(
+                    "matching tagged {} [{}] scope={}",
+                    proof.status,
+                    proof.code,
+                    proof.scope().name()
+                )
             ],
         )?;
         crate::fault::point("rejection_before_commit");
@@ -507,6 +524,7 @@ impl Journal {
             uncertain: 0,
             accepted: 0,
             confirmed: 0,
+            skipped: 0,
         };
         let mut stmt = self
             .0
@@ -522,8 +540,134 @@ impl Journal {
                 _ => bail!("unknown journal state"),
             }
         }
+        // Read-only status opens journals older than schema 4 without upgrading them.
+        let has_events: bool = self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_skip_events')",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_events {
+            let skipped: i64 = self.0.query_row(
+                "SELECT count(*) FROM transfers t WHERE t.state='planned' AND t.destination_uid IS NULL AND (SELECT action FROM operator_skip_events e WHERE e.folder=t.folder AND e.validity=t.uid_validity AND e.uid=t.uid ORDER BY e.rowid DESC LIMIT 1)='skip'",
+                [],
+                |r| r.get(0),
+            )?;
+            result.skipped = u64::try_from(skipped).context("invalid skip count")?;
+        }
         Ok(result)
     }
+
+    /// The operator's reason when this message is currently skipped, else None.
+    /// A skip only has force while the record is still an unattributed planned
+    /// transfer; it can never make any other state look skipped.
+    pub fn active_skip(&self, key: &MessageKey) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT e.reason FROM operator_skip_events e WHERE e.folder=?1 AND e.validity=?2 AND e.uid=?3 AND e.action='skip' AND e.rowid=(SELECT max(rowid) FROM operator_skip_events WHERE folder=?1 AND validity=?2 AND uid=?3) AND EXISTS(SELECT 1 FROM transfers t WHERE t.folder=?1 AND t.uid_validity=?2 AND t.uid=?3 AND t.state='planned' AND t.destination_uid IS NULL)",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Record an operator decision NOT to migrate a permanently rejected message.
+    /// Refuses unless the transfer is a planned, unattributed record (a state only
+    /// reachable when no APPEND is outstanding) with at least one durable tagged
+    /// rejection. The message stays planned: a skip is evidence of intent, never
+    /// of delivery, and it changes no transfer state.
+    pub fn skip_rejected(&mut self, key: &MessageKey, reason: &str) -> Result<()> {
+        let reason = checked_reason(reason)?;
+        let tx = self.0.transaction()?;
+        let fingerprint: String = tx
+            .query_row(
+                "SELECT fingerprint FROM transfers WHERE folder=?1 AND uid_validity=?2 AND uid=?3 AND state='planned' AND destination_uid IS NULL",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("skip refused: only a planned, never-attributed transfer (not uncertain, accepted or confirmed) can be skipped")?;
+        let evidence: String = tx
+            .query_row(
+                "SELECT evidence FROM append_rejections WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("skip refused: no durable tagged APPEND rejection exists for this message")?;
+        let latest: Option<String> = tx
+            .query_row(
+                "SELECT action FROM operator_skip_events WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if latest.as_deref() == Some("skip") {
+            bail!("message is already skipped");
+        }
+        tx.execute(
+            "INSERT INTO operator_skip_events VALUES (?1,?2,?3,'skip',?4,?5,?6,?7)",
+            params![
+                key.folder,
+                key.uid_validity,
+                key.uid,
+                chrono::Utc::now().to_rfc3339(),
+                reason,
+                fingerprint,
+                evidence
+            ],
+        )?;
+        crate::fault::point("skip_before_commit");
+        tx.commit()?;
+        crate::fault::point("after_skip");
+        Ok(())
+    }
+
+    /// Reverse a skip so the message follows the normal path again. Audited.
+    pub fn unskip(&mut self, key: &MessageKey, reason: &str) -> Result<()> {
+        let reason = checked_reason(reason)?;
+        let tx = self.0.transaction()?;
+        let (action, fingerprint, evidence): (String, String, String) = tx
+            .query_row(
+                "SELECT action, fingerprint, rejection_evidence FROM operator_skip_events WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .context("message has no operator skip to reverse")?;
+        if action != "skip" {
+            bail!("message is not currently skipped");
+        }
+        tx.execute(
+            "INSERT INTO operator_skip_events VALUES (?1,?2,?3,'unskip',?4,?5,?6,?7)",
+            params![
+                key.folder,
+                key.uid_validity,
+                key.uid,
+                chrono::Utc::now().to_rfc3339(),
+                reason,
+                fingerprint,
+                evidence
+            ],
+        )?;
+        crate::fault::point("unskip_before_commit");
+        tx.commit()?;
+        crate::fault::point("after_unskip");
+        Ok(())
+    }
+}
+
+/// Operator text is echoed in reports: bounded, non-empty, and free of control
+/// characters so it cannot forge terminal output or log lines.
+fn checked_reason(reason: &str) -> Result<&str> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        bail!("a non-empty --reason is required");
+    }
+    if reason.chars().count() > 500 || reason.chars().any(char::is_control) {
+        bail!("reason must be at most 500 characters with no control characters");
+    }
+    Ok(reason)
 }
 
 /// SQLite online backup includes committed WAL pages. Publish without clobbering
@@ -824,6 +968,148 @@ mod preparation_tests {
         );
         assert_eq!(
             journal.record(&key).unwrap().unwrap().hash,
+            fingerprint(b"body")
+        );
+    }
+}
+
+#[cfg(test)]
+mod skip_tests {
+    use super::*;
+    use crate::transport::AppendRejection;
+
+    fn fixture() -> (tempfile::TempDir, Journal, MessageKey) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = Journal::create(&dir.path().join("journal.sqlite3"), "b").unwrap();
+        let key = MessageKey {
+            folder: "INBOX".into(),
+            uid_validity: 7,
+            uid: 3,
+        };
+        journal.plan(&key, b"body").unwrap();
+        (dir, journal, key)
+    }
+    fn prepare(journal: &mut Journal, key: &MessageKey) {
+        journal
+            .prepare_append(
+                key,
+                b"body",
+                AppendMetadata {
+                    date: 1,
+                    flags: &[],
+                    omitted: &[],
+                    baseline: (9, 1),
+                },
+            )
+            .unwrap();
+    }
+    fn reject(journal: &mut Journal, key: &MessageKey) {
+        prepare(journal, key);
+        journal
+            .reject_append(
+                key,
+                &AppendRejection {
+                    code: "CANNOT",
+                    status: "NO",
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn skip_requires_prior_rejection_evidence_and_a_clean_reason() {
+        let (_dir, mut journal, key) = fixture();
+        assert!(journal.skip_rejected(&key, "why").is_err());
+        reject(&mut journal, &key);
+        for bad in ["", "   ", "line\nbreak", "esc\u{1b}[31m", &"x".repeat(501)] {
+            assert!(journal.skip_rejected(&key, bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(journal.active_skip(&key).unwrap(), None);
+        journal.skip_rejected(&key, "ticket 7").unwrap();
+        assert_eq!(
+            journal.active_skip(&key).unwrap().as_deref(),
+            Some("ticket 7")
+        );
+        assert!(journal.skip_rejected(&key, "again").is_err(), "double skip");
+        let summary = journal.summary().unwrap();
+        assert_eq!(
+            (summary.skipped, summary.planned, summary.confirmed),
+            (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn skip_never_applies_to_uncertain_or_attributed_transfers() {
+        let (_dir, mut journal, key) = fixture();
+        reject(&mut journal, &key);
+        // A later attempt makes the record uncertain: a skip must be refused.
+        prepare(&mut journal, &key);
+        assert!(journal.skip_rejected(&key, "no").is_err());
+        journal.authorize_literal(&key).unwrap();
+        assert!(journal.skip_rejected(&key, "no").is_err());
+        journal.acknowledge(&key, 9, 5).unwrap();
+        assert!(journal.skip_rejected(&key, "no").is_err());
+        assert_eq!(journal.summary().unwrap().skipped, 0);
+    }
+
+    #[test]
+    fn a_skip_loses_force_if_the_transfer_leaves_planned_and_unskip_is_audited() {
+        let (_dir, mut journal, key) = fixture();
+        reject(&mut journal, &key);
+        journal.skip_rejected(&key, "first").unwrap();
+        journal.unskip(&key, "provider fixed").unwrap();
+        assert_eq!(journal.active_skip(&key).unwrap(), None);
+        assert!(journal.unskip(&key, "twice").is_err());
+        journal.skip_rejected(&key, "second").unwrap();
+        // Defense in depth: even a stale skip cannot hide an uncertain transfer.
+        journal
+            .0
+            .execute("UPDATE transfers SET state='uncertain'", [])
+            .unwrap();
+        assert_eq!(journal.active_skip(&key).unwrap(), None);
+        let actions: Vec<String> = journal
+            .0
+            .prepare("SELECT action FROM operator_skip_events ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(actions, ["skip", "unskip", "skip"]);
+    }
+
+    #[test]
+    fn schema_three_upgrades_additively_to_four_with_a_backup_and_status_reads_old_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        let mut journal = Journal::create(&path, "b").unwrap();
+        let key = MessageKey {
+            folder: "INBOX".into(),
+            uid_validity: 7,
+            uid: 3,
+        };
+        journal.plan(&key, b"body").unwrap();
+        journal
+            .0
+            .execute_batch("DROP TABLE operator_skip_events; PRAGMA user_version=3;")
+            .unwrap();
+        drop(journal);
+        // Offline status must read a schema-3 journal without upgrading it.
+        let old = Journal::open_read_only(&path).unwrap();
+        assert_eq!(old.summary().unwrap().skipped, 0);
+        drop(old);
+        let version = |p: &Path| -> i64 {
+            Connection::open(p)
+                .unwrap()
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(version(&path), 3);
+        let upgraded = Journal::open(&path).unwrap();
+        assert_eq!(version(&path), 4);
+        assert_eq!(version(&dir.path().join("journal.sqlite3.v3.bak")), 3);
+        assert_eq!(
+            upgraded.record(&key).unwrap().unwrap().hash,
             fingerprint(b"body")
         );
     }

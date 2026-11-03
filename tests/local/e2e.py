@@ -206,6 +206,8 @@ class ProtocolServer:
         self.source_fetch_no = False
         self.wrong_rejection_tag = False
         self.restart_once = False
+        self.idle_drop = None  # seconds; destination connection silently closes when idle this long
+        self.drop_on_append = False  # destination closes without a reply when APPEND arrives
         self.throttle_code = b'THROTTLED'
         self.source_validity = 77
         self.destination_validity = 77
@@ -231,6 +233,7 @@ class ProtocolServer:
                 enabled = mode == 'rev2'
                 user = None
                 while True:
+                    if user == 'destination' and self.idle_drop: client.settimeout(self.idle_drop)
                     line = reader.readline()
                     if not line: return
                     tag, verb, *args = line.strip().split(b' ',2)
@@ -244,6 +247,7 @@ class ProtocolServer:
                         if mode.endswith('bad-auth'):
                             client.sendall(tag+b' NO rejected credential: '+PASSWORD.encode()+b'\r\n')
                             continue
+                    elif verb == b'NOOP': pass
                     elif verb == b'ENABLE':
                         if not mode.endswith('noack'):
                             enabled = True
@@ -314,8 +318,11 @@ class ProtocolServer:
                         assert user == 'destination'
                         match = re.search(rb'\{(\d+)\}$',line.strip()); assert match
                         n = int(match.group(1))
+                        if self.drop_on_append: return
                         if self.rejection_script:
                             rejection=self.rejection_script.pop(0)
+                            if rejection == b'-':  # code-less NO
+                                client.sendall(tag+b' NO PRIVATE rejection\r\n'); continue
                             if rejection:
                                 client.sendall(tag+b' NO ['+rejection+b'] PRIVATE rejection\r\n'); continue
                         if self.reject_once:

@@ -65,6 +65,33 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Record an audited operator decision NOT to migrate a permanently rejected message.
+    Skip {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        folder: String,
+        #[arg(long)]
+        uid: u32,
+        /// Why this message cannot be migrated (recorded in the journal and reports).
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reverse an operator skip so migrate attempts the message again.
+    Unskip {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        folder: String,
+        #[arg(long)]
+        uid: u32,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect historical journal evidence. Does not connect to an IMAP server.
     Status {
         #[arg(long)]
@@ -157,18 +184,39 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             &engine::recover_not_sent(&Config::load(&config)?, &folder, uid)?,
             json,
         ),
+        Command::Skip {
+            config,
+            folder,
+            uid,
+            reason,
+            json,
+        } => print_report(
+            &engine::skip(&Config::load(&config)?, &folder, uid, &reason)?,
+            json,
+        ),
+        Command::Unskip {
+            config,
+            folder,
+            uid,
+            reason,
+            json,
+        } => print_report(
+            &engine::unskip(&Config::load(&config)?, &folder, uid, &reason)?,
+            json,
+        ),
         Command::Status { state, json } => {
             let summary = Journal::open_read_only(&state)?.summary()?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
                 println!(
-                    "Scope: {}\nPlanned: {}\nUncertain: {}\nAccepted: {}\nContent confirmed: {}",
+                    "Scope: {}\nPlanned: {}\nUncertain: {}\nAccepted: {}\nContent confirmed: {}\nSkipped by operator (not migrated): {}",
                     summary.scope,
                     summary.planned,
                     summary.uncertain,
                     summary.accepted,
-                    summary.confirmed
+                    summary.confirmed,
+                    summary.skipped
                 );
             }
             Ok(ExitCode::from(2))

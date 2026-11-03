@@ -190,6 +190,43 @@ search alone is never enough. Genuinely ambiguous transfers still require manual
 review; there is no force-retry switch. See the [second audit follow-up](docs/SECOND_AUDIT_FOLLOWUP.md)
 for the durable fence, zero-length handling and remaining H3 limitations.
 
+### Rejected messages: classification and the operator skip
+
+A tagged `NO` to APPEND is classified by what it implies for the *next* message,
+not matched against a retry list. Only the first two rows let later messages
+proceed; nothing is ever replayed in the same invocation.
+
+| Scope | Examples | Behavior |
+| --- | --- | --- |
+| message | `TOOBIG`, `CONTENTREJECTED` | rejected, stays planned, later messages continue |
+| size-dependent | `OVERQUOTA` | same; a smaller message may fit |
+| transient | `UNAVAILABLE`, `THROTTLED`, `INUSE`, `LIMIT` | bounded, interruptible breaker |
+| mailbox | `NOPERM`, `NONEXISTENT`, `TRYCREATE` | stop, name the mailbox scope |
+| account | `AUTHENTICATIONFAILED`, `AUTHORIZATIONFAILED`, `EXPIRED`, `PRIVACYREQUIRED` | stop, name the account scope |
+| ambiguous | `CANNOT`, `SERVERBUG`, code-less, unknown or provider-specific text, any `BAD` | stop for operator review |
+
+Only a fixed allowlist of code names is ever stored; other server text is reduced
+to `UNSPECIFIED`. If a message can never be migrated (for example a provider keeps
+refusing it), an operator can record that decision. This contacts no server:
+
+```sh
+imaplane skip   --config migration.toml --folder INBOX --uid 123 --reason "ticket 42: provider refuses this message" --json
+imaplane unskip --config migration.toml --folder INBOX --uid 123 --reason "provider fixed" --json
+```
+
+`skip` works only on a planned, never-attributed message that already has a
+durable tagged rejection. It requires a reason (at most 500 characters, no control
+characters), appends to an audit log and changes no transfer state. A skipped
+message is reported as `skipped_by_operator`, is **not** counted as migrated, and
+keeps `complete` false and the exit code at 2 for as long as the skip stands.
+`unskip` returns the message to the normal path. `status` shows the skipped count.
+
+Before an APPEND is prepared, a destination connection that has been idle for
+2 seconds or more (for example during a slow source read) is probed with `NOOP`
+and replaced if dead, then re-selected with the UIDVALIDITY check. A successful
+probe cannot promise the connection survives the APPEND itself; a failure during
+APPEND is still uncertain and never replayed.
+
 ## Preservation policy and limitations
 
 - `\Recent` is session-only and never copied. `\Deleted` is intentionally omitted
@@ -248,10 +285,11 @@ for the durable fence, zero-length handling and remaining H3 limitations.
   deliveries. A second EXAMINE checks UIDVALIDITY. Inventory/count discrepancies
   (including concurrent expunges) retry boundedly and never publish a partial
   successful snapshot. Empty folders do not issue an inventory FETCH.
-- Existing schema 1/2 journals upgrade additively to schema 3. Transfer states,
+- Existing schema 1/2/3 journals upgrade additively to schema 4 (an empty
+  operator-skip audit log), after a private pre-upgrade backup. Transfer states,
   bindings, fingerprints and legacy evidence are preserved. Old uncertain records
-  acquire no fabricated pre-send evidence. Offline status reads versions 1/2/3
-  without writing or upgrading; older binaries cannot open schema-3 journals.
+  acquire no fabricated pre-send evidence. Offline status reads versions 1-4
+  without writing or upgrading; older binaries cannot open schema-4 journals.
 - Repeated identical destination APPEND rejections back off 1, 2, 4… seconds
   (maximum 120 seconds per pause) and open a run-wide circuit after
   `append_rejection_limit` consecutive status/code pairs (default 3, range 1..100).

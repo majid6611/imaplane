@@ -87,6 +87,7 @@ python3 tests/local/e2e.py target/release/imaplane
 python3 tests/local/reliability.py target/release/imaplane
 python3 tests/local/crash_matrix.py
 python3 tests/local/h5_crash_matrix.py
+python3 tests/local/c1_u1.py target/release/imaplane
 python3 -m unittest discover -s tests/local -p 'test_*.py'
 ```
 

@@ -67,6 +67,14 @@ fn entry(
         candidate_uids: Vec::new(),
     }
 }
+fn skipped_entry(key: &MessageKey, record: &Record, reason: &str) -> Entry {
+    entry(
+        key,
+        Some(record),
+        "skipped_by_operator",
+        format!("NOT migrated: operator skipped this rejected message ({reason})"),
+    )
+}
 fn transient(e: &anyhow::Error) -> bool {
     crate::transport::is_transient(e) || e.is::<SnapshotChanged>()
 }
@@ -221,7 +229,13 @@ struct DestinationReader<'a> {
     destination: Destination,
     selected: Option<(String, u32, bool)>,
     cached: Option<Selected>,
+    last_activity: std::time::Instant,
 }
+/// A destination left idle this long (e.g. while a large or slow source message
+/// is read) is probed before an APPEND is prepared. A successful probe cannot
+/// promise the connection survives the APPEND itself; that residual risk keeps
+/// the existing uncertain-and-never-replayed handling.
+const PROBE_AFTER_IDLE: Duration = Duration::from_secs(2);
 impl<'a> DestinationReader<'a> {
     fn new(config: &'a Config, password: &'a str) -> Result<Self> {
         Ok(Self {
@@ -237,11 +251,25 @@ impl<'a> DestinationReader<'a> {
             password,
             selected: None,
             cached: None,
+            last_activity: std::time::Instant::now(),
         })
+    }
+    fn touch(&mut self) {
+        self.last_activity = std::time::Instant::now();
+    }
+    /// Detect an idle-dropped destination BEFORE any journal transition for the
+    /// next APPEND. A dead connection is replaced through the normal read path,
+    /// which re-selects the original mode and rechecks UIDVALIDITY; the caller
+    /// then takes its baseline from that fresh selection.
+    fn ensure_live(&mut self) -> Result<()> {
+        if self.last_activity.elapsed() < PROBE_AFTER_IDLE {
+            return Ok(());
+        }
+        self.read(|d| d.noop())
     }
     fn read<T>(&mut self, mut f: impl FnMut(&mut Destination) -> Result<T>) -> Result<T> {
         let mut reconnect = false;
-        retry(self.config.read_attempts, || {
+        let value = retry(self.config.read_attempts, || {
             if reconnect {
                 self.destination = Destination::connect(
                     &self.config.destination,
@@ -268,7 +296,9 @@ impl<'a> DestinationReader<'a> {
             }
             reconnect = true;
             f(&mut self.destination)
-        })
+        })?;
+        self.touch();
+        Ok(value)
     }
 
     fn select(&mut self, name: &str, writable: bool) -> Result<Selected> {
@@ -468,6 +498,11 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     }
                     continue;
                 }
+                if let Some(reason) = job.journal.active_skip(&key)? {
+                    // Operator decision: nothing is fetched or sent. NOT migrated.
+                    report.entries.push(skipped_entry(&key, &r, &reason));
+                    continue;
+                }
             }
             let message = match source.read(|s| s.message(*uid)) {
                 Ok(Some(m)) => m,
@@ -515,6 +550,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                 ));
                 continue;
             }
+            dest.ensure_live()?;
             let current = dest.writable_selection(&mapping.destination)?;
             if current.validity != selected.validity {
                 bail!("destination UIDVALIDITY changed before APPEND");
@@ -547,7 +583,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
             }
             crate::fault::point("before_append");
             // NEVER retry this operation. Its state is durable before sending bytes.
-            match dest.destination.append(
+            let appended = dest.destination.append(
                 &mapping.destination,
                 &message,
                 r.flags.as_ref().context("missing planned flags")?,
@@ -561,7 +597,9 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     crate::fault::point("before_literal_send");
                     Ok(())
                 },
-            ) {
+            );
+            dest.touch();
+            match appended {
                 Ok((dv, du)) => {
                     crate::fault::point("after_append_reply");
                     if dv != selected.validity || du < baseline.1 {
@@ -584,28 +622,36 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                 Err(e) if crate::transport::append_rejection(&e).is_some() => {
                     let proof = crate::transport::append_rejection(&e).unwrap();
                     job.journal.reject_append(&key, &proof)?;
-                    // OVERQUOTA may depend on this message's size. Do not let
-                    // large messages permanently block later smaller messages.
-                    if !proof.server_wide() && !matches!(proof.code, "TOOBIG" | "OVERQUOTA") {
-                        report.entries.push(entry(
-                            &key,
-                            Some(&r),
-                            "rejected",
-                            format!(
-                                "APPEND {} [{}]; unclassified rejection; no automatic replay",
-                                proof.status, proof.code
-                            ),
-                        ));
-                        report.halt_reason = Some(
-                            "unclassified destination rejection; operator review required".into(),
-                        );
-                        report.finish();
-                        return Ok(report);
-                    }
-                    if !proof.server_wide() {
-                        circuit.success();
-                        report.entries.push(entry(&key, Some(&r), "rejected", format!("APPEND {} [{}]; message rejected, retained as planned; continuing to later messages", proof.status, proof.code)));
-                        continue;
+                    use crate::transport::RejectionScope as Scope;
+                    let scope = proof.scope();
+                    match scope {
+                        // This message alone (or its size against quota) is the
+                        // reason; later messages are independent. Never replayed.
+                        Scope::Message | Scope::SizeDependent => {
+                            circuit.success();
+                            report.entries.push(entry(&key, Some(&r), "rejected", format!("APPEND {} [{}]; {} rejection, retained as planned; continuing to later messages", proof.status, proof.code, scope.name())));
+                            continue;
+                        }
+                        Scope::Transient => {}
+                        Scope::Mailbox | Scope::Account | Scope::Ambiguous => {
+                            report.entries.push(entry(&key, Some(&r), "rejected", format!("APPEND {} [{}]; {} rejection, retained as planned; no automatic replay", proof.status, proof.code, scope.name())));
+                            report.halt_reason = Some(match scope {
+                                Scope::Mailbox => format!(
+                                    "destination mailbox rejected APPEND [{}]; no further messages attempted; fix the destination folder (existence, permissions) and rerun",
+                                    proof.code
+                                ),
+                                Scope::Account => format!(
+                                    "destination account or session rejected APPEND [{}]; no further messages attempted; restore account access and rerun",
+                                    proof.code
+                                ),
+                                _ => format!(
+                                    "unclassified destination rejection [{}]; operator review required; if this message can never be migrated, record that decision with the skip command, otherwise resolve the destination and rerun",
+                                    proof.code
+                                ),
+                            });
+                            report.finish();
+                            return Ok(report);
+                        }
                     }
                     let consecutive = circuit.reject(&proof);
                     report.entries.push(entry(&key, Some(&r), "rejected", format!("APPEND {} [{}]; retained as planned; consecutive identical rejections: {consecutive}", proof.status, proof.code)));
@@ -842,12 +888,16 @@ pub fn verify(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     .entries
                     .push(reconcile(&r, &mut dest, selected.validity)?);
             } else if r.destination.is_none() {
-                report.entries.push(entry(
-                    &key,
-                    Some(&r),
-                    "not_transferred",
-                    "message was planned but not uploaded",
-                ));
+                if let Some(reason) = job.journal.active_skip(&key)? {
+                    report.entries.push(skipped_entry(&key, &r, &reason));
+                } else {
+                    report.entries.push(entry(
+                        &key,
+                        Some(&r),
+                        "not_transferred",
+                        "message was planned but not uploaded",
+                    ));
+                }
             } else {
                 report.entries.push(verify_record(
                     &mut job.journal,
@@ -917,6 +967,52 @@ pub fn recover_not_sent(c: &Config, folder: &str, uid: u32) -> Result<Report> {
         "retry_authorized",
         "durable attempt fence proves literal was never authorized; zero matching candidates",
     ));
+    Ok(report)
+}
+
+/// Record an explicit operator decision not to migrate a permanently rejected
+/// message. Contacts no server, changes no transfer state, uploads nothing, and
+/// can never make a run complete: the message remains reported as not migrated.
+pub fn skip(c: &Config, folder: &str, uid: u32, reason: &str) -> Result<Report> {
+    skip_or_unskip(c, folder, uid, reason, true)
+}
+/// Reverse `skip` so the message follows the normal migrate path again.
+pub fn unskip(c: &Config, folder: &str, uid: u32, reason: &str) -> Result<Report> {
+    skip_or_unskip(c, folder, uid, reason, false)
+}
+fn skip_or_unskip(c: &Config, folder: &str, uid: u32, reason: &str, skip: bool) -> Result<Report> {
+    require_mappings(c)?;
+    c.folders
+        .iter()
+        .find(|f| f.source == folder)
+        .context("folder is not configured")?;
+    let mut job = Job::open(c, false)?;
+    let record = job
+        .journal
+        .records()?
+        .into_iter()
+        .find(|r| r.key.folder == folder && r.key.uid == uid)
+        .context("no transfer record with this folder and UID")?;
+    let mut report = Report::new(if skip {
+        "audited operator skip; no server contacted; the message is NOT migrated"
+    } else {
+        "audited operator unskip; no server contacted; rerun migrate to transfer the message"
+    });
+    if skip {
+        job.journal.skip_rejected(&record.key, reason)?;
+        report
+            .entries
+            .push(skipped_entry(&record.key, &record, reason));
+    } else {
+        job.journal.unskip(&record.key, reason)?;
+        report.entries.push(entry(
+            &record.key,
+            Some(&record),
+            "unskipped",
+            "skip reversed; the message will be attempted again by migrate",
+        ));
+    }
+    report.finish();
     Ok(report)
 }
 

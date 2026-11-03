@@ -232,6 +232,39 @@ pub fn is_transient(e: &anyhow::Error) -> bool {
     e.downcast_ref::<ProtocolError>()
         .is_some_and(|e| e.transient)
 }
+/// What a tagged APPEND rejection implies about the *next* message. This is a
+/// statement about semantics, not a retry list: only `Transient` may be waited out,
+/// only `Message`/`SizeDependent` may let later messages proceed, and everything
+/// else stops the run so an operator decides. No variant authorizes a replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RejectionScope {
+    /// Server-wide and expected to clear (rate limits, maintenance): bounded breaker.
+    Transient,
+    /// The content or size of this one message is the reason (RFC 5530/9051).
+    Message,
+    /// Depends on this message's size against remaining quota; a smaller one may fit.
+    SizeDependent,
+    /// The destination mailbox is missing, forbidden or unusable: every later
+    /// message to it would fail the same way.
+    Mailbox,
+    /// Credentials, authorization or account policy: not recoverable by continuing.
+    Account,
+    /// Unknown, provider-specific, code-less or self-contradictory: stay conservative.
+    Ambiguous,
+}
+impl RejectionScope {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Message => "message",
+            Self::SizeDependent => "size-dependent",
+            Self::Mailbox => "mailbox",
+            Self::Account => "account",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
 /// Evidence is obtainable only from a parsed, matching tagged NO/BAD response.
 #[derive(Clone, Debug)]
 pub(crate) struct AppendRejection {
@@ -239,8 +272,22 @@ pub(crate) struct AppendRejection {
     pub status: &'static str,
 }
 impl AppendRejection {
-    pub(crate) fn server_wide(&self) -> bool {
-        matches!(self.code, "UNAVAILABLE" | "THROTTLED" | "INUSE" | "LIMIT")
+    pub(crate) fn scope(&self) -> RejectionScope {
+        // BAD means the command itself was malformed or unsupported. A response
+        // code on a BAD cannot make it a safe per-message or transient condition.
+        if self.status != "NO" {
+            return RejectionScope::Ambiguous;
+        }
+        match self.code {
+            "UNAVAILABLE" | "THROTTLED" | "INUSE" | "LIMIT" => RejectionScope::Transient,
+            "TOOBIG" | "CONTENTREJECTED" => RejectionScope::Message,
+            "OVERQUOTA" => RejectionScope::SizeDependent,
+            "NOPERM" | "NONEXISTENT" | "TRYCREATE" => RejectionScope::Mailbox,
+            "AUTHENTICATIONFAILED" | "AUTHORIZATIONFAILED" | "EXPIRED" | "PRIVACYREQUIRED" => {
+                RejectionScope::Account
+            }
+            _ => RejectionScope::Ambiguous,
+        }
     }
 }
 
@@ -249,7 +296,51 @@ pub(crate) fn append_rejection(error: &anyhow::Error) -> Option<AppendRejection>
         .downcast_ref::<ProtocolError>()
         .and_then(|e| e.rejection.clone())
 }
-fn rejection_code(code: Option<&imap_proto::ResponseCode<'_>>) -> &'static str {
+/// Codes IMAPLANE can name in evidence. Anything else is reported only as
+/// UNSPECIFIED, so server-controlled text never reaches the journal or reports.
+const NAMED_CODES: &[&str] = &[
+    "UNAVAILABLE",
+    "THROTTLED",
+    "INUSE",
+    "LIMIT",
+    "OVERQUOTA",
+    "TOOBIG",
+    "CONTENTREJECTED",
+    "NOPERM",
+    "NONEXISTENT",
+    "TRYCREATE",
+    "AUTHENTICATIONFAILED",
+    "AUTHORIZATIONFAILED",
+    "EXPIRED",
+    "PRIVACYREQUIRED",
+    "CANNOT",
+    "SERVERBUG",
+    "CLIENTBUG",
+    "CONTACTADMIN",
+    "UNKNOWN-CTE",
+];
+/// The vendored parser types only a few codes; the rest arrive as leading
+/// `[ATOM ...]` text. Only a strict, bounded atom is considered, then matched
+/// case-insensitively against the fixed allowlist above.
+fn code_from_text(information: &str) -> &'static str {
+    let Some(rest) = information.strip_prefix('[') else {
+        return "UNSPECIFIED";
+    };
+    let end = rest.find([']', ' ']).unwrap_or(rest.len()).min(33);
+    let atom = &rest[..end];
+    if atom.is_empty()
+        || atom.len() > 32
+        || !atom.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return "UNSPECIFIED";
+    }
+    NAMED_CODES
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(atom))
+        .copied()
+        .unwrap_or("UNSPECIFIED")
+}
+fn rejection_code(code: Option<&imap_proto::ResponseCode<'_>>, information: &str) -> &'static str {
     use imap_proto::ResponseCode::*;
     match code {
         Some(Unavailable) => "UNAVAILABLE",
@@ -258,7 +349,9 @@ fn rejection_code(code: Option<&imap_proto::ResponseCode<'_>>) -> &'static str {
         Some(Limit) => "LIMIT",
         Some(OverQuota) => "OVERQUOTA",
         Some(TooBig) => "TOOBIG",
-        _ => "UNSPECIFIED",
+        Some(TryCreate) => "TRYCREATE",
+        Some(_) => "UNSPECIFIED",
+        None => code_from_text(information),
     }
 }
 trait SafeImap<T> {
@@ -272,11 +365,11 @@ impl<T> SafeImap<T> for imap::Result<T> {
             let permanent_message = matches!(&e, imap::Error::No(no) if matches!(no.code, Some(imap_proto::ResponseCode::TooBig)));
             let rejection = match &e {
                 imap::Error::No(no) => Some(AppendRejection {
-                    code: rejection_code(no.code.as_ref()),
+                    code: rejection_code(no.code.as_ref(), &no.information),
                     status: "NO",
                 }),
                 imap::Error::Bad(bad) => Some(AppendRejection {
-                    code: rejection_code(bad.code.as_ref()),
+                    code: rejection_code(bad.code.as_ref(), &bad.information),
                     status: "BAD",
                 }),
                 _ => None,
@@ -689,6 +782,16 @@ impl Destination {
     pub fn select(&mut self, folder: &str) -> Result<Selected> {
         self.0.select_folder(folder, true)
     }
+    /// Destination-only liveness probe. It carries no message data and, being
+    /// a read of connection state, never takes part in an uncertain transfer.
+    pub fn noop(&mut self) -> Result<()> {
+        self.0.reset(OVERHEAD);
+        self.0
+            .session
+            .noop()
+            .safe()
+            .context("destination NOOP liveness probe")
+    }
     pub fn create(&mut self, folder: &str) -> Result<()> {
         let name = self.0.encoding.encode(folder)?;
         self.0.reset(OVERHEAD);
@@ -1044,6 +1147,63 @@ mod tests {
         assert_eq!(a.process(b""), b"user=user\x01auth=Bearer secret\x01\x01");
         assert!(a.process(b"{error}").is_empty());
         assert!(a.process(b"").is_empty());
+    }
+    #[test]
+    fn untyped_rejection_codes_are_classified_by_scope_not_retry_lists() {
+        use RejectionScope::*;
+        for (text, code, scope) in [
+            ("[NOPERM] PRIVATE", "NOPERM", Mailbox),
+            ("[nonexistent] x", "NONEXISTENT", Mailbox),
+            ("[AUTHENTICATIONFAILED]", "AUTHENTICATIONFAILED", Account),
+            ("[EXPIRED] x", "EXPIRED", Account),
+            ("[CONTENTREJECTED] spam", "CONTENTREJECTED", Message),
+            ("[CANNOT] x", "CANNOT", Ambiguous),
+            ("[SERVERBUG] x", "SERVERBUG", Ambiguous),
+            ("[X-PROVIDER-QUIRK] x", "UNSPECIFIED", Ambiguous),
+            ("APPEND failed", "UNSPECIFIED", Ambiguous),
+        ] {
+            let rejection = AppendRejection {
+                code: rejection_code(None, text),
+                status: "NO",
+            };
+            assert_eq!((rejection.code, rejection.scope()), (code, scope), "{text}");
+        }
+    }
+    #[test]
+    fn code_extraction_is_strict_and_bounded() {
+        for hostile in [
+            "[",
+            "[]",
+            "[ NOPERM]",
+            "NOPERM]",
+            " [NOPERM]",
+            "[NOPERM\r\nX] x",
+            "[NOP\u{0}ERM]",
+            "[NOPERMNOPERMNOPERMNOPERMNOPERMNOPERMNOPERM]",
+            "[NOPERM-] x",
+        ] {
+            assert_eq!(code_from_text(hostile), "UNSPECIFIED", "{hostile:?}");
+        }
+        assert_eq!(code_from_text("[NoPerm]"), "NOPERM");
+        assert_eq!(code_from_text("[UNKNOWN-CTE] x"), "UNKNOWN-CTE");
+    }
+    #[test]
+    fn typed_codes_keep_existing_scopes_and_bad_is_never_trusted() {
+        use RejectionScope::*;
+        let scope = |code, status| AppendRejection { code, status }.scope();
+        for (code, expected) in [
+            ("UNAVAILABLE", Transient),
+            ("THROTTLED", Transient),
+            ("INUSE", Transient),
+            ("LIMIT", Transient),
+            ("TOOBIG", Message),
+            ("OVERQUOTA", SizeDependent),
+            ("TRYCREATE", Mailbox),
+        ] {
+            assert_eq!(scope(code, "NO"), expected, "{code}");
+            // A BAD cannot be a benign per-message or transient condition.
+            assert_eq!(scope(code, "BAD"), Ambiguous, "BAD {code}");
+        }
     }
     #[test]
     fn protocol_diagnostics_discard_untrusted_payload() {
