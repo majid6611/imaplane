@@ -61,6 +61,11 @@ pub struct Config {
     pub max_message_bytes: usize,
     #[serde(default = "attempts")]
     pub read_attempts: u32,
+    #[serde(default = "rejection_limit")]
+    pub append_rejection_limit: u32,
+}
+fn rejection_limit() -> u32 {
+    3
 }
 fn timeout() -> u64 {
     60
@@ -69,7 +74,7 @@ fn max_message() -> usize {
     64 * 1024 * 1024
 }
 fn attempts() -> u32 {
-    3
+    6
 }
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
@@ -117,10 +122,13 @@ impl Config {
         }
         if !(1..=3600).contains(&c.timeout_seconds)
             || !(1..=10).contains(&c.read_attempts)
+            || !(1..=100).contains(&c.append_rejection_limit)
             || c.max_message_bytes == 0
             || c.max_message_bytes > 1024 * 1024 * 1024
         {
-            bail!("invalid limits: timeout 1..3600, attempts 1..10, message bytes 1..1073741824");
+            bail!(
+                "invalid limits: timeout 1..3600, attempts 1..10, rejection limit 1..100, message bytes 1..1073741824"
+            );
         }
         let mut sources = std::collections::HashSet::new();
         let mut destinations = std::collections::HashSet::new();

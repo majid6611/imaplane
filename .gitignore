@@ -9,3 +9,5 @@
 
 # Local project brief; never publish.
 /IMAPLANE_PROJECT_BRIEF.md
+
+/vendor/imap/Cargo.lock

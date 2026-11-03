@@ -1,5 +1,96 @@
 # Reliability and security audit — 2026-11-02
 
+Latest follow-up: [second independent audit prerequisites and recovery](SECOND_AUDIT_FOLLOWUP.md).
+It supersedes historical schema/rejection/recovery descriptions below; see
+[the performance baseline](PERFORMANCE_BASELINE.md) for the fixed measurement method.
+
+
+
+## Independent audit follow-up — 2026-11-02
+
+Claude's complete report was read before changes. H1–H4 and M1–M2 were then
+independently checked against the adapters, engine, journal and upstream client.
+All six findings were confirmed. The table below supersedes historical statements
+in the earlier audit about timeouts, inventories and stopping on every failure.
+
+| Finding | Implemented correction and evidence | Remaining limits |
+| --- | --- | --- |
+| H1 — command-wide deadline | Socket and TLS byte progress renew an idle deadline without renewing the response-size budget. Raw TLS-record progress also counts. Slow FETCH, slow APPEND upload and delayed progressing APPEND replies exceed a 1-second timeout while preserving exact bytes. | Setup retains absolute deadlines; no minimum-throughput or total transfer deadline. |
+| H2 — one permanent message blocks the job | Oversize, completed size-mismatch and non-transient per-message NO errors are isolated only after a synchronized response. Reports use skipped_permanent / verification_failed_permanent, remain incomplete, and later messages proceed. Repeated runs do not duplicate already confirmed transfers. | No operator skip list or failure-count switch; unsafe protocol/transport failures still stop. Permanent failures are reconsidered on rerun rather than silently accepted. |
+| H3 — definite rejection becomes permanently uncertain | The upstream client discarded pre-literal rejection evidence. A narrow vendored patch now validates the response tag and preserves NO/BAD. A FULL-durability journal transaction records rejection evidence and restores planned state. Before-/after-literal rejection and mismatched-tag regressions cover this path. | Partially resolved: ambiguous APPENDs still require audited operator attribution. No zero-candidate “not appended” command or automatic unique-match attribution was added. |
+| H4 — weak retries and reconnect failures escape | Safe-operation retries include connect and re-EXAMINE failures, verify UIDVALIDITY, and use exponential delays, jitter and a retry window. Structured UNAVAILABLE, THROTTLED, INUSE and LIMIT codes are classified separately from arbitrary prose. Tests stop a server during FETCH, refuse reconnects, then restore it; startup refusal also recovers. | Six attempts by default; explicit old read_attempts values remain effective. Unknown TLS/setup errors fail conservatively. This is not a provider-specific throttling policy. |
+| M1 — termination/EINTR | ctrlc termination feature handles SIGTERM/SIGHUP. Socket/TLS wrappers retry Interrupted without losing partial state or resetting deadlines. A Linux test targets a blocked recv with SIGUSR1 and SA_RESTART disabled. SIGTERM/HUP/INT during APPEND and SIGTERM/INT during silent TLS setup are tested. A signal during the final message also marks the report interrupted. | Graceful stop waits for the active operation's completion or idle/setup timeout; SIGKILL remains inherently uncertain. Signal tests do not simulate every OpenSSL or kernel path. |
+| M2 — live snapshot races | Inventory FETCH is bounded by initial UIDNEXT-1; EXISTS is compared within that horizon and UIDVALIDITY rechecked. Concurrent delivery is excluded; an existing durable snapshot remains unchanged on resume. Inconsistent inventories retry within the read budget. Empty snapshots skip FETCH. | Continuous expunges or nonconforming inventories can exhaust retries safely; snapshots are per-folder rather than globally atomic. |
+
+Returning a rejected APPEND to planned relies on the IMAP server honoring the
+required rollback on unsuccessful APPEND. See [RFC 9051 §6.3.12](https://www.rfc-editor.org/rfc/rfc9051.html#section-6.3.12)
+and [RFC 3501 §6.3.11](https://www.rfc-editor.org/rfc/rfc3501#section-6.3.11).
+A dropped reply supplies no such evidence. A unique content match may be a
+concurrent identical delivery; zero candidates may reflect expunge or visibility
+changes. Neither is a safe proof for automatic retry or attribution. Existing
+uncertain journals are deliberately not rewritten using hindsight.
+
+No source mutation API was added. The source wire allowlist and Dovecot source
+snapshot comparisons remain part of the tests. Existing schema versions 1 and 2,
+account bindings and explicit configuration values remain supported; rejection
+evidence is an additive table, not a transfer-state format change.
+
+H5 and the other M/L findings remain outside this iteration, including performance,
+source-deletion acceptance, destination adoption, OAuth refresh, provider testing,
+folder subscriptions, release hardening and large-scale memory profiling. Source-side empty
+inventory handling (part of M11) was addressed as part of M2; destination
+reconciliation still uses the existing inventory path. No production-readiness or
+live-provider compatibility claim is made.
+
+### Repeatable validation
+
+Use a Rust toolchain with OpenSSL development libraries, Python 3, OpenSSL, and
+Docker/Compose for the real-server tests. All IMAP fixtures use throwaway accounts
+and loopback or the private lab network; certificate verification stays enabled.
+From the repository root:
+
+```sh
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --manifest-path vendor/imap-proto/Cargo.toml --target-dir target/vendor-tests
+cargo test --manifest-path vendor/imap/Cargo.toml --lib --target-dir target/vendor-client-tests
+cargo build --release --locked
+cargo audit
+python3 tests/local/security.py target/release/imaplane
+python3 tests/local/e2e.py target/release/imaplane
+python3 tests/local/reliability.py target/release/imaplane
+python3 -m unittest discover -s tests/compose -p 'test_*.py'
+# Deletes/reseeds only the disposable imaplane-lab volumes and test state:
+./scripts/lab.sh reset
+./scripts/lab.sh test
+./scripts/lab.sh recovery
+```
+
+Local result: 25 project tests, 82 parser tests (15 documentation examples ignored
+upstream), 137 client unit tests, and 5 offline lab tests passed. Formatting and
+Clippy passed; cargo-audit found zero known vulnerabilities/warnings using
+RustSec database commit 263a4d951a0867d4bddc29dddd6d59427c78f9a7.
+All three release-binary TLS suites passed: security, disposable Dovecot e2e,
+and reliability faults. The latter covers a throttled 16 MiB APPEND, slow FETCH
+and APPEND replies, permanent-message isolation, tagged quota/size rejection
+before and after the literal, mismatched tags, retryable NO codes, server restart
+during FETCH with failed reconnects, startup refusal, concurrent delivery, empty
+folders, and signal handling during APPEND and silent TLS setup. Existing e2e
+coverage also passed for dropped APPEND replies and audited uncertain attribution.
+
+The Compose reset/build succeeded with Rust 1.85.1. Its 120-message migration
+and verification passed, including 360 attachment instances, duplicate
+multiplicity, metadata, three preexisting destination messages, untrusted-CA
+rejection and unchanged source snapshots. SIGINT and SIGKILL recovery each
+completed all 120 transfers with no duplicate uploads and an unchanged source.
+Generated reports remain in ignored tests/compose/.runtime/client/reports/.
+These results do not cover hardware power loss, arbitrary disk failures,
+100k-message soak runs, external providers or arm64. Package installation and
+release workflows were not exercised in this iteration.
+
+## Historical audit record
+
 Scope: current Rust CLI, durable transfer state, source immutability, protocol
 adapters, memory/credential handling, new XOAUTH2/STARTTLS paths and package/release
 automation. This is a code review plus local automated validation, not a security

@@ -137,7 +137,7 @@ fn legacy_journal_upgrade_preserves_evidence_and_status_is_read_only() {
     assert_eq!(
         c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
 }
 

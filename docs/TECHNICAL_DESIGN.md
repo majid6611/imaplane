@@ -22,7 +22,7 @@ ambiguity must remain visible and block another upload of that source record.
 
 One Rust process, one source connection and one destination connection initially.
 Separate protocol adapters from the migration state machine and SQLite journal.
-The source adapter exposes only capability negotiation, LIST, EXAMINE, UID SEARCH,
+The source adapter exposes only capability negotiation, LIST, EXAMINE, bounded UID FETCH,
 UID FETCH with BODY.PEEK[], and LOGOUT. Authentication and ENABLE are permitted
 session operations. No generic command escape hatch in the migration engine.
 Never use SELECT, STORE, COPY, MOVE, CLOSE, EXPUNGE, CREATE or subscription commands
@@ -104,10 +104,14 @@ match alone does not prove which upload created a message. Never auto-retry an
 ambiguous record. A future explicit operator resolution command must preserve an
 audit trail; no silent conversion from uncertain to confirmed.
 
-Transient reads may retry with bounded backoff and jitter. Authentication,
-certificate, quota, permission, unsupported protocol and mapping errors fail
-clearly. APPEND retries always pass through reconciliation. Ctrl-C stops between
-operations; interruption during APPEND leaves durable uncertainty.
+Transient safe reads and connection setup retry with exponential backoff and jitter;
+failed reconnects consume the same attempt budget and restored selections must
+retain UIDVALIDITY. Established I/O uses progress-aware idle timeouts; TLS setup
+retains an absolute deadline. Permanent synchronized per-message errors are
+reported incomplete while later messages proceed. A matching tagged APPEND NO/BAD
+is recorded as rejection evidence and returns to planned for a future invocation.
+Ambiguous APPENDs are never automatically replayed. SIGINT/SIGTERM/SIGHUP request
+a stop; an active APPEND may complete and verify, or retain uncertainty on failure.
 
 ## Verification and reporting
 
@@ -169,7 +173,9 @@ Implementation decisions refining the initial plan:
 - A small vendored imap-proto patch accepts rev2-only CAPABILITY responses; the
   upstream version demands IMAP4rev1. Adapter regression tests correct quoted
   LIST escapes without unescaping literal folder data. Snapshot inventories use
-  UID FETCH 1:* (UID), avoiding legacy SEARCH/ESEARCH differences in rev2.
+  UID FETCH 1:(UIDNEXT-1) (UID), avoiding SEARCH/ESEARCH differences and
+  excluding deliveries after the initial EXAMINE. Empty inventories skip FETCH;
+  inconsistent counts retry safely and UIDVALIDITY is checked again.
 - The source adapter issues only authentication, capability/ENABLE, LIST, EXAMINE
   and UID FETCH operations. Disconnects close sockets, never CLOSE/EXPUNGE.
 - The synchronous APPEND API accepts a byte slice. The current implementation
@@ -215,3 +221,13 @@ Native Debian/Rocky build containers, checksum-pinned nFPM and a four-target
 GitHub Actions package/release workflow are included. ELF architecture checks and
 clean install/uninstall tests gate publication. See PACKAGING.md for distro
 boundaries and the distinction between configured and actually tested targets.
+
+
+## Pre-optimization safety prerequisites
+
+See [SECOND_AUDIT_FOLLOWUP.md](SECOND_AUDIT_FOLLOWUP.md) for the schema-3
+pre-literal durable fence, safe explicit recovery, rejection circuit and
+compatibility details. [PERFORMANCE_BASELINE.md](PERFORMANCE_BASELINE.md)
+defines the deterministic crash matrix and instrumented fresh/resume benchmark.
+These changes preserve FULL durability and exact verification. They do not
+implement H5 optimizations.

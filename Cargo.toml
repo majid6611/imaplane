@@ -4,15 +4,19 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Safety-first IMAP mailbox migration"
-license = "Apache-2.0"
+license = "MIT"
 publish = false
+
+[features]
+default = []
+fault-injection = []
 
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
 chrono = "0.4.45"
 clap = { version = "4", features = ["derive"] }
-ctrlc = "3.5.2"
+ctrlc = { version = "3.5.2", features = ["termination"] }
 fs2 = "0.4.3"
 imap = "3.0.0-alpha.15"
 imap-proto = "0.16.7"
@@ -32,3 +36,4 @@ tempfile = "3"
 
 [patch.crates-io]
 imap-proto = { path = "vendor/imap-proto" }
+imap = { path = "vendor/imap" }

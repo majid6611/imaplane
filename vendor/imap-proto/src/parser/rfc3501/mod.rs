@@ -173,12 +173,24 @@ fn resp_text_code_unseen(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
     )(i)
 }
 
+fn resp_text_code_reliability(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
+    alt((
+        map(tag_no_case(b"UNAVAILABLE"), |_| ResponseCode::Unavailable),
+        map(tag_no_case(b"THROTTLED"), |_| ResponseCode::Throttled),
+        map(tag_no_case(b"INUSE"), |_| ResponseCode::InUse),
+        map(tag_no_case(b"LIMIT"), |_| ResponseCode::Limit),
+        map(tag_no_case(b"OVERQUOTA"), |_| ResponseCode::OverQuota),
+        map(tag_no_case(b"TOOBIG"), |_| ResponseCode::TooBig),
+    ))(i)
+}
+
 fn resp_text_code(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
     // Per the spec, the closing tag should be "] ".
     // See `resp_text` for more on why this is done differently.
     delimited(
         tag(b"["),
         alt((
+            resp_text_code_reliability,
             resp_text_code_alert,
             resp_text_code_badcharset,
             resp_text_code_capability,

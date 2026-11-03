@@ -54,7 +54,7 @@ cargo install --path . --locked
 DEB and RPM build/install scripts and a gated GitHub Actions release workflow
 are included; see [packaging instructions](docs/PACKAGING.md). No GitHub release
 has been published by this local session. Keep the `vendor/` directory:
-its small, documented parser patch is required for rev2-only capability parsing.
+its documented parser and APPEND literal-guard patches are required.
 See [third-party notes](vendor/README.md).
 
 ## Test a real migration
@@ -170,6 +170,23 @@ is historical content evidence; use `verify` for live content and metadata check
 `verify` uses the saved source evidence and contacts only the destination, so it
 cannot report later source changes or prove an atomic cross-server snapshot.
 
+
+For an uncertain transfer with no matching destination candidate, the new
+`recover` command can authorize a future attempt **only** if schema-3 attempt
+evidence proves literal sending was never authorized:
+
+```sh
+imaplane recover --config examples/migration.toml --folder INBOX --uid 123 --json
+imaplane migrate --config examples/migration.toml --json
+```
+
+Recovery performs no upload and exits 2 with `retry_authorized`. It refuses
+legacy/missing evidence, already authorized literals, changed UIDVALIDITY,
+matching candidates and an incomplete/over-limit candidate search. An empty
+search alone is never enough. Genuinely ambiguous transfers still require manual
+review; there is no force-retry switch. See the [second audit follow-up](docs/SECOND_AUDIT_FOLLOWUP.md)
+for the durable fence, zero-length handling and remaining H3 limitations.
+
 ## Preservation policy and limitations
 
 - `\Recent` is session-only and never copied. `\Deleted` is intentionally omitted
@@ -196,15 +213,50 @@ cannot report later source changes or prove an atomic cross-server snapshot.
   attribute migration, binary literal8 extensions and unusual server responses
   are not fully supported. Explicit mappings do not detect every server's hidden
   case-insensitivity or shared namespace aliases; review exact destination names.
-- Read failures retry with bounded backoff. APPEND is never retried automatically,
-  including conservative uncertainty on some explicit server rejections. Ctrl-C
-  requests a stop between operations; an in-flight network operation may run
-  until its configured timeout. Killing the process may require attribution.
-- Version 2 journals remain unchanged. Version 1 journals upgrade transactionally
-  without changing bindings, fingerprints or transfer states. Missing legacy
-  metadata is not invented: old uncertain transfers remain uncertain and legacy
-  content-only confirmation is not treated as full metadata verification. Offline
-  status can read either version without upgrading or writing it.
+- Established IMAP connections use progress-aware idle timeouts. Positive socket
+  or TLS I/O renews the idle deadline; TLS handshakes and STARTTLS negotiation
+  retain absolute setup deadlines. There is no minimum-throughput requirement.
+- Safe reads and connection establishment retry up to `read_attempts` (default 6,
+  existing explicit values respected), with 1-second exponential backoff, a
+  120-second base-delay cap, up to 249 ms jitter, and a 600-second retry window per
+  operation. A healthy progressing command is never cut off by that retry window.
+  Failed reconnects and session restoration consume attempts. Authentication
+  rejection, certificate errors, malformed responses and changed UIDVALIDITY
+  fail conservatively. Structured NO codes UNAVAILABLE, THROTTLED, INUSE and
+  LIMIT are retryable on safe operations; arbitrary server prose is ignored.
+- Oversized messages, completed reads with an RFC822.SIZE mismatch, and permanent
+  message-specific TOOBIG rejections are isolated where the session remains synchronized.
+  `skipped_permanent` and `verification_failed_permanent` keep the report incomplete
+  (exit 2), while later messages continue. They are checked again on rerun.
+  Broken/ambiguous protocol sessions still stop the pass. There is no manual
+  skip list or general per-message failure limit; the destination rejection
+  circuit below is separate.
+- APPEND is never automatically replayed. A matching tagged NO/BAD rejection is
+  recorded durably and returns the transfer to `planned`, for a future run after
+  the operator addresses the failure. Other messages can continue. Dropped replies,
+  malformed/mismatched tags and missing APPENDUID remain `uncertain`.
+  Neither zero candidates nor one content match proves an ambiguous APPEND's
+  outcome; manual audited attribution remains necessary.
+- Ctrl-C, SIGTERM and SIGHUP request a graceful stop. Interrupted socket calls
+  retry without resetting setup deadlines. An in-flight APPEND can finish and
+  be verified before stopping; a silent operation may wait for its timeout.
+  Forced termination can still leave durable uncertainty.
+- Source snapshots use the initial UIDNEXT as a fixed horizon, excluding later
+  deliveries. A second EXAMINE checks UIDVALIDITY. Inventory/count discrepancies
+  (including concurrent expunges) retry boundedly and never publish a partial
+  successful snapshot. Empty folders do not issue an inventory FETCH.
+- Existing schema 1/2 journals upgrade additively to schema 3. Transfer states,
+  bindings, fingerprints and legacy evidence are preserved. Old uncertain records
+  acquire no fabricated pre-send evidence. Offline status reads versions 1/2/3
+  without writing or upgrading; older binaries cannot open schema-3 journals.
+- Repeated identical destination APPEND rejections back off 1, 2, 4… seconds
+  (maximum 120 seconds per pause) and open a run-wide circuit after
+  `append_rejection_limit` consecutive status/code pairs (default 3, range 1..100).
+  A successful APPEND resets the count; a different pair starts a new streak.
+  JSON `halt_reason` explains the stop. Rejected records remain planned, later
+  messages remain unattempted, and no APPEND is replayed in that run. After fixing
+  destination limits, rerun with the same state directory. SIGTERM/Ctrl-C can stop
+  during the pauses. Unknown server codes are reported as UNSPECIFIED.
 - Testing covers local Dovecot 2.3 plus rev1/rev2 scripted TLS fixtures. Large-scale,
   multi-provider, sustained performance, full RFC9051 interoperability, quotas,
   malicious-server fuzzing and all crash/power-loss/storage failures have not been
@@ -242,6 +294,7 @@ python3 tests/local/security.py
 python3 tests/local/e2e.py
 # Or pass a release binary:
 python3 tests/local/e2e.py target/release/imaplane
+python3 tests/local/reliability.py target/release/imaplane
 ```
 
 The suite starts two disposable Dovecot containers from a pinned image, uses
@@ -259,8 +312,8 @@ reconnect and refusal paths. Scripted TLS fixtures exercise rev1,
 rev2-only, dual-mode ENABLE, UTF8=ONLY and unsuccessful enablement. See
 [technical design](docs/TECHNICAL_DESIGN.md) for architecture and remaining gates.
 
-Licensed under [Apache-2.0](LICENSE). The vendored parser retains its upstream
-MIT/Apache-2.0 licenses. No imapcopy source code is included.
+Licensed under the [MIT License](LICENSE). Vendored dependencies retain their
+upstream licenses, including MIT/Apache-2.0. No imapcopy source code is included.
 
 
 ## XOAUTH2 and mandatory STARTTLS
@@ -321,11 +374,35 @@ server-echoed credentials through error output. A failed read that leaves sessio
 state uncertain stops the pass rather than continuing uploads on that session.
 
 
-Latest local validation (2026-11-02): **23 project tests and 82 parser tests pass**;
-Clippy/formatting pass; the expanded Dovecot migration/crash suite and local
-XOAUTH2/STARTTLS security suites pass against release binaries. amd64 DEB and RPM
-packages pass clean installation, execution and removal. cargo-audit reports zero
-known crate vulnerabilities/warnings at the advisory database revision recorded
-in the audit. These results do not establish live Gmail/Microsoft 365 compatibility
-or tested arm64 support; those remain explicitly unvalidated here. Package
-builds collect dependency and Rust toolchain notices automatically.
+Latest reliability validation (2026-11-02): **28 project tests, 82 parser tests,
+138 vendored client tests, 5 offline lab tests and 2 benchmark harness tests pass**. Formatting and Clippy
+pass. All three release TLS suites pass, including slow uploads, quota rejection,
+failed reconnects and termination. The Compose 120-message migration, verification,
+SIGINT and SIGKILL recovery pass with unchanged source mail and no duplicate
+uploads. See the audit record for repeatable commands and detailed limits. cargo-audit reports zero known vulnerabilities or warnings
+at database revision `263a4d951a0867d4bddc29dddd6d59427c78f9a7`.
+Package installation checks from the earlier audit were not repeated in this
+iteration. Live Gmail/Microsoft 365, other server implementations, arm64 and
+production-scale operation remain unvalidated. This is a technical preview.
+
+
+## Baseline and crash testing before optimization
+
+See [the fixed benchmark method](docs/PERFORMANCE_BASELINE.md) and
+[second audit follow-up](docs/SECOND_AUDIT_FOLLOWUP.md). No major performance
+optimizations are included in this iteration. Default/package builds contain
+no active crash-injection hook.
+
+```sh
+cargo build --release --locked
+cargo build --locked --features fault-injection --target-dir target/fault-tests
+python3 tests/local/crash_matrix.py target/fault-tests/debug/imaplane
+python3 -m unittest discover -s tests/local -p 'test_*.py'
+python3 tests/local/benchmark.py --binary target/release/imaplane \
+  --messages 100 --latency-ms 0 25 50 --repeats 3 \
+  --output /tmp/imaplane-baseline.json
+```
+
+Fault binaries deliberately SIGKILL themselves at test points. Use the regular
+release binary for real migrations. All harness endpoints are disposable local
+Dovecot servers with test-only credentials and verified TLS.

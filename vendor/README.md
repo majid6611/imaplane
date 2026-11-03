@@ -20,3 +20,15 @@ read-write mode are rejected explicitly.
 
 Upstream copyright/license texts are retained as LICENSE-MIT and LICENSE-APACHE
 (retrieved from the upstream repository; the crates.io archive omitted them).
+
+
+The parser also retains structured UNAVAILABLE, THROTTLED, INUSE, LIMIT,
+OVERQUOTA and TOOBIG response codes. This supports sanitized retry/rejection
+classification without examining or retaining arbitrary server prose.
+
+`imap` 3.0.0-alpha.15 is also vendored (MIT OR Apache-2.0). Its narrow APPEND
+patch preserves tag-checked pre-literal rejections and adds a fallible durable
+literal guard; see [its patch notes](imap/IMAPLANE_PATCH.md). Upstream license
+texts are retained in that directory. Functional changes remain in client.rs;
+upstream client/parser regression suites run separately in CI. Keep both patched
+crates when building IMAPLANE.

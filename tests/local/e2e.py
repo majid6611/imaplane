@@ -50,7 +50,9 @@ class Proxy:
     Drops an APPEND success reply after upstream committed it when armed.
     Can also drop the first source UID FETCH to test reconnect behavior.
     """
-    def __init__(self, port, cert, key, drop_append=False, drop_fetch=False, pause_append=False, pause_verify=False):
+    def __init__(self, port, cert, key, drop_append=False, drop_fetch=False, pause_append=False, pause_verify=False, latency_ms=0):
+        self.latency_ms = latency_ms
+        self.round_trips = 0
         self.upstream = port
         self.listener = socket.socket()
         self.listener.bind(('127.0.0.1', 0))
@@ -74,6 +76,9 @@ class Proxy:
         self.errors = []
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
+    def exchange(self):
+        self.round_trips += 1
+        if self.latency_ms: time.sleep(self.latency_ms / 1000)
     def serve(self):
         while not self.stopped:
             try:
@@ -108,19 +113,22 @@ class Proxy:
                             self.pause_verify = False
                             self.verify_waiting.set()
                             assert self.resume_verify.wait(30), 'test did not release paused verification'
+                        self.exchange()
                         server.sendall(line)
                         append = verb == b'APPEND'
                         if verb == b'AUTHENTICATE':
+                            self.exchange()
                             response = sf.readline()
                             client.sendall(response)
                             server.sendall(cf.readline())
                         if append:
+                            self.exchange()
                             response = sf.readline()
                             client.sendall(response)
                             if response.startswith(b'+'):
                                 size = int(re.search(rb'\{(\d+)\}\r\n$', line).group(1))
                                 payload = cf.read(size + 2)
-                                assert len(payload) == size + 2
+                                if len(payload) != size + 2: return # Expected EOF at pre-literal crash points.
                                 server.sendall(payload)
                         while True:
                             response = sf.readline()
@@ -163,12 +171,27 @@ class ProtocolServer:
     """Protocol fixture for rev1/rev2 negotiation and message transfer over TLS."""
     def __init__(self, cert, key, mode):
         self.mode = mode
-        self.listener = socket.socket(); self.listener.bind(('127.0.0.1',0)); self.listener.listen(10)
+        self.listener = socket.socket(); self.listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); self.listener.bind(('127.0.0.1',0)); self.listener.listen(10)
         self.listener.settimeout(.2); self.port = self.listener.getsockname()[1]
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); self.ctx.load_cert_chain(cert,key)
         self.stopped = False; self.errors = []
         self.missing_inventory = False
         self.failed_body = False
+        self.events = []
+        self.injected = False
+        self.reject_once = False
+        self.rejection_script = []
+        self.reject_after = False
+        self.concurrent = False
+        self.throttle_once = False
+        self.slow = False
+        self.append_wait = False
+        self.slow_upload = False
+        self.bad_size = False
+        self.source_fetch_no = False
+        self.wrong_rejection_tag = False
+        self.restart_once = False
+        self.throttle_code = b'THROTTLED'
         self.source_validity = 77
         self.destination_validity = 77
         self.messages = {'source': [b'Subject: protocol fixture\r\n\r\nraw message\r\n'], 'destination': []}
@@ -195,6 +218,7 @@ class ProtocolServer:
                     if not line: return
                     tag, verb, *args = line.strip().split(b' ',2)
                     verb = verb.upper()
+                    self.events.append((user, verb, args))
                     if verb == b'CAPABILITY': client.sendall(b'* CAPABILITY '+caps+b'\r\n')
                     elif verb == b'AUTHENTICATE':
                         client.sendall(b'+ \r\n')
@@ -208,6 +232,9 @@ class ProtocolServer:
                             enabled = True
                             client.sendall(b'* ENABLED '+args[0]+b'\r\n')
                     elif verb == b'LIST':
+                        if self.throttle_once:
+                            self.throttle_once = False
+                            client.sendall(tag+b' NO ['+self.throttle_code+b'] PRIVATE retry later\r\n'); continue
                         name = '台北/📬'
                         wire = name.encode() if enabled else utf7(name).encode()
                         client.sendall(b'* LIST () "/" {'+str(len(wire)).encode()+b'}\r\n'+wire+b'\r\n')
@@ -219,10 +246,15 @@ class ProtocolServer:
                         validity = self.source_validity if user == 'source' else self.destination_validity
                         client.sendall(b'* FLAGS (\\Seen)\r\n* '+str(count).encode()+b' EXISTS\r\n* OK [PERMANENTFLAGS (\\Seen)] flags\r\n* OK [UIDVALIDITY '+str(validity).encode()+b'] validity\r\n* OK [UIDNEXT '+str(count+1).encode()+b'] next\r\n')
                         client.sendall(tag+b' OK '+(b'[READ-ONLY]' if verb == b'EXAMINE' else b'[READ-WRITE]')+b' selected\r\n')
+                        if self.concurrent and user == 'source':
+                            self.concurrent = False
+                            self.messages[user].append(b'Subject: concurrent delivery\r\n\r\nnew\r\n')
                         continue
                     elif verb == b'UID':
-                        if args[0] == b'FETCH 1:* (UID)':
-                            for i in range(len(self.messages[user]) - (1 if self.missing_inventory and user == 'source' else 0)):
+                        if re.fullmatch(rb'FETCH 1:(?:\d+|\*) \(UID\)', args[0]):
+                            horizon = args[0].split()[1].split(b':')[1]
+                            upper = len(self.messages[user]) if horizon == b'*' else min(int(horizon), len(self.messages[user]))
+                            for i in range(upper - (1 if self.missing_inventory and user == 'source' else 0)):
                                 client.sendall(b'* '+str(i+1).encode()+b' FETCH (UID '+str(i+1).encode()+b')\r\n')
                         else:
                             match = re.fullmatch(rb'FETCH (\d+) (.*)',args[0])
@@ -231,8 +263,10 @@ class ProtocolServer:
                             if uid <= len(self.messages[user]):
                                 body = self.messages[user][uid-1]
                                 prefix = b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()
+                                if self.source_fetch_no and user=='source':
+                                    client.sendall(tag+b' NO [AUTHENTICATIONFAILED] PRIVATE expired token\r\n'); continue
                                 if request == b'(UID RFC822.SIZE)':
-                                    client.sendall(prefix+b' RFC822.SIZE '+str(len(body)).encode()+b')\r\n')
+                                    client.sendall(prefix+b' RFC822.SIZE '+str(len(body) + (1 if self.bad_size and user == 'source' and uid == 1 else 0)).encode()+b')\r\n')
                                 else:
                                     assert request == b'(UID FLAGS INTERNALDATE BODY.PEEK[])'
                                     if (not self.failed_body and mode.endswith('source-fault') and user == 'source') or (mode.endswith('destination-fault') and user == 'destination'):
@@ -243,12 +277,51 @@ class ProtocolServer:
                                         else:
                                             client.sendall(b'* GARBAGE PRIVATE_MAIL_BODY\r\n')
                                         return
-                                    client.sendall(prefix+b' FLAGS (\\Seen) INTERNALDATE "02-Jan-2020 03:04:05 +0000" BODY[] {'+str(len(body)).encode()+b'}\r\n'+body+b')\r\n')
+                                    if self.restart_once and user == 'source':
+                                        self.restart_once = False
+                                        self.stopped = True; self.listener.close()
+                                        client.sendall(prefix+b' BODY[] {999}\r\npartial')
+                                        def restart():
+                                            time.sleep(2)
+                                            listener = socket.socket(); listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+                                            listener.bind(('127.0.0.1',self.port)); listener.listen(10); listener.settimeout(.2)
+                                            self.listener = listener; self.stopped = False; self.serve()
+                                        threading.Thread(target=restart,daemon=True).start()
+                                        return
+                                    payload = prefix+b' FLAGS (\\Seen) INTERNALDATE "02-Jan-2020 03:04:05 +0000" BODY[] {'+str(len(body)).encode()+b'}\r\n'+body+b')\r\n'
+                                    if self.slow:
+                                        for offset in range(0, len(payload), 4096):
+                                            client.sendall(payload[offset:offset+4096]); time.sleep(.08)
+                                    else: client.sendall(payload)
                     elif verb == b'APPEND':
                         assert user == 'destination'
                         match = re.search(rb'\{(\d+)\}$',line.strip()); assert match
-                        n = int(match.group(1)); client.sendall(b'+ ready\r\n')
-                        data = reader.read(n+2); assert len(data) == n+2 and data.endswith(b'\r\n')
+                        n = int(match.group(1))
+                        if self.rejection_script:
+                            rejection=self.rejection_script.pop(0)
+                            if rejection:
+                                client.sendall(tag+b' NO ['+rejection+b'] PRIVATE rejection\r\n'); continue
+                        if self.reject_once:
+                            self.reject_once = False
+                            client.sendall((b'wrong-tag' if self.wrong_rejection_tag else tag)+b' NO [OVERQUOTA] PRIVATE quota\r\n'); continue
+                        client.sendall(b'+ ready\r\n')
+                        if self.slow_upload:
+                            chunks=[]; left=n+2; chunk_number=0
+                            while left:
+                                part=reader.read(min(left,4096)); assert part
+                                chunks.append(part); left-=len(part); chunk_number+=1
+                                if chunk_number % 64 == 0: client.sendall(b'* OK upload progress\r\n')
+                                time.sleep(.001)
+                            data=b''.join(chunks)
+                        else: data = reader.read(n+2)
+                        assert len(data) == n+2 and data.endswith(b'\r\n')
+                        if self.reject_after:
+                            self.reject_after = False
+                            client.sendall(tag+b' NO [TOOBIG] PRIVATE size\r\n'); continue
+                        if self.append_wait:
+                            self.injected = True
+                            for _ in range(20):
+                                client.sendall(b'* OK progress\r\n'); time.sleep(.1)
                         self.messages[user].append(data[:-2])
                         client.sendall(tag+b' OK [APPENDUID 77 '+str(len(self.messages[user])).encode()+b'] appended\r\n')
                         continue
@@ -287,259 +360,263 @@ def snapshot(m, folders):
         result[f] = (validity, rows)
     return result
 
-with tempfile.TemporaryDirectory(prefix='imaplane-e2e-') as tmp:
-    tmp = Path(tmp)
-    cert, key = tmp / 'tls.crt', tmp / 'tls.key'
-    command('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost')
-    password = tmp / 'password'
-    password.write_text(PASSWORD + '\n'); password.chmod(0o600)
-    containers, proxies, clients = [], [], []
-    try:
-        ports = []; starttls_ports = []
-        for role in ['source', 'destination']:
-            name = f'imaplane-e2e-{role}-{uuid.uuid4().hex[:8]}'
-            command('docker', 'run', '-d', '--name', name, '-p', '127.0.0.1::993', '-p', '127.0.0.1::143', '-v', f'{ROOT}/tests/local/dovecot.conf:/etc/dovecot/dovecot.conf:ro', '-v', f'{cert}:/etc/dovecot/tls.crt:ro', '-v', f'{key}:/etc/dovecot/tls.key:ro', IMAGE)
-            containers.append(name)
-            port = int(command('docker', 'port', name, '993/tcp').rsplit(':', 1)[1])
-            ports.append(port)
-            starttls_ports.append(int(command('docker','port',name,'143/tcp').rsplit(':',1)[1]))
-            for attempt in range(100):
-                try:
-                    m = connect(port, str(cert), 'fixture'); m.logout(); break
-                except (OSError, imaplib.IMAP4.error):
-                    time.sleep(.1)
-            else:
-                raise AssertionError(command('docker', 'logs', name))
-        src = connect(ports[0], str(cert), 'source'); clients.append(src)
-        dst = connect(ports[1], str(cert), 'destination'); clients.append(dst)
-        unicode_folder = '台北/📬 & "quoted" \\ folder'
-        folders = ['INBOX', unicode_folder]
-        assert src.create(quoted(unicode_folder))[0] == 'OK'
-        message = b'From: a@example.test\r\nTo: b@example.test\r\nMessage-ID: <duplicate@example.test>\r\nSubject: test\r\n\r\noriginal body\r\n'
-        for _ in range(2):
-            assert src.append('INBOX', None, '"02-Jan-2020 03:04:05 +0000"', message)[0] == 'OK'
-        binary = b'From: a@example.test\r\nSubject: attachment\r\nContent-Transfer-Encoding: base64\r\n\r\n' + base64.encodebytes(bytes(range(256)) * 4096).replace(b'\n', b'\r\n')
-        assert src.append(quoted(unicode_folder), '(\\Seen \\Flagged custom-keyword \\Deleted)', '"12-Feb-2021 04:05:06 +0530"', binary)[0] == 'OK'
-        assert dst.append('INBOX', '(\\Seen)', '"01-Jan-2019 00:00:00 +0000"', b'Subject: preexisting\r\n\r\nkeep me\r\n')[0] == 'OK'
-        before = snapshot(src, folders)
-        before_dst = snapshot(dst, ['INBOX'])
-        sp = Proxy(ports[0], str(cert), str(key), drop_fetch=True); proxies.append(sp)
-        dp = Proxy(ports[1], str(cert), str(key)); proxies.append(dp)
-        def config(name, source_port=sp.port, destination_port=dp.port, folder_list=None, ca=True, limit=64*1024*1024, auth='auto'):
-            folder_list = folder_list or [(f,f) for f in folders]
-            p = tmp / f'{name}.toml'
-            c = f'state_dir = "{tmp / name}"\nmax_message_bytes = {limit}\ntimeout_seconds = 5\n'
-            for role, port, user in [('source',source_port,'source'),('destination',destination_port,'destination')]:
-                c += f'[{role}]\nhost = "localhost"\nport = {port}\nusername = "{user}"\npassword_file = "{password}"\nauth = "{auth}"\n'
-                if ca: c += f'ca_file = "{cert}"\n'
-            for source, destination in folder_list:
-                c += '\n[[folders]]\nsource = ' + json.dumps(source, ensure_ascii=False) + '\ndestination = ' + json.dumps(destination, ensure_ascii=False) + '\n'
-            p.write_text(c)
-            return p
-        cfg = config('normal')
-        def run(*args, code=0):
-            p = subprocess.run([str(BIN), *map(str,args)], capture_output=True, text=True, timeout=90)
-            assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
-            assert PASSWORD not in p.stdout + p.stderr
-            return json.loads(p.stdout) if p.stdout else None
-        # Actual TLS sessions exercise the negotiated wire encoding, including a
-        # server returning tagged OK without enabling the requested capability.
-        for mode in ['rev1','dual','rev2','utf8','dual-noack','utf8-noack']:
-            server = ProtocolServer(str(cert),str(key),mode); proxies.append(server)
-            protocol_cfg = config('protocol-'+mode,source_port=server.port,destination_port=server.port,folder_list=[('台北/📬','台北/📬')])
-            if mode == 'utf8-noack':
-                run('inspect','--config',protocol_cfg,code=1)
-            else:
-                protocol_names = run('inspect','--config',protocol_cfg)
-                assert protocol_names['source'][0]['name'] == '台北/📬'
-                protocol_report = run('migrate','--config',protocol_cfg,'--json')
-                assert protocol_report['complete'] and len(protocol_report['entries']) == 1
-                run('migrate','--config',protocol_cfg,'--json')
-                assert len(server.messages['destination']) == 1
-                run('verify','--config',protocol_cfg,'--json')
-                server.source_validity = 78
-                run('migrate','--config',protocol_cfg,'--json',code=1)
-                assert len(server.messages['destination']) == 1
-                server.source_validity = 77
-                server.destination_validity = 78
-                changed = run('verify','--config',protocol_cfg,'--json',code=2)
-                assert changed['entries'][0]['result'] == 'destination_changed'
-                run('migrate','--config',protocol_cfg,'--json',code=2)
-                assert len(server.messages['destination']) == 1
-                server.destination_validity = 77
-                original = server.messages['destination'][0]
-                server.messages['destination'][0] = b'Subject: corrupted\r\n\r\nchanged\r\n'
-                changed = run('verify','--config',protocol_cfg,'--json',code=2)
-                assert changed['entries'][0]['result'] == 'mismatch'
-                server.messages['destination'][0] = original
-                run('verify','--config',protocol_cfg,'--json')
-        for fault in ['source-fault','destination-fault']:
-            server = ProtocolServer(str(cert),str(key),'dual-'+fault); proxies.append(server)
-            server.messages['source'] *= 2
-            fault_cfg = config('fault-'+fault,source_port=server.port,destination_port=server.port,folder_list=[('台北/📬','台北/📬')])
-            failed = run('migrate','--config',fault_cfg,'--json',code=2)
-            assert len(failed['entries']) == 1 and failed['entries'][0]['result'] == 'failed'
-            assert 'PRIVATE_MAIL_BODY' not in json.dumps(failed)
-            assert len(server.messages['destination']) == (0 if fault == 'source-fault' else 1)
-            if fault == 'destination-fault':
-                server.mode = 'dual'
-                run('migrate','--config',fault_cfg,'--json')
-                assert len(server.messages['destination']) == 2
-        missing_uids = ProtocolServer(str(cert),str(key),'dual'); proxies.append(missing_uids)
-        missing_uids.missing_inventory = True
-        inventory_cfg = config('missing-inventory',source_port=missing_uids.port,destination_port=missing_uids.port,folder_list=[('台北/📬','台北/📬')])
-        run('migrate','--config',inventory_cfg,'--json',code=1)
-        assert not missing_uids.messages['destination'], 'incomplete inventory was reported as a successful empty migration'
-        # A realistic large single-line literal at the configured cap, then one
-        # byte over it. The latter must fail before APPEND, not bypass the cap.
-        large = ProtocolServer(str(cert),str(key),'dual'); proxies.append(large)
-        cap = 16*1024*1024
-        large.messages['source'] = [b'Subject: large\r\n\r\n' + b'x'*(cap-len(b'Subject: large\r\n\r\n'))]
-        large_cfg = config('large',source_port=large.port,destination_port=large.port,folder_list=[('台北/📬','台北/📬')],limit=cap)
-        run('migrate','--config',large_cfg,'--json')
-        assert large.messages['destination'] == large.messages['source']
-        run('verify','--config',large_cfg,'--json')
-        run('migrate','--config',large_cfg,'--json')
-        assert len(large.messages['destination']) == 1
-        large.messages['source'][0] += b'x'
-        large.messages['destination'].clear()
-        over_cfg = config('over-limit',source_port=large.port,destination_port=large.port,folder_list=[('台北/📬','台北/📬')],limit=cap)
-        over = run('migrate','--config',over_cfg,'--json',code=2)
-        assert over['entries'][0]['result'] == 'failed' and not large.messages['destination']
-        auth_server = ProtocolServer(str(cert),str(key),'dual-bad-auth'); proxies.append(auth_server)
-        auth_cfg = config('bad-auth',source_port=auth_server.port,destination_port=auth_server.port,folder_list=[('台北/📬','台北/📬')])
-        run('inspect','--config',auth_cfg,code=1)
-        hostname_cfg = config('wrong-hostname')
-        hostname_cfg.write_text(hostname_cfg.read_text().replace('host = "localhost"','host = "127.0.0.1"'))
-        run('inspect','--config',hostname_cfg,code=1)
-        discovered = run('inspect','--config',cfg)
-        assert any(f['name'] == unicode_folder for f in discovered['source']), (discovered, unicode_folder)
-        run('migrate','--config',cfg,'--dry-run')
-        assert not (tmp / 'normal').exists()
-        assert snapshot(dst, ['INBOX']) == before_dst
-        first = run('migrate','--config',cfg,'--json')
-        assert first['complete'] and len(first['entries']) == 3
-        assert any('\\Deleted' in e['omitted_flags'] for e in first['entries'])
-        assert snapshot(src, folders) == before, 'source message data/flags/identity changed'
-        copied = snapshot(dst, folders)
-        assert len(copied['INBOX'][1]) == 3
-        assert copied['INBOX'][1][0] == before_dst['INBOX'][1][0], 'existing destination message changed'
-        run('migrate','--config',cfg,'--json')
-        assert snapshot(dst, folders) == copied, 'resume duplicated mail'
-        run('verify','--config',cfg,'--json')
-        assert snapshot(src, folders) == before
-        # New arrivals are outside the durable snapshot.
-        src.append('INBOX', None, None, b'Subject: later arrival\r\n\r\nlater\r\n')
-        after_arrival = snapshot(src,folders)
-        run('migrate','--config',cfg,'--json')
-        assert snapshot(dst, folders) == copied
-        # Verification catches destination flag changes, and migrate will not re-upload.
-        victim = next(e['destination_uid'] for e in first['entries'] if e['source_folder'] == 'INBOX')
-        dst.select('INBOX'); dst.uid('STORE', str(victim), '+FLAGS.SILENT', '(\\Seen)')
-        check = run('verify','--config',cfg,'--json',code=2)
-        assert any(e['result'] == 'mismatch' for e in check['entries'])
-        run('migrate','--config',cfg,'--json',code=2)
-        assert len(snapshot(dst, ['INBOX'])['INBOX'][1]) == 3
-        dst.select('INBOX'); dst.uid('STORE', str(victim), '-FLAGS.SILENT', '(\\Seen)')
-        run('verify','--config',cfg,'--json')
-        # Exclusive lock is acquired before network activity.
-        with open(tmp / 'normal/job.lock','r+') as locked:
-            fcntl.flock(locked,fcntl.LOCK_EX | fcntl.LOCK_NB)
-            run('migrate','--config',cfg,'--json',code=1)
-        # Trust failures must never fall back to plaintext.
-        bad_tls = config('bad-tls', ca=False)
-        run('inspect','--config',bad_tls,code=1)
-        # Size limits refuse copying without modifying the source.
-        small = config('small', folder_list=[(unicode_folder,'limited')],limit=1024)
-        small_report = run('migrate','--config',small,'--json',code=2)
-        assert any(e['result'] == 'failed' for e in small_report['entries'])
-        # LOGIN as well as SASL PLAIN over TLS.
-        login = config('login',auth='login')
-        run('inspect','--config',login)
-        # Drop a successful APPEND confirmation, then prove resume creates no duplicates.
-        loss = Proxy(ports[1],str(cert),str(key),drop_append=True); proxies.append(loss)
-        loss_cfg = config('loss',destination_port=loss.port,folder_list=[('INBOX','lost-reply')])
-        lost = run('migrate','--config',loss_cfg,'--json',code=2)
-        assert lost['entries'][0]['result'] == 'uncertain'
-        lost_count = len(snapshot(dst,['lost-reply'])['lost-reply'][1])
-        resumed = run('migrate','--config',loss_cfg,'--json',code=2)
-        uncertain = next(e for e in resumed['entries'] if e['result'] == 'uncertain')
-        assert len(uncertain['candidate_uids']) >= 1
-        # The other snapshot messages may copy, but the uncertain UID is never blindly retried.
-        after_loss = snapshot(dst,['lost-reply'])
-        run('migrate','--config',loss_cfg,'--json',code=2)
-        assert snapshot(dst,['lost-reply']) == after_loss
-        resolved = run('resolve','--config',loss_cfg,'--folder','INBOX','--uid',uncertain['source_uid'],'--destination-uid',uncertain['candidate_uids'][0],'--json',code=2)
-        assert resolved['entries'][0]['result'] == 'confirmed'
-        run('verify','--config',loss_cfg,'--json')
-        assert len(snapshot(dst,['lost-reply'])['lost-reply'][1]) == 3
-        # SIGINT lets the in-flight APPEND finish, then stops between operations.
-        paused = Proxy(ports[1],str(cert),str(key),pause_append=True); proxies.append(paused)
-        paused_cfg = config('interrupt',destination_port=paused.port,folder_list=[('INBOX','interrupt')])
-        proc = subprocess.Popen([str(BIN),'migrate','--config',str(paused_cfg),'--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-        assert paused.append_committed.wait(20)
-        proc.send_signal(signal.SIGINT)
-        time.sleep(.1)
-        paused.resume_append.set()
-        out, err = proc.communicate(timeout=30)
-        assert proc.returncode == 2, (out,err)
-        assert json.loads(out)['interrupted']
-        run('migrate','--config',paused_cfg,'--json')
-        assert len(snapshot(dst,['interrupt'])['interrupt'][1]) == 3
-        # SIGKILL while APPEND has committed leaves durable uncertainty.
-        killed = Proxy(ports[1],str(cert),str(key),pause_append=True); proxies.append(killed)
-        killed_cfg = config('killed',destination_port=killed.port,folder_list=[('INBOX','killed')])
-        proc = subprocess.Popen([str(BIN),'migrate','--config',str(killed_cfg),'--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-        assert killed.append_committed.wait(20)
-        proc.kill(); proc.communicate(timeout=10); killed.resume_append.set()
-        journal = run('status','--state',tmp / 'killed/journal.sqlite3','--json',code=2)
-        assert journal['uncertain'] == 1
-        recovered = run('migrate','--config',killed_cfg,'--json',code=2)
-        u = next(e for e in recovered['entries'] if e['result'] == 'uncertain')
-        count_after = len(snapshot(dst,['killed'])['killed'][1])
-        run('migrate','--config',killed_cfg,'--json',code=2)
-        assert len(snapshot(dst,['killed'])['killed'][1]) == count_after == 3
-        run('resolve','--config',killed_cfg,'--folder','INBOX','--uid',u['source_uid'],'--destination-uid',u['candidate_uids'][0],'--json',code=2)
-        run('verify','--config',killed_cfg,'--json')
-        # Kill after APPENDUID is durably accepted, before destination read-back.
-        accepted_proxy = Proxy(ports[1],str(cert),str(key),pause_verify=True); proxies.append(accepted_proxy)
-        accepted_cfg = config('accepted',destination_port=accepted_proxy.port,folder_list=[('INBOX','accepted')])
-        proc = subprocess.Popen([str(BIN),'migrate','--config',str(accepted_cfg),'--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-        assert accepted_proxy.verify_waiting.wait(20)
-        proc.kill(); proc.communicate(timeout=10); accepted_proxy.resume_verify.set()
-        journal = run('status','--state',tmp / 'accepted/journal.sqlite3','--json',code=2)
-        assert journal['accepted'] == 1 and journal['uncertain'] == 0
-        run('migrate','--config',accepted_cfg,'--json')
-        assert len(snapshot(dst,['accepted'])['accepted'][1]) == 3
-        assert snapshot(src,folders) == after_arrival, 'source changed during recovery tests'
-        # Destination deletion is reported, never compensated by a duplicate upload.
-        dst.select('INBOX'); dst.uid('STORE',str(victim),'+FLAGS.SILENT','(\\Deleted)'); dst.expunge()
-        missing = run('verify','--config',cfg,'--json',code=2)
-        assert any(e['result'] == 'missing' for e in missing['entries'])
-        run('migrate','--config',cfg,'--json',code=2)
-        assert len(snapshot(dst,['INBOX'])['INBOX'][1]) == 2
-        # Real Dovecot migration with mandatory STARTTLS at both endpoints.
-        real_starttls = config('real-starttls',source_port=starttls_ports[0],destination_port=starttls_ports[1],folder_list=[('INBOX','starttls-real')])
-        real_starttls.write_text(real_starttls.read_text().replace('host = "localhost"','security = "starttls"\nhost = "localhost"'))
-        run('migrate','--config',real_starttls,'--json')
-        run('verify','--config',real_starttls,'--json')
-        assert len(snapshot(dst,['starttls-real'])['starttls-real'][1]) == 3
-        assert snapshot(src,folders) == after_arrival
-        # The source adapter's entire transcript must stay inside this allowlist.
-        allowed = {'CAPABILITY','AUTHENTICATE','LOGIN','ENABLE','LIST','EXAMINE','UID'}
-        for verb, args in sp.commands:
-            assert verb in allowed, (verb,args)
-            if verb == 'UID':
-                assert args.startswith(('SEARCH ', 'FETCH ')), args
-                if 'BODY' in args:
-                    assert 'BODY.PEEK[]' in args, args
-        assert not sp.drop_fetch, 'source retry fault was not exercised'
-        assert not loss.drop_append, 'APPEND reply loss was not exercised'
-        assert all(not p.errors for p in proxies), [p.errors for p in proxies]
-        print('PASS: TLS, authentication, Unicode discovery/copy, literal bytes, dates/flags, duplicates, source immutability, source-read reconnect, snapshot resume, verification mismatch, locking, size limits, lost APPEND reply, audited attribution, source wire allowlist, rev1/rev2 wire negotiation and transfer, UIDVALIDITY changes, content corruption, missing destination messages, SIGINT and SIGKILL')
-    finally:
-        for p in proxies: p.close()
-        for m in clients:
-            with contextlib.suppress(Exception): m.logout()
-        for name in reversed(containers):
-            subprocess.run(['docker','rm','-f',name], stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+def main():
+    with tempfile.TemporaryDirectory(prefix='imaplane-e2e-') as tmp:
+        tmp = Path(tmp)
+        cert, key = tmp / 'tls.crt', tmp / 'tls.key'
+        command('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost')
+        password = tmp / 'password'
+        password.write_text(PASSWORD + '\n'); password.chmod(0o600)
+        containers, proxies, clients = [], [], []
+        try:
+            ports = []; starttls_ports = []
+            for role in ['source', 'destination']:
+                name = f'imaplane-e2e-{role}-{uuid.uuid4().hex[:8]}'
+                command('docker', 'run', '-d', '--name', name, '-p', '127.0.0.1::993', '-p', '127.0.0.1::143', '-v', f'{ROOT}/tests/local/dovecot.conf:/etc/dovecot/dovecot.conf:ro', '-v', f'{cert}:/etc/dovecot/tls.crt:ro', '-v', f'{key}:/etc/dovecot/tls.key:ro', IMAGE)
+                containers.append(name)
+                port = int(command('docker', 'port', name, '993/tcp').rsplit(':', 1)[1])
+                ports.append(port)
+                starttls_ports.append(int(command('docker','port',name,'143/tcp').rsplit(':',1)[1]))
+                for attempt in range(100):
+                    try:
+                        m = connect(port, str(cert), 'fixture'); m.logout(); break
+                    except (OSError, imaplib.IMAP4.error):
+                        time.sleep(.1)
+                else:
+                    raise AssertionError(command('docker', 'logs', name))
+            src = connect(ports[0], str(cert), 'source'); clients.append(src)
+            dst = connect(ports[1], str(cert), 'destination'); clients.append(dst)
+            unicode_folder = '台北/📬 & "quoted" \\ folder'
+            folders = ['INBOX', unicode_folder]
+            assert src.create(quoted(unicode_folder))[0] == 'OK'
+            message = b'From: a@example.test\r\nTo: b@example.test\r\nMessage-ID: <duplicate@example.test>\r\nSubject: test\r\n\r\noriginal body\r\n'
+            for _ in range(2):
+                assert src.append('INBOX', None, '"02-Jan-2020 03:04:05 +0000"', message)[0] == 'OK'
+            binary = b'From: a@example.test\r\nSubject: attachment\r\nContent-Transfer-Encoding: base64\r\n\r\n' + base64.encodebytes(bytes(range(256)) * 4096).replace(b'\n', b'\r\n')
+            assert src.append(quoted(unicode_folder), '(\\Seen \\Flagged custom-keyword \\Deleted)', '"12-Feb-2021 04:05:06 +0530"', binary)[0] == 'OK'
+            assert dst.append('INBOX', '(\\Seen)', '"01-Jan-2019 00:00:00 +0000"', b'Subject: preexisting\r\n\r\nkeep me\r\n')[0] == 'OK'
+            before = snapshot(src, folders)
+            before_dst = snapshot(dst, ['INBOX'])
+            sp = Proxy(ports[0], str(cert), str(key), drop_fetch=True); proxies.append(sp)
+            dp = Proxy(ports[1], str(cert), str(key)); proxies.append(dp)
+            def config(name, source_port=sp.port, destination_port=dp.port, folder_list=None, ca=True, limit=64*1024*1024, auth='auto'):
+                folder_list = folder_list or [(f,f) for f in folders]
+                p = tmp / f'{name}.toml'
+                c = f'state_dir = "{tmp / name}"\nmax_message_bytes = {limit}\ntimeout_seconds = 5\n'
+                for role, port, user in [('source',source_port,'source'),('destination',destination_port,'destination')]:
+                    c += f'[{role}]\nhost = "localhost"\nport = {port}\nusername = "{user}"\npassword_file = "{password}"\nauth = "{auth}"\n'
+                    if ca: c += f'ca_file = "{cert}"\n'
+                for source, destination in folder_list:
+                    c += '\n[[folders]]\nsource = ' + json.dumps(source, ensure_ascii=False) + '\ndestination = ' + json.dumps(destination, ensure_ascii=False) + '\n'
+                p.write_text(c)
+                return p
+            cfg = config('normal')
+            def run(*args, code=0):
+                p = subprocess.run([str(BIN), *map(str,args)], capture_output=True, text=True, timeout=90)
+                assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
+                assert PASSWORD not in p.stdout + p.stderr
+                return json.loads(p.stdout) if p.stdout else None
+            # Actual TLS sessions exercise the negotiated wire encoding, including a
+            # server returning tagged OK without enabling the requested capability.
+            for mode in ['rev1','dual','rev2','utf8','dual-noack','utf8-noack']:
+                server = ProtocolServer(str(cert),str(key),mode); proxies.append(server)
+                protocol_cfg = config('protocol-'+mode,source_port=server.port,destination_port=server.port,folder_list=[('台北/📬','台北/📬')])
+                if mode == 'utf8-noack':
+                    run('inspect','--config',protocol_cfg,code=1)
+                else:
+                    protocol_names = run('inspect','--config',protocol_cfg)
+                    assert protocol_names['source'][0]['name'] == '台北/📬'
+                    protocol_report = run('migrate','--config',protocol_cfg,'--json')
+                    assert protocol_report['complete'] and len(protocol_report['entries']) == 1
+                    run('migrate','--config',protocol_cfg,'--json')
+                    assert len(server.messages['destination']) == 1
+                    run('verify','--config',protocol_cfg,'--json')
+                    server.source_validity = 78
+                    run('migrate','--config',protocol_cfg,'--json',code=1)
+                    assert len(server.messages['destination']) == 1
+                    server.source_validity = 77
+                    server.destination_validity = 78
+                    changed = run('verify','--config',protocol_cfg,'--json',code=2)
+                    assert changed['entries'][0]['result'] == 'destination_changed'
+                    run('migrate','--config',protocol_cfg,'--json',code=2)
+                    assert len(server.messages['destination']) == 1
+                    server.destination_validity = 77
+                    original = server.messages['destination'][0]
+                    server.messages['destination'][0] = b'Subject: corrupted\r\n\r\nchanged\r\n'
+                    changed = run('verify','--config',protocol_cfg,'--json',code=2)
+                    assert changed['entries'][0]['result'] == 'mismatch'
+                    server.messages['destination'][0] = original
+                    run('verify','--config',protocol_cfg,'--json')
+            for fault in ['source-fault','destination-fault']:
+                server = ProtocolServer(str(cert),str(key),'dual-'+fault); proxies.append(server)
+                server.messages['source'] *= 2
+                fault_cfg = config('fault-'+fault,source_port=server.port,destination_port=server.port,folder_list=[('台北/📬','台北/📬')])
+                failed = run('migrate','--config',fault_cfg,'--json',code=2)
+                assert len(failed['entries']) == 1 and failed['entries'][0]['result'] == 'failed'
+                assert 'PRIVATE_MAIL_BODY' not in json.dumps(failed)
+                assert len(server.messages['destination']) == (0 if fault == 'source-fault' else 1)
+                if fault == 'destination-fault':
+                    server.mode = 'dual'
+                    run('migrate','--config',fault_cfg,'--json')
+                    assert len(server.messages['destination']) == 2
+            missing_uids = ProtocolServer(str(cert),str(key),'dual'); proxies.append(missing_uids)
+            missing_uids.missing_inventory = True
+            inventory_cfg = config('missing-inventory',source_port=missing_uids.port,destination_port=missing_uids.port,folder_list=[('台北/📬','台北/📬')])
+            run('migrate','--config',inventory_cfg,'--json',code=1)
+            assert not missing_uids.messages['destination'], 'incomplete inventory was reported as a successful empty migration'
+            # A realistic large single-line literal at the configured cap, then one
+            # byte over it. The latter must fail before APPEND, not bypass the cap.
+            large = ProtocolServer(str(cert),str(key),'dual'); proxies.append(large)
+            cap = 16*1024*1024
+            large.messages['source'] = [b'Subject: large\r\n\r\n' + b'x'*(cap-len(b'Subject: large\r\n\r\n'))]
+            large_cfg = config('large',source_port=large.port,destination_port=large.port,folder_list=[('台北/📬','台北/📬')],limit=cap)
+            run('migrate','--config',large_cfg,'--json')
+            assert large.messages['destination'] == large.messages['source']
+            run('verify','--config',large_cfg,'--json')
+            run('migrate','--config',large_cfg,'--json')
+            assert len(large.messages['destination']) == 1
+            large.messages['source'][0] += b'x'
+            large.messages['destination'].clear()
+            over_cfg = config('over-limit',source_port=large.port,destination_port=large.port,folder_list=[('台北/📬','台北/📬')],limit=cap)
+            over = run('migrate','--config',over_cfg,'--json',code=2)
+            assert over['entries'][0]['result'] == 'skipped_permanent' and not large.messages['destination']
+            auth_server = ProtocolServer(str(cert),str(key),'dual-bad-auth'); proxies.append(auth_server)
+            auth_cfg = config('bad-auth',source_port=auth_server.port,destination_port=auth_server.port,folder_list=[('台北/📬','台北/📬')])
+            run('inspect','--config',auth_cfg,code=1)
+            hostname_cfg = config('wrong-hostname')
+            hostname_cfg.write_text(hostname_cfg.read_text().replace('host = "localhost"','host = "127.0.0.1"'))
+            run('inspect','--config',hostname_cfg,code=1)
+            discovered = run('inspect','--config',cfg)
+            assert any(f['name'] == unicode_folder for f in discovered['source']), (discovered, unicode_folder)
+            run('migrate','--config',cfg,'--dry-run')
+            assert not (tmp / 'normal').exists()
+            assert snapshot(dst, ['INBOX']) == before_dst
+            first = run('migrate','--config',cfg,'--json')
+            assert first['complete'] and len(first['entries']) == 3
+            assert any('\\Deleted' in e['omitted_flags'] for e in first['entries'])
+            assert snapshot(src, folders) == before, 'source message data/flags/identity changed'
+            copied = snapshot(dst, folders)
+            assert len(copied['INBOX'][1]) == 3
+            assert copied['INBOX'][1][0] == before_dst['INBOX'][1][0], 'existing destination message changed'
+            run('migrate','--config',cfg,'--json')
+            assert snapshot(dst, folders) == copied, 'resume duplicated mail'
+            run('verify','--config',cfg,'--json')
+            assert snapshot(src, folders) == before
+            # New arrivals are outside the durable snapshot.
+            src.append('INBOX', None, None, b'Subject: later arrival\r\n\r\nlater\r\n')
+            after_arrival = snapshot(src,folders)
+            run('migrate','--config',cfg,'--json')
+            assert snapshot(dst, folders) == copied
+            # Verification catches destination flag changes, and migrate will not re-upload.
+            victim = next(e['destination_uid'] for e in first['entries'] if e['source_folder'] == 'INBOX')
+            dst.select('INBOX'); dst.uid('STORE', str(victim), '+FLAGS.SILENT', '(\\Seen)')
+            check = run('verify','--config',cfg,'--json',code=2)
+            assert any(e['result'] == 'mismatch' for e in check['entries'])
+            run('migrate','--config',cfg,'--json',code=2)
+            assert len(snapshot(dst, ['INBOX'])['INBOX'][1]) == 3
+            dst.select('INBOX'); dst.uid('STORE', str(victim), '-FLAGS.SILENT', '(\\Seen)')
+            run('verify','--config',cfg,'--json')
+            # Exclusive lock is acquired before network activity.
+            with open(tmp / 'normal/job.lock','r+') as locked:
+                fcntl.flock(locked,fcntl.LOCK_EX | fcntl.LOCK_NB)
+                run('migrate','--config',cfg,'--json',code=1)
+            # Trust failures must never fall back to plaintext.
+            bad_tls = config('bad-tls', ca=False)
+            run('inspect','--config',bad_tls,code=1)
+            # Size limits refuse copying without modifying the source.
+            small = config('small', folder_list=[(unicode_folder,'limited')],limit=1024)
+            small_report = run('migrate','--config',small,'--json',code=2)
+            assert any(e['result'] == 'skipped_permanent' for e in small_report['entries'])
+            # LOGIN as well as SASL PLAIN over TLS.
+            login = config('login',auth='login')
+            run('inspect','--config',login)
+            # Drop a successful APPEND confirmation, then prove resume creates no duplicates.
+            loss = Proxy(ports[1],str(cert),str(key),drop_append=True); proxies.append(loss)
+            loss_cfg = config('loss',destination_port=loss.port,folder_list=[('INBOX','lost-reply')])
+            lost = run('migrate','--config',loss_cfg,'--json',code=2)
+            assert lost['entries'][0]['result'] == 'uncertain'
+            lost_count = len(snapshot(dst,['lost-reply'])['lost-reply'][1])
+            resumed = run('migrate','--config',loss_cfg,'--json',code=2)
+            uncertain = next(e for e in resumed['entries'] if e['result'] == 'uncertain')
+            assert len(uncertain['candidate_uids']) >= 1
+            # The other snapshot messages may copy, but the uncertain UID is never blindly retried.
+            after_loss = snapshot(dst,['lost-reply'])
+            run('migrate','--config',loss_cfg,'--json',code=2)
+            assert snapshot(dst,['lost-reply']) == after_loss
+            resolved = run('resolve','--config',loss_cfg,'--folder','INBOX','--uid',uncertain['source_uid'],'--destination-uid',uncertain['candidate_uids'][0],'--json',code=2)
+            assert resolved['entries'][0]['result'] == 'confirmed'
+            run('verify','--config',loss_cfg,'--json')
+            assert len(snapshot(dst,['lost-reply'])['lost-reply'][1]) == 3
+            # SIGINT lets the in-flight APPEND finish, then stops between operations.
+            paused = Proxy(ports[1],str(cert),str(key),pause_append=True); proxies.append(paused)
+            paused_cfg = config('interrupt',destination_port=paused.port,folder_list=[('INBOX','interrupt')])
+            proc = subprocess.Popen([str(BIN),'migrate','--config',str(paused_cfg),'--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            assert paused.append_committed.wait(20)
+            proc.send_signal(signal.SIGINT)
+            time.sleep(.1)
+            paused.resume_append.set()
+            out, err = proc.communicate(timeout=30)
+            assert proc.returncode == 2, (out,err)
+            assert json.loads(out)['interrupted']
+            run('migrate','--config',paused_cfg,'--json')
+            assert len(snapshot(dst,['interrupt'])['interrupt'][1]) == 3
+            # SIGKILL while APPEND has committed leaves durable uncertainty.
+            killed = Proxy(ports[1],str(cert),str(key),pause_append=True); proxies.append(killed)
+            killed_cfg = config('killed',destination_port=killed.port,folder_list=[('INBOX','killed')])
+            proc = subprocess.Popen([str(BIN),'migrate','--config',str(killed_cfg),'--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            assert killed.append_committed.wait(20)
+            proc.kill(); proc.communicate(timeout=10); killed.resume_append.set()
+            journal = run('status','--state',tmp / 'killed/journal.sqlite3','--json',code=2)
+            assert journal['uncertain'] == 1
+            recovered = run('migrate','--config',killed_cfg,'--json',code=2)
+            u = next(e for e in recovered['entries'] if e['result'] == 'uncertain')
+            count_after = len(snapshot(dst,['killed'])['killed'][1])
+            run('migrate','--config',killed_cfg,'--json',code=2)
+            assert len(snapshot(dst,['killed'])['killed'][1]) == count_after == 3
+            run('resolve','--config',killed_cfg,'--folder','INBOX','--uid',u['source_uid'],'--destination-uid',u['candidate_uids'][0],'--json',code=2)
+            run('verify','--config',killed_cfg,'--json')
+            # Kill after APPENDUID is durably accepted, before destination read-back.
+            accepted_proxy = Proxy(ports[1],str(cert),str(key),pause_verify=True); proxies.append(accepted_proxy)
+            accepted_cfg = config('accepted',destination_port=accepted_proxy.port,folder_list=[('INBOX','accepted')])
+            proc = subprocess.Popen([str(BIN),'migrate','--config',str(accepted_cfg),'--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            assert accepted_proxy.verify_waiting.wait(20)
+            proc.kill(); proc.communicate(timeout=10); accepted_proxy.resume_verify.set()
+            journal = run('status','--state',tmp / 'accepted/journal.sqlite3','--json',code=2)
+            assert journal['accepted'] == 1 and journal['uncertain'] == 0
+            run('migrate','--config',accepted_cfg,'--json')
+            assert len(snapshot(dst,['accepted'])['accepted'][1]) == 3
+            assert snapshot(src,folders) == after_arrival, 'source changed during recovery tests'
+            # Destination deletion is reported, never compensated by a duplicate upload.
+            dst.select('INBOX'); dst.uid('STORE',str(victim),'+FLAGS.SILENT','(\\Deleted)'); dst.expunge()
+            missing = run('verify','--config',cfg,'--json',code=2)
+            assert any(e['result'] == 'missing' for e in missing['entries'])
+            run('migrate','--config',cfg,'--json',code=2)
+            assert len(snapshot(dst,['INBOX'])['INBOX'][1]) == 2
+            # Real Dovecot migration with mandatory STARTTLS at both endpoints.
+            real_starttls = config('real-starttls',source_port=starttls_ports[0],destination_port=starttls_ports[1],folder_list=[('INBOX','starttls-real')])
+            real_starttls.write_text(real_starttls.read_text().replace('host = "localhost"','security = "starttls"\nhost = "localhost"'))
+            run('migrate','--config',real_starttls,'--json')
+            run('verify','--config',real_starttls,'--json')
+            assert len(snapshot(dst,['starttls-real'])['starttls-real'][1]) == 3
+            assert snapshot(src,folders) == after_arrival
+            # The source adapter's entire transcript must stay inside this allowlist.
+            allowed = {'CAPABILITY','AUTHENTICATE','LOGIN','ENABLE','LIST','EXAMINE','UID'}
+            for verb, args in sp.commands:
+                assert verb in allowed, (verb,args)
+                if verb == 'UID':
+                    assert args.startswith(('SEARCH ', 'FETCH ')), args
+                    if 'BODY' in args:
+                        assert 'BODY.PEEK[]' in args, args
+            assert not sp.drop_fetch, 'source retry fault was not exercised'
+            assert not loss.drop_append, 'APPEND reply loss was not exercised'
+            assert all(not p.errors for p in proxies), [p.errors for p in proxies]
+            print('PASS: TLS, authentication, Unicode discovery/copy, literal bytes, dates/flags, duplicates, source immutability, source-read reconnect, snapshot resume, verification mismatch, locking, size limits, lost APPEND reply, audited attribution, source wire allowlist, rev1/rev2 wire negotiation and transfer, UIDVALIDITY changes, content corruption, missing destination messages, SIGINT and SIGKILL')
+        finally:
+            for p in proxies: p.close()
+            for m in clients:
+                with contextlib.suppress(Exception): m.logout()
+            for name in reversed(containers):
+                subprocess.run(['docker','rm','-f',name], stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+
+if __name__ == '__main__':
+    main()
