@@ -56,12 +56,18 @@ with tempfile.TemporaryDirectory(prefix='imaplane-h5-crashes-') as tmp:
             cfg,dst,_=lab.config('verify'+point.replace('_',''))
             run(cfg)
             if 'invalidate' in point:
-                dst.select('INBOX'); assert dst.uid('STORE','1','+FLAGS.SILENT','(\\Flagged)')[0]=='OK'
-            run(cfg,'verify',point=point,nth=1 if 'invalidate' in point else 4)
+                for folder in lab.folders:
+                    dst.select(folder); assert dst.uid('STORE','1','+FLAGS.SILENT','(\\Flagged)')[0]=='OK'
+            fault_nth=2 if 'invalidate' in point else 4
+            run(cfg,'verify',point=point,nth=fault_nth)
             if 'invalidate' in point:
-                assert dst.uid('STORE','1','-FLAGS.SILENT','(\\Flagged)')[0]=='OK'
+                with sqlite3.connect(root/('verify'+point.replace('_',''))/'journal.sqlite3') as db:
+                    expected=1 if point=='before_invalidate' else 2
+                    assert db.execute("select count(*) from transfers where state='accepted'").fetchone()[0]==expected
+                for folder in lab.folders:
+                    dst.select(folder); assert dst.uid('STORE','1','-FLAGS.SILENT','(\\Flagged)')[0]=='OK'
             assert run(cfg,'verify')['complete']; lab.check(dst)
-            print('PASS verify',point,'nth 4',flush=True)
+            print('PASS verify',point,'nth',fault_nth,flush=True)
         cfg,dst,proxies=lab.config('observedmismatch')
         run(cfg)
         appends=sum(v=='APPEND' for v,_ in proxies[1].commands)

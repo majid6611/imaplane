@@ -1,5 +1,10 @@
 # Second independent audit follow-up
 
+This is the historical second-audit follow-up. Current H5 prerequisites,
+commit-bound measurements and tested optimizations are in
+[H5 safety and results](H5_SAFETY_AND_RESULTS.md).
+
+
 Claude's full second report was read before changes. The report confirmed H1,
 H2's main triggers, H4 and M1/M2, and identified three prerequisites before H5.
 Code inspection independently confirmed N1's immediate continue after rejection,

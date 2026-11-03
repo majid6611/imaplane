@@ -1,0 +1,1504 @@
+{
+  "format_version": 2,
+  "binaries": {
+    "A": {
+      "git_commit": "82b316df12b12148272bd6af7f3dfcd5821ce2f9",
+      "binary_sha256": "3f6b2773aed053cddae02b8589eb13a68ba210c020fa53968d4add18df755a1d",
+      "build_source_sha256": "5835b1e97c76395ca44d76274158e428a146458d83a927ba7c8d615091ac4e79",
+      "cargo_lock_sha256": "c35acbf3573addc3d8d077ff78cd38a8391c4bc68ebb59d3f597025699d73a25",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "profile": "release-default-features"
+    },
+    "B": {
+      "git_commit": "83de49196920aeb05558ba4d1d2a81e1e187d164",
+      "binary_sha256": "baf2fe28f3aa2a0cbed4afe56e18b37b496c6e967ea16c6248df86940d8685e7",
+      "build_source_sha256": "6d6c4f4f05bb6051b4d6aea6f376022c6c2ec7c7e544f62df457b05cec0f4494",
+      "cargo_lock_sha256": "c35acbf3573addc3d8d077ff78cd38a8391c4bc68ebb59d3f597025699d73a25",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "profile": "release-default-features"
+    }
+  },
+  "mixed": true,
+  "build_source_sha256": "6d6c4f4f05bb6051b4d6aea6f376022c6c2ec7c7e544f62df457b05cec0f4494",
+  "started_at_utc": "2026-11-03T15:37:42.625873+00:00",
+  "binary_sha256": "3f6b2773aed053cddae02b8589eb13a68ba210c020fa53968d4add18df755a1d",
+  "cargo_lock_sha256": "c35acbf3573addc3d8d077ff78cd38a8391c4bc68ebb59d3f597025699d73a25",
+  "binary_version": "imaplane 0.1.0",
+  "git_commit": "83de49196920aeb05558ba4d1d2a81e1e187d164",
+  "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "platform": "Linux-6.14.0-37-generic-x86_64-with-glibc2.39",
+  "architecture": "x86_64",
+  "python": "3.12.3",
+  "dovecot_image": "dovecot/dovecot:2.3.21@sha256:1c18c756f20d03867077a1b509a6e2e3008ab1eafa56377b6f2eca12dc1ba581",
+  "docker_version": "Docker version 29.6.1, build 8900f1d",
+  "strace_version": "strace -- version 6.8",
+  "method": "strace-instrumented; fresh and no-op resume; protocol-exchange latency, excludes TLS handshake latency; client-only fsync/RSS; server storage not traced; warm host caches uncontrolled",
+  "messages": 100,
+  "attachment_bytes": 4096,
+  "message_bytes": 39114404,
+  "dataset_sha256": "0b490bd14a3c75e5df29de1e7deeb5242c36003d7c7f3373834b98e8f4e0ae44",
+  "runs": [
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          0.66034,
+          0.519707,
+          0.529797,
+          0.530207,
+          0.522142,
+          0.511371,
+          0.514768,
+          0.511962
+        ],
+        "median_ms": 0.5209245,
+        "p95_ms": 0.66034,
+        "max_ms": 0.66034
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          0.98627,
+          0.839937,
+          0.787646,
+          0.606575,
+          0.60952,
+          0.604431,
+          0.587759,
+          0.589723
+        ],
+        "median_ms": 0.6080475,
+        "p95_ms": 0.98627,
+        "max_ms": 0.98627
+      },
+      "binary": "A",
+      "phase": "fresh",
+      "repeat": 0,
+      "latency_ms": 0,
+      "wall_seconds": 26.78314905500156,
+      "messages_per_second": 3.733690903733582,
+      "source_message_bytes_per_second": 1460410.9441976042,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 510
+      },
+      "round_trips_per_message": 7.23,
+      "fsync": 2417,
+      "fdatasync": 0,
+      "syncs_per_message": 24.17,
+      "max_rss_kib": 17512,
+      "user_seconds": 1.47,
+      "system_seconds": 1.0,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 102,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          0.818125,
+          0.529025,
+          0.52136,
+          0.526239,
+          0.524856,
+          0.517914,
+          0.52628,
+          0.55705
+        ],
+        "median_ms": 0.5262595,
+        "p95_ms": 0.818125,
+        "max_ms": 0.818125
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          0.924301,
+          0.80529,
+          0.767607,
+          0.744011,
+          0.720486,
+          0.66065,
+          0.639429,
+          0.706959
+        ],
+        "median_ms": 0.7322485,
+        "p95_ms": 0.924301,
+        "max_ms": 0.924301
+      },
+      "binary": "A",
+      "phase": "resume",
+      "repeat": 0,
+      "latency_ms": 0,
+      "wall_seconds": 9.766722989999835,
+      "messages_per_second": 10.238848803471766,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 800,
+      "fdatasync": 0,
+      "syncs_per_message": 8.0,
+      "max_rss_kib": 18548,
+      "user_seconds": 0.7,
+      "system_seconds": 0.32,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          3.18951,
+          0.859555,
+          0.646813,
+          0.541008,
+          0.53712,
+          0.550737,
+          0.555106,
+          0.558732
+        ],
+        "median_ms": 0.5569189999999999,
+        "p95_ms": 3.18951,
+        "max_ms": 3.18951
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          0.872791,
+          0.723312,
+          0.722389,
+          0.651252,
+          0.617376,
+          0.643186,
+          0.60375,
+          0.58824
+        ],
+        "median_ms": 0.647219,
+        "p95_ms": 0.872791,
+        "max_ms": 0.872791
+      },
+      "binary": "B",
+      "phase": "fresh",
+      "repeat": 0,
+      "latency_ms": 0,
+      "wall_seconds": 24.558371703999,
+      "messages_per_second": 4.071931201518395,
+      "source_message_bytes_per_second": 1592711.6207639591,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 410
+      },
+      "round_trips_per_message": 6.23,
+      "fsync": 1617,
+      "fdatasync": 0,
+      "syncs_per_message": 16.17,
+      "max_rss_kib": 17336,
+      "user_seconds": 1.36,
+      "system_seconds": 0.81,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 2,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          6.869146,
+          2.886652,
+          0.556197,
+          0.570205,
+          0.686981,
+          0.53182,
+          0.524366,
+          0.538834
+        ],
+        "median_ms": 0.5632010000000001,
+        "p95_ms": 6.869146,
+        "max_ms": 6.869146
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          7.993474,
+          3.195981,
+          1.252867,
+          0.785271,
+          0.705557,
+          0.680959,
+          0.616955,
+          0.622947
+        ],
+        "median_ms": 0.745414,
+        "p95_ms": 7.993474,
+        "max_ms": 7.993474
+      },
+      "binary": "B",
+      "phase": "resume",
+      "repeat": 0,
+      "latency_ms": 0,
+      "wall_seconds": 8.997894101001293,
+      "messages_per_second": 11.11371159490218,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 0,
+      "fdatasync": 0,
+      "syncs_per_message": 0.0,
+      "max_rss_kib": 18360,
+      "user_seconds": 0.62,
+      "system_seconds": 0.18,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          0.776454,
+          0.543673,
+          0.540687,
+          0.532902,
+          0.533574,
+          0.531219,
+          0.545506,
+          0.536099
+        ],
+        "median_ms": 0.538393,
+        "p95_ms": 0.776454,
+        "max_ms": 0.776454
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          0.732629,
+          0.607987,
+          0.596806,
+          0.596315,
+          0.596365,
+          0.602968,
+          0.63506,
+          0.569774
+        ],
+        "median_ms": 0.599887,
+        "p95_ms": 0.732629,
+        "max_ms": 0.732629
+      },
+      "binary": "B",
+      "phase": "fresh",
+      "repeat": 1,
+      "latency_ms": 0,
+      "wall_seconds": 24.732072550999874,
+      "messages_per_second": 4.0433327936342796,
+      "source_message_bytes_per_second": 1581525.5239665983,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 410
+      },
+      "round_trips_per_message": 6.23,
+      "fsync": 1617,
+      "fdatasync": 0,
+      "syncs_per_message": 16.17,
+      "max_rss_kib": 17368,
+      "user_seconds": 1.4,
+      "system_seconds": 0.77,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 2,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          9.575888,
+          2.289194,
+          2.499281,
+          0.938939,
+          0.710115,
+          0.599011,
+          0.552801,
+          0.551498
+        ],
+        "median_ms": 0.824527,
+        "p95_ms": 9.575888,
+        "max_ms": 9.575888
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          5.641516,
+          2.728204,
+          0.828385,
+          0.759922,
+          0.699945,
+          0.736146,
+          0.775493,
+          0.681349
+        ],
+        "median_ms": 0.7677075,
+        "p95_ms": 5.641516,
+        "max_ms": 5.641516
+      },
+      "binary": "B",
+      "phase": "resume",
+      "repeat": 1,
+      "latency_ms": 0,
+      "wall_seconds": 8.942669791998924,
+      "messages_per_second": 11.18234289378221,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 0,
+      "fdatasync": 0,
+      "syncs_per_message": 0.0,
+      "max_rss_kib": 18556,
+      "user_seconds": 0.65,
+      "system_seconds": 0.16,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          10.768137,
+          0.913379,
+          0.729674,
+          0.647074,
+          0.626263,
+          0.633287,
+          0.602457,
+          0.59389
+        ],
+        "median_ms": 0.6401805,
+        "p95_ms": 10.768137,
+        "max_ms": 10.768137
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          0.695357,
+          0.635902,
+          0.591235,
+          0.589382,
+          0.564002,
+          0.544354,
+          0.535137,
+          0.567079
+        ],
+        "median_ms": 0.5782305,
+        "p95_ms": 0.695357,
+        "max_ms": 0.695357
+      },
+      "binary": "A",
+      "phase": "fresh",
+      "repeat": 1,
+      "latency_ms": 0,
+      "wall_seconds": 26.982384140999784,
+      "messages_per_second": 3.706121722878069,
+      "source_message_bytes_per_second": 1449627.4234182884,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 510
+      },
+      "round_trips_per_message": 7.23,
+      "fsync": 2417,
+      "fdatasync": 0,
+      "syncs_per_message": 24.17,
+      "max_rss_kib": 17432,
+      "user_seconds": 1.53,
+      "system_seconds": 0.99,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 102,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          0.746035,
+          0.559533,
+          0.532832,
+          0.523303,
+          0.523163,
+          0.535227,
+          0.559103,
+          0.564594
+        ],
+        "median_ms": 0.547165,
+        "p95_ms": 0.746035,
+        "max_ms": 0.746035
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          0.734463,
+          0.691039,
+          0.704074,
+          0.675268,
+          0.66083,
+          0.627515,
+          0.700596,
+          0.632064
+        ],
+        "median_ms": 0.6831535,
+        "p95_ms": 0.734463,
+        "max_ms": 0.734463
+      },
+      "binary": "A",
+      "phase": "resume",
+      "repeat": 1,
+      "latency_ms": 0,
+      "wall_seconds": 9.87438496699906,
+      "messages_per_second": 10.127213019768579,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 800,
+      "fdatasync": 0,
+      "syncs_per_message": 8.0,
+      "max_rss_kib": 18564,
+      "user_seconds": 0.68,
+      "system_seconds": 0.32,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          7.51817,
+          2.066923,
+          0.737358,
+          0.722169,
+          0.67112,
+          0.769199,
+          0.698874,
+          0.61436
+        ],
+        "median_ms": 0.7297635,
+        "p95_ms": 7.51817,
+        "max_ms": 7.51817
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          0.744281,
+          0.633366,
+          0.601374,
+          0.656021,
+          0.681761,
+          0.706548,
+          0.625902,
+          0.613198
+        ],
+        "median_ms": 0.6446935,
+        "p95_ms": 0.744281,
+        "max_ms": 0.744281
+      },
+      "binary": "A",
+      "phase": "fresh",
+      "repeat": 2,
+      "latency_ms": 0,
+      "wall_seconds": 27.726776584000618,
+      "messages_per_second": 3.606621912830059,
+      "source_message_bytes_per_second": 1410708.6657368771,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 510
+      },
+      "round_trips_per_message": 7.23,
+      "fsync": 2417,
+      "fdatasync": 0,
+      "syncs_per_message": 24.17,
+      "max_rss_kib": 17676,
+      "user_seconds": 1.49,
+      "system_seconds": 1.0,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 102,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          0.822543,
+          0.527662,
+          0.513695,
+          0.515799,
+          0.512212,
+          0.513895,
+          0.522161,
+          0.528353
+        ],
+        "median_ms": 0.51898,
+        "p95_ms": 0.822543,
+        "max_ms": 0.822543
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          0.964368,
+          0.706769,
+          0.684275,
+          0.693673,
+          0.724833,
+          0.615642,
+          0.627735,
+          0.629108
+        ],
+        "median_ms": 0.688974,
+        "p95_ms": 0.964368,
+        "max_ms": 0.964368
+      },
+      "binary": "A",
+      "phase": "resume",
+      "repeat": 2,
+      "latency_ms": 0,
+      "wall_seconds": 9.652421611997852,
+      "messages_per_second": 10.360094494391037,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 800,
+      "fdatasync": 0,
+      "syncs_per_message": 8.0,
+      "max_rss_kib": 18704,
+      "user_seconds": 0.66,
+      "system_seconds": 0.34,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          9.718138,
+          0.895584,
+          0.680147,
+          0.62501,
+          0.626513,
+          0.638065,
+          0.701889,
+          0.711007
+        ],
+        "median_ms": 0.6910179999999999,
+        "p95_ms": 9.718138,
+        "max_ms": 9.718138
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          4.077686,
+          4.027539,
+          3.989154,
+          4.030875,
+          4.011457,
+          4.045353,
+          3.989194,
+          4.379129
+        ],
+        "median_ms": 4.0292069999999995,
+        "p95_ms": 4.379129,
+        "max_ms": 4.379129
+      },
+      "binary": "B",
+      "phase": "fresh",
+      "repeat": 2,
+      "latency_ms": 0,
+      "wall_seconds": 27.74625773599837,
+      "messages_per_second": 3.6040896380148104,
+      "source_message_bytes_per_second": 1409718.1815352505,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 410
+      },
+      "round_trips_per_message": 6.23,
+      "fsync": 1617,
+      "fdatasync": 0,
+      "syncs_per_message": 16.17,
+      "max_rss_kib": 17568,
+      "user_seconds": 1.44,
+      "system_seconds": 0.86,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 2,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          10.309072,
+          4.175495,
+          4.558506,
+          4.243397,
+          4.335715,
+          4.555981,
+          4.496376,
+          4.257854
+        ],
+        "median_ms": 4.4160455,
+        "p95_ms": 10.309072,
+        "max_ms": 10.309072
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          8.470692,
+          5.712872,
+          3.906785,
+          4.205473,
+          4.021477,
+          4.201275,
+          4.169293,
+          4.543958
+        ],
+        "median_ms": 4.203374,
+        "p95_ms": 8.470692,
+        "max_ms": 8.470692
+      },
+      "binary": "B",
+      "phase": "resume",
+      "repeat": 2,
+      "latency_ms": 0,
+      "wall_seconds": 9.073944219999248,
+      "messages_per_second": 11.020565872511865,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 0,
+      "fdatasync": 0,
+      "syncs_per_message": 0.0,
+      "max_rss_kib": 18656,
+      "user_seconds": 0.63,
+      "system_seconds": 0.17,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          11.30566,
+          3.796251,
+          3.830046,
+          4.28156,
+          4.395451,
+          4.473893,
+          4.216374,
+          4.318201
+        ],
+        "median_ms": 4.2998805,
+        "p95_ms": 11.30566,
+        "max_ms": 11.30566
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          3.69316,
+          3.769999,
+          3.59446,
+          3.593587,
+          3.669194,
+          3.64659,
+          3.631761,
+          4.100449
+        ],
+        "median_ms": 3.6578920000000004,
+        "p95_ms": 4.100449,
+        "max_ms": 4.100449
+      },
+      "binary": "B",
+      "phase": "fresh",
+      "repeat": 3,
+      "latency_ms": 0,
+      "wall_seconds": 30.523228437999933,
+      "messages_per_second": 3.2761934145702907,
+      "source_message_bytes_per_second": 1281463.5279964183,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 410
+      },
+      "round_trips_per_message": 6.23,
+      "fsync": 1617,
+      "fdatasync": 0,
+      "syncs_per_message": 16.17,
+      "max_rss_kib": 17604,
+      "user_seconds": 1.4,
+      "system_seconds": 1.06,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 2,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          11.194914,
+          4.155175,
+          4.341586,
+          4.14776,
+          3.908257,
+          3.588568,
+          3.623355,
+          3.615861
+        ],
+        "median_ms": 4.0280085,
+        "p95_ms": 11.194914,
+        "max_ms": 11.194914
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          10.137768,
+          3.537729,
+          3.53829,
+          3.632974,
+          3.607124,
+          4.105559,
+          3.974796,
+          4.130467
+        ],
+        "median_ms": 3.803885,
+        "p95_ms": 10.137768,
+        "max_ms": 10.137768
+      },
+      "binary": "B",
+      "phase": "resume",
+      "repeat": 3,
+      "latency_ms": 0,
+      "wall_seconds": 8.986073091000435,
+      "messages_per_second": 11.12833147330508,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 0,
+      "fdatasync": 0,
+      "syncs_per_message": 0.0,
+      "max_rss_kib": 18716,
+      "user_seconds": 0.61,
+      "system_seconds": 0.19,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          10.474048,
+          3.655317,
+          3.568168,
+          3.826388,
+          3.636831,
+          3.835195,
+          3.888379,
+          4.235491
+        ],
+        "median_ms": 3.8307915,
+        "p95_ms": 10.474048,
+        "max_ms": 10.474048
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          3.56446,
+          3.665006,
+          3.629938,
+          3.632983,
+          3.566585,
+          3.670966,
+          3.60566,
+          3.59521
+        ],
+        "median_ms": 3.6177989999999998,
+        "p95_ms": 3.670966,
+        "max_ms": 3.670966
+      },
+      "binary": "A",
+      "phase": "fresh",
+      "repeat": 3,
+      "latency_ms": 0,
+      "wall_seconds": 34.84225758899993,
+      "messages_per_second": 2.870078086776187,
+      "source_message_bytes_per_second": 1122613.9379771084,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 510
+      },
+      "round_trips_per_message": 7.23,
+      "fsync": 2417,
+      "fdatasync": 0,
+      "syncs_per_message": 24.17,
+      "max_rss_kib": 17180,
+      "user_seconds": 1.58,
+      "system_seconds": 1.33,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 102,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          9.933059,
+          3.965888,
+          4.092643,
+          4.144914,
+          3.679864,
+          3.884109,
+          4.183809,
+          4.042606
+        ],
+        "median_ms": 4.0676245,
+        "p95_ms": 9.933059,
+        "max_ms": 9.933059
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          3.762664,
+          3.618454,
+          3.57964,
+          3.623645,
+          3.608085,
+          3.583588,
+          3.654324,
+          3.672559
+        ],
+        "median_ms": 3.6210495,
+        "p95_ms": 3.762664,
+        "max_ms": 3.762664
+      },
+      "binary": "A",
+      "phase": "resume",
+      "repeat": 3,
+      "latency_ms": 0,
+      "wall_seconds": 11.50523510900166,
+      "messages_per_second": 8.691695480586947,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 800,
+      "fdatasync": 0,
+      "syncs_per_message": 8.0,
+      "max_rss_kib": 18656,
+      "user_seconds": 0.69,
+      "system_seconds": 0.44,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          9.941575,
+          3.625639,
+          4.067504,
+          4.176245,
+          3.721464,
+          3.879651,
+          3.917313,
+          3.970776
+        ],
+        "median_ms": 3.9440445,
+        "p95_ms": 9.941575,
+        "max_ms": 9.941575
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          3.565442,
+          3.651007,
+          3.551435,
+          3.610138,
+          3.963402,
+          3.674423,
+          3.589858,
+          3.881273
+        ],
+        "median_ms": 3.6305725,
+        "p95_ms": 3.963402,
+        "max_ms": 3.963402
+      },
+      "binary": "A",
+      "phase": "fresh",
+      "repeat": 4,
+      "latency_ms": 0,
+      "wall_seconds": 34.13475233200006,
+      "messages_per_second": 2.9295657114305094,
+      "source_message_bytes_per_second": 1145882.1678144035,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 510
+      },
+      "round_trips_per_message": 7.23,
+      "fsync": 2417,
+      "fdatasync": 0,
+      "syncs_per_message": 24.17,
+      "max_rss_kib": 17812,
+      "user_seconds": 1.51,
+      "system_seconds": 1.4,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 102,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          3.427525,
+          3.400944,
+          3.469195,
+          3.530133,
+          3.610529,
+          4.001255,
+          4.157608,
+          3.828841
+        ],
+        "median_ms": 3.5703310000000004,
+        "p95_ms": 4.157608,
+        "max_ms": 4.157608
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          3.7353,
+          3.745249,
+          3.796369,
+          3.774917,
+          3.79189,
+          3.774376,
+          3.901833,
+          3.883838
+        ],
+        "median_ms": 3.7834035,
+        "p95_ms": 3.901833,
+        "max_ms": 3.901833
+      },
+      "binary": "A",
+      "phase": "resume",
+      "repeat": 4,
+      "latency_ms": 0,
+      "wall_seconds": 11.848029538999981,
+      "messages_per_second": 8.440222036147993,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 800,
+      "fdatasync": 0,
+      "syncs_per_message": 8.0,
+      "max_rss_kib": 18600,
+      "user_seconds": 0.72,
+      "system_seconds": 0.46,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          5.305219,
+          3.851255,
+          3.819653,
+          4.159151,
+          3.929156,
+          4.147498,
+          4.471465,
+          4.204018
+        ],
+        "median_ms": 4.1533245,
+        "p95_ms": 5.305219,
+        "max_ms": 5.305219
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          3.940457,
+          3.980073,
+          4.057834,
+          3.959173,
+          3.923995,
+          4.184549,
+          4.350851,
+          4.571288
+        ],
+        "median_ms": 4.0189535,
+        "p95_ms": 4.571288,
+        "max_ms": 4.571288
+      },
+      "binary": "B",
+      "phase": "fresh",
+      "repeat": 4,
+      "latency_ms": 0,
+      "wall_seconds": 30.021295147002093,
+      "messages_per_second": 3.330968884265006,
+      "source_message_bytes_per_second": 1302888.626505707,
+      "protocol_round_trips": {
+        "source": 213,
+        "destination": 410
+      },
+      "round_trips_per_message": 6.23,
+      "fsync": 1617,
+      "fdatasync": 0,
+      "syncs_per_message": 16.17,
+      "max_rss_kib": 17532,
+      "user_seconds": 1.44,
+      "system_seconds": 1.01,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 202
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 3,
+          "SELECT": 2,
+          "APPEND": 100,
+          "UID": 200,
+          "CREATE": 1
+        }
+      }
+    },
+    {
+      "fsync_probe_before": {
+        "samples_ms": [
+          4.208405,
+          4.083053,
+          3.971036,
+          4.357414,
+          4.287309,
+          3.893236,
+          4.500641,
+          4.111087
+        ],
+        "median_ms": 4.159746,
+        "p95_ms": 4.500641,
+        "max_ms": 4.500641
+      },
+      "fsync_probe_after": {
+        "samples_ms": [
+          9.372401,
+          5.727045,
+          3.980184,
+          3.907032,
+          4.340681,
+          4.516722,
+          4.397621,
+          3.969734
+        ],
+        "median_ms": 4.3691510000000005,
+        "p95_ms": 9.372401,
+        "max_ms": 9.372401
+      },
+      "binary": "B",
+      "phase": "resume",
+      "repeat": 4,
+      "latency_ms": 0,
+      "wall_seconds": 9.352070492997882,
+      "messages_per_second": 10.69281931470388,
+      "source_message_bytes_per_second": 0,
+      "protocol_round_trips": {
+        "source": 13,
+        "destination": 208
+      },
+      "round_trips_per_message": 2.21,
+      "fsync": 0,
+      "fdatasync": 0,
+      "syncs_per_message": 0.0,
+      "max_rss_kib": 18424,
+      "user_seconds": 0.64,
+      "system_seconds": 0.16,
+      "command_counts": {
+        "source": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 1,
+          "EXAMINE": 6,
+          "UID": 2
+        },
+        "destination": {
+          "CAPABILITY": 2,
+          "AUTHENTICATE": 1,
+          "LIST": 2,
+          "SELECT": 2,
+          "UID": 200
+        }
+      }
+    }
+  ],
+  "fsync_probe_start": {
+    "samples_ms": [
+      0.806192,
+      0.615823,
+      0.563031,
+      0.535307,
+      0.529636,
+      0.522963,
+      0.536699,
+      0.536109,
+      0.541319,
+      0.535588,
+      0.52107,
+      0.529777,
+      0.535367,
+      0.52133,
+      0.533223,
+      0.534235,
+      0.553262,
+      0.565756,
+      0.555416,
+      0.535076,
+      0.537191,
+      0.539325,
+      0.549675,
+      0.543834,
+      0.544976,
+      0.542542,
+      0.547981,
+      0.553993,
+      0.545377,
+      0.549906,
+      0.543934,
+      0.55251
+    ],
+    "median_ms": 0.5419305,
+    "p95_ms": 0.615823,
+    "max_ms": 0.806192
+  },
+  "all_content_metadata_multiplicity_checks_passed": true,
+  "source_unchanged": true,
+  "fsync_probe_end": {
+    "samples_ms": [
+      10.093867,
+      3.884689,
+      3.877756,
+      4.056652,
+      4.342615,
+      4.446256,
+      4.561168,
+      4.175953,
+      4.377312,
+      4.690699,
+      3.996685,
+      4.243353,
+      4.31436,
+      4.092171,
+      4.472457,
+      4.55706,
+      4.480352,
+      4.658146,
+      4.394134,
+      4.546509,
+      4.504939,
+      4.182505,
+      4.652184,
+      4.491544,
+      4.571698,
+      4.677684,
+      4.585205,
+      4.469301,
+      4.388854,
+      4.40737,
+      4.300313,
+      4.476896
+    ],
+    "median_ms": 4.4577785,
+    "p95_ms": 4.690699,
+    "max_ms": 10.093867
+  },
+  "medians": [
+    {
+      "binary": "A",
+      "latency_ms": 0,
+      "phase": "fresh",
+      "wall_seconds": 27.726776584000618,
+      "messages_per_second": 3.606621912830059,
+      "round_trips_per_message": 7.23,
+      "syncs_per_message": 24.17,
+      "max_rss_kib": 17512
+    },
+    {
+      "binary": "A",
+      "latency_ms": 0,
+      "phase": "resume",
+      "wall_seconds": 9.87438496699906,
+      "messages_per_second": 10.127213019768579,
+      "round_trips_per_message": 2.21,
+      "syncs_per_message": 8.0,
+      "max_rss_kib": 18600
+    },
+    {
+      "binary": "B",
+      "latency_ms": 0,
+      "phase": "fresh",
+      "wall_seconds": 27.74625773599837,
+      "messages_per_second": 3.6040896380148104,
+      "round_trips_per_message": 6.23,
+      "syncs_per_message": 16.17,
+      "max_rss_kib": 17532
+    },
+    {
+      "binary": "B",
+      "latency_ms": 0,
+      "phase": "resume",
+      "wall_seconds": 8.997894101001293,
+      "messages_per_second": 11.11371159490218,
+      "round_trips_per_message": 2.21,
+      "syncs_per_message": 0.0,
+      "max_rss_kib": 18556
+    }
+  ]
+}

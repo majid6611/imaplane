@@ -122,7 +122,10 @@ copied by another job. Do not discard state to resolve an uncertain transfer.
 ## Recovery and verification
 
 Rerun the same `migrate` command after interruption. Confirmed and acknowledged
-messages are read back again; they are not uploaded again. Planned records may
+messages are still read back exactly; they are not uploaded again. A healthy
+historical confirmation is retained without redundant journal writes. Observed
+verification failures durably downgrade it; offline status remains historical
+evidence, especially if a new verification was interrupted. Planned records may
 continue copying. Source UIDVALIDITY changes stop migration. Destination
 UIDVALIDITY changes, missing messages, changed bytes, dates or flags are reported;
 IMAPLANE does not overwrite or automatically recreate those destination messages.
@@ -374,8 +377,15 @@ server-echoed credentials through error output. A failed read that leaves sessio
 state uncertain stops the pass rather than continuing uploads on that session.
 
 
-Latest reliability validation (2026-11-02): **28 project tests, 82 parser tests,
-138 vendored client tests, 5 offline lab tests and 2 benchmark harness tests pass**. Formatting and Clippy
+Latest validation (2026-11-03): **32 project tests, 82 parser tests,
+138 vendored client tests, 5 offline lab tests and 3 benchmark harness tests pass**.
+The H5 changes passed 73 deterministic crash scenarios for the final optimizations
+(the initial preparation increment passed 72). Final 100-message, five-repeat interleaved
+A/B measurements reduced fresh client syncs from 24.17 to 16.17/message and
+exchanges from 7.23 to 6.23/message. Healthy resume performs zero client syncs
+while still reading and checking every message exactly. Peak RSS was essentially
+unchanged; fresh wall time was flat and wall-time comparisons remain advisory.
+See [H5 results and limits](docs/H5_SAFETY_AND_RESULTS.md). Formatting and Clippy
 pass. All three release TLS suites pass, including slow uploads, quota rejection,
 failed reconnects and termination. The Compose 120-message migration, verification,
 SIGINT and SIGKILL recovery pass with unchanged source mail and no duplicate
@@ -389,8 +399,11 @@ production-scale operation remain unvalidated. This is a technical preview.
 ## Baseline and crash testing before optimization
 
 See [the fixed benchmark method](docs/PERFORMANCE_BASELINE.md) and
-[second audit follow-up](docs/SECOND_AUDIT_FOLLOWUP.md). No major performance
-optimizations are included in this iteration. Default/package builds contain
+[second audit follow-up](docs/SECOND_AUDIT_FOLLOWUP.md). The current H5 increments and safety gates are documented in
+[H5 safety and results](docs/H5_SAFETY_AND_RESULTS.md). Preparation writes are
+combined under FULL durability, healthy resume avoids redundant writes, and
+destination selections are reused with reconnect/UIDVALIDITY guards. Exact
+read-back remains mandatory. Default/package builds contain
 no active crash-injection hook.
 
 ```sh
@@ -398,8 +411,9 @@ cargo build --release --locked
 cargo build --locked --features fault-injection --target-dir target/fault-tests
 python3 tests/local/crash_matrix.py target/fault-tests/debug/imaplane
 python3 -m unittest discover -s tests/local -p 'test_*.py'
+python3 scripts/build-benchmark-binary.py
 python3 tests/local/benchmark.py --binary target/release/imaplane \
-  --messages 100 --latency-ms 0 25 50 --repeats 3 \
+  --mixed --messages 100 --latency-ms 0 --repeats 5 \
   --output /tmp/imaplane-baseline.json
 ```
 

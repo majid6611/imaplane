@@ -1,3 +1,47 @@
+# Current commit-bound H5 benchmark method
+
+Current results, invariant gates and commit IDs are in
+[H5 safety and results](H5_SAFETY_AND_RESULTS.md). The older method below is an
+archive; use these commands with the current harness:
+
+```sh
+# Requires a clean tracked commit. Builds normal release, freezes binary + metadata.
+python3 scripts/build-benchmark-binary.py
+# Substitute the printed immutable binary paths for A and B:
+python3 tests/local/benchmark.py --binary target/baselines/<A-commit>/imaplane \
+  --binary-b target/baselines/<B-commit>/imaplane \
+  --mixed --messages 100 --latency-ms 0 --repeats 5 \
+  --output /tmp/imaplane-h5-comparison.json
+```
+
+Omit --binary-b for an explicitly labeled same-binary A/A control. Five repeats
+are required except for explicit --smoke harness/counter checks. AB/BA ordering
+alternates by repetition; fresh and exact-read-back resume are both measured.
+Mixed inputs span four attachment sizes across two folders. Binary SHA-256,
+source fingerprint, lockfile and exact build commit are validated from sidecars;
+source commits can precede later documentation/artifact-only commits.
+
+The JSON includes individual startup/end and per-run fsync latency samples,
+client fsync/fdatasync counts, protocol command/continuation exchanges, CPU time,
+kernel-reported peak RSS and every timed sample. Latency injection delays protocol
+turns, not TLS handshakes, bandwidth or packet loss. strace changes timing; host
+caches, load and filesystem drift are not fully controlled. Fsync probes reveal
+drift but do not normalize it away. Treat counters and memory as primary evidence
+and wall-time improvements as advisory. Full exact content/date/flag/multiplicity
+and source-immutability checks are outside the timed interval.
+
+The 100-message, five-repeat H5 control and final A/B measurements supersede the
+20-message early artifact for optimization decisions. The mixed attachment total
+has an enforced 128 MiB input budget; reported RSS is the IMAPLANE child process,
+not the Python fixture/server memory or a worst-case global memory bound.
+
+---
+
+## Archived early baseline and initial crash method
+
+The remainder records the earlier pre-H5 method/artifact and its original commands.
+It is historical evidence, not the current invocation contract.
+
 # Baseline before performance optimization
 
 This iteration adds measurement and safety prerequisites. It does not batch

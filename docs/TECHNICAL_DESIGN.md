@@ -231,3 +231,16 @@ compatibility details. [PERFORMANCE_BASELINE.md](PERFORMANCE_BASELINE.md)
 defines the deterministic crash matrix and instrumented fresh/resume benchmark.
 These changes preserve FULL durability and exact verification. They do not
 implement H5 optimizations.
+
+
+## Tested H5 increments
+
+See [H5 safety and results](H5_SAFETY_AND_RESULTS.md) for the 12 invariants,
+commit-bound control/A/B data, fault gates and remaining limits. The engine now
+combines pre-APPEND planning/metadata/baseline/begin in one FULL transaction;
+authorization and acknowledgement remain separate FULL transactions. Successful
+resume still reads exact content and metadata but does not rewrite existing
+confirmation; observed failures persist a downgrade. Destination selection is
+reused, with writable restoration and epoch validation on reconnect, and a
+validated monotone APPENDUID-derived lower bound. There is no parallel transfer,
+MULTIAPPEND, streaming shortcut, relaxed durability or shallow verification.

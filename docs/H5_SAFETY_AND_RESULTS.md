@@ -149,3 +149,58 @@ deliveries; overflow is explicitly incomplete, never silently attributed.
 
 The mixed-profile harness now validates its memory budget against the actual
 attachment sizes rather than the unrelated uniform-size option.
+
+
+## Final measured result — 2026-11-03
+
+The normal binaries are exact committed snapshots: prerequisite A `82b316d` and
+optimized B `83de491`. The [complete 100-message, five-repeat interleaved A/B
+artifact](benchmarks/h5-final-comparison.json) has 20 fresh/resume runs, mixed
+1KiB/8KiB/128KiB/1MiB attachments and two folders. Its B build-source fingerprint
+matches the final production sources. Later report/test-only commits do not
+change those build inputs. All exact content/date/flag/multiplicity and source
+checks passed; deterministic counters matched within every group.
+
+| Metric | Prerequisite A | Optimized B | Interpretation |
+| --- | ---: | ---: | --- |
+| Fresh client syncs/message | 24.17 | 16.17 | 8 fewer; 33.1% reduction including setup |
+| Healthy resume client syncs/message | 8.00 | 0.00 | No redundant durable transitions |
+| Fresh protocol exchanges/message | 7.23 | 6.23 | One fewer per copied message; 13.8% reduction |
+| Resume exchanges/message | 2.21 | 2.21 | Exact reads intentionally retained |
+| Median fresh peak RSS, KiB | 17512 | 17532 | +20 KiB; no material measured increase |
+| Median resume peak RSS, KiB | 18600 | 18556 | -44 KiB; essentially unchanged |
+| Median fresh wall seconds | 27.727 | 27.746 | Flat; no wall-time gain claimed |
+| Median resume wall seconds | 9.874 | 8.998 | Faster observed, advisory only |
+
+Fsync probe medians rose from 0.54 to 4.46 ms during this comparison. Alternating
+AB/BA and five repetitions improve the method but do not eliminate drift. Wall
+throughput is not a proven causal speedup; the deterministic I/O reductions are.
+The tiny RSS differences are not a memory optimization claim or a worst-case
+bound. The final [increment-3 counter smoke artifact](benchmarks/h5-s3-smoke.json)
+also exercises 0/10 ms protocol delay; its single repetitions are not statistical
+performance evidence.
+
+Each kept production increment passed unit/Clippy checks, security, real-Dovecot
+e2e, reliability and both deterministic crash suites before the next increment.
+Final coverage: 32 project tests, 82 parser tests (15 upstream doc examples ignored),
+138 client tests, 3 offline benchmark tests, 5 offline lab tests, and 30+43 crash
+scenarios pass. The last expanded run strengthens invalidation kills to the second
+actual mismatch in the second folder, checks prior downgrades and restores/verifies
+without APPEND. The normal binary contains neither fault environment variable name.
+The Rust 1.85.1 Compose client build and existing 120-message lab verification/resume
+passed with 360 attachments, no extra uploads, intact source, preserved preexisting
+mail and untrusted-CA rejection. cargo-audit reported no known crate advisories or
+warnings; that does not negate the separate upstream SQLite WAL advisory.
+
+## Remaining work and limitations
+
+No WAL on the bundled affected SQLite, no parallel transfers or prefetch, no
+MULTIAPPEND, no weaker default verification, and no automatic unique-candidate
+attribution. Source size requests and exact destination read-back still consume
+round trips and bandwidth. Streaming, chunked size lookups and larger-scale soak
+runs remain future work. The measured mixed profile is not a near-cap memory test.
+Prepared/authorized/legacy uncertainty stays conservative, and candidate overflow
+stays explicit. N3 continuation handling, N4 missing UIDNEXT fallback, real-provider
+validation and earlier M-series limitations remain open. No public-beta or
+production-readiness claim is made. Git commits were local provenance snapshots;
+this work did not publish releases or push changes automatically.
