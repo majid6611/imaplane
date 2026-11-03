@@ -1,0 +1,75 @@
+name: imaplane
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: mail
+priority: optional
+maintainer: IMAPLANE contributors
+description: |
+  Additive IMAP mailbox migration with read-only source access, strict TLS,
+  durable recovery journals, XOAUTH2 and destination verification.
+license: Apache-2.0
+contents:
+  - src: ${BINARY}
+    expand: true
+    dst: /usr/bin/imaplane
+    file_info:
+      mode: 0755
+  - src: ${NOTICES}
+    expand: true
+    dst: /usr/share/doc/imaplane/THIRD_PARTY_LICENSES.txt
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/imaplane/README.md
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/imaplane/copyright
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/imaplane/LICENSE
+    file_info:
+      mode: 0644
+  - src: docs/TECHNICAL_DESIGN.md
+    dst: /usr/share/doc/imaplane/docs/TECHNICAL_DESIGN.md
+    file_info:
+      mode: 0644
+  - src: docs/PACKAGING.md
+    dst: /usr/share/doc/imaplane/docs/PACKAGING.md
+    file_info:
+      mode: 0644
+  - src: docs/RELIABILITY_AUDIT.md
+    dst: /usr/share/doc/imaplane/docs/RELIABILITY_AUDIT.md
+    file_info:
+      mode: 0644
+  - src: examples/migration.toml
+    dst: /usr/share/doc/imaplane/examples/migration.toml
+    file_info:
+      mode: 0644
+  - src: vendor/README.md
+    dst: /usr/share/doc/imaplane/vendor/README.md
+    file_info:
+      mode: 0644
+  - src: vendor/imap-proto/LICENSE-MIT
+    dst: /usr/share/doc/imaplane/vendor/imap-proto/LICENSE-MIT
+    file_info:
+      mode: 0644
+  - src: vendor/imap-proto/LICENSE-APACHE
+    dst: /usr/share/doc/imaplane/vendor/imap-proto/LICENSE-APACHE
+    file_info:
+      mode: 0644
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.36)
+      - libgcc-s1
+      - libssl3 (>= 3.0.0)
+      - ca-certificates
+  rpm:
+    depends:
+      - glibc >= 2.34
+      - libgcc
+      - openssl-libs >= 3.0.7
+      - ca-certificates

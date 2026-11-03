@@ -1,0 +1,70 @@
+name: imaplane-lab
+x-dovecot: &dovecot
+  image: dovecot/dovecot:2.3.21@sha256:1c18c756f20d03867077a1b509a6e2e3008ab1eafa56377b6f2eca12dc1ba581
+  restart: "no"
+  read_only: true
+  tmpfs:
+    - /run
+    - /tmp
+    - /var/lib/dovecot
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID, SYS_CHROOT, NET_BIND_SERVICE, KILL]
+  networks: [lab]
+  healthcheck: &dovecot-health
+    interval: 2s
+    timeout: 3s
+    retries: 30
+    start_period: 3s
+services:
+  source:
+    <<: *dovecot
+    volumes:
+      - ./source.conf:/etc/dovecot/dovecot.conf:ro
+      - ./.runtime/users/source:/etc/dovecot/lab-users:ro
+      - ./.runtime/tls:/tls:ro
+      - source-mail:/srv/mail
+    healthcheck:
+      <<: *dovecot-health
+      test: [CMD, doveadm, auth, test, -x, service=imap, source@imaplane.test, test-only-source-password]
+  destination:
+    <<: *dovecot
+    volumes:
+      - ./destination.conf:/etc/dovecot/dovecot.conf:ro
+      - ./.runtime/users/destination:/etc/dovecot/lab-users:ro
+      - ./.runtime/tls:/tls:ro
+      - destination-mail:/srv/mail
+    healthcheck:
+      <<: *dovecot-health
+      test: [CMD, doveadm, auth, test, -x, service=imap, destination@imaplane.test, test-only-destination-password]
+  client:
+    profiles: [tools]
+    build:
+      context: ../..
+      dockerfile: packaging/Dockerfile
+      target: lab
+    image: imaplane-lab-client:local
+    user: "${LAB_UID:?run scripts/lab.sh up}:${LAB_GID:?run scripts/lab.sh up}"
+    restart: "no"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./.runtime/client:/lab
+      - ./fixture.py:/tests/fixture.py:ro
+      - ./recovery.py:/tests/recovery.py:ro
+    working_dir: /lab
+    networks: [lab]
+    depends_on:
+      source: {condition: service_healthy}
+      destination: {condition: service_healthy}
+networks:
+  lab:
+    internal: true
+volumes:
+  source-mail:
+  destination-mail:
