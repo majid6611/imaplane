@@ -11,13 +11,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from e2e import BIN, PASSWORD, ProtocolServer, command
+from e2e import BIN, PASSWORD, ProtocolServer, command, STREAM_EXTRA
 
 TOKEN = 'TEST-ONLY-ACCESS-TOKEN-0123456789'
 BODY_MARKER = b'SECRET-BODY-MARKER'
 ALLOWED_KEYS = {'event', 'seq', 't', 'version', 'pid', 'role', 'op', 'ms', 'outcome', 'code', 'unlisted_code', 'scope',
                 'transient', 'capabilities', 'other_capability_count', 'appendlimit', 'count', 'found', 'bytes',
-                'appenduid', 'writable', 'exists', 'has_uidnext', 'system_flags', 'custom_flag_count'}
+                'appenduid', 'writable', 'exists', 'has_uidnext', 'system_flags', 'custom_flag_count', 'streamed'}
 ATOM = re.compile(r'^[A-Z0-9-]{1,32}$')
 FAILED = []
 
@@ -47,7 +47,7 @@ with tempfile.TemporaryDirectory(prefix='imaplane-diag-') as tmp:
         server.messages['source'] = list(messages or bodies)
         if oauth: server.xoauth2_token = TOKEN
         cfg = root / (name + '.toml')
-        text = f'state_dir = "{root/name}"\ntimeout_seconds = 5\nmax_message_bytes = 262144\nread_attempts = 4\n'
+        text = f'state_dir = "{root/name}"\ntimeout_seconds = 5\nmax_message_bytes = 262144\nread_attempts = 4\n{STREAM_EXTRA}'
         for role in ['source', 'destination']:
             text += f'[{role}]\nhost = "localhost"\nport = {server.port}\nusername = "{role}"\nca_file = "{cert}"\n'
             text += f'auth = "xoauth2"\naccess_token_file = "{tokenfile}"\n' if oauth else f'password_file = "{password}"\n'

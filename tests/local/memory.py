@@ -11,8 +11,15 @@ time, checks the copy is exact, and applies a profile:
              slope between the two largest sizes of at most 0.02 MiB per MiB of message.
              Expected to FAIL until the streaming path exists.
 
+Scenarios (--scenario): `migrate` measures a fresh transfer (source read, APPEND and
+read-back; dominated by the source read until phase 4). `verify` first migrates, then
+measures only `imaplane verify`, which never contacts the source, so its peak RSS is the
+destination read alone. `resume` measures a second `migrate`, which verifies each confirmed
+message the same way. These isolate what the streaming destination digest changes.
+
 Usage: python3 tests/local/memory.py [BINARY] [--sizes 16 64 256] [--profile current]
-       [--threshold-bytes N] [--repeats 1] [--json FILE] [--report-only]
+       [--scenario migrate|verify|resume] [--threshold-bytes N] [--repeats 1]
+       [--json FILE] [--report-only]
 A manual soak uses --sizes 1000 (the configured cap is 1 GiB including headers) and
 needs roughly 4x that much free RAM for the Python fixture, not for IMAPLANE.
 Loopback only; no Docker, real credentials or real mail. Peak RSS is IMAPLANE only.
@@ -45,7 +52,7 @@ def limit_streaming(mib):
     return 40 if mib <= 256 else 48
 
 
-def measure(binary, mib, workdir, cert, key, password, threshold, repeats):
+def measure(binary, mib, workdir, cert, key, password, threshold, repeats, scenario='migrate'):
     """Return (peak RSS in MiB over repeats, seconds). Raises AssertionError if the copy is wrong."""
     body = b'Subject: big\r\n\r\n' + os.urandom(mib << 20)
     want = hashlib.sha256(body).hexdigest()
@@ -61,8 +68,13 @@ def measure(binary, mib, workdir, cert, key, password, threshold, repeats):
             text += f'[{role}]\nhost = "localhost"\nport = {server.port}\nusername = "{role}"\npassword_file = "{password}"\nca_file = "{cert}"\n'
         text += '[[folders]]\nsource = "台北/📬"\ndestination = "台北/📬"\n'
         cfg.write_text(text)
+        if scenario != 'migrate':
+            # Populate the destination and journal first; only the next run is measured.
+            first = subprocess.run([str(binary), 'migrate', '--config', str(cfg), '--json'], capture_output=True, text=True, timeout=1800)
+            assert first.returncode == 0 and json.loads(first.stdout)['complete'], 'setup migrate failed'
+        action = 'verify' if scenario == 'verify' else 'migrate'
         started = time.monotonic()
-        p = subprocess.run(['/usr/bin/time', '-v', str(binary), 'migrate', '--config', str(cfg), '--json'],
+        p = subprocess.run(['/usr/bin/time', '-v', str(binary), action, '--config', str(cfg), '--json'],
                            capture_output=True, text=True, timeout=1800)
         seconds = time.monotonic() - started
         try:
@@ -82,6 +94,7 @@ def main():
     ap.add_argument('binary', nargs='?', default=str(ROOT / 'target/release/imaplane'))
     ap.add_argument('--sizes', type=int, nargs='+', default=[16, 64, 256], help='message sizes in MiB')
     ap.add_argument('--profile', choices=['current', 'streaming'], default='current')
+    ap.add_argument('--scenario', choices=['migrate', 'verify', 'resume'], default='migrate')
     ap.add_argument('--threshold-bytes', type=int, help='writes stream_threshold_bytes into the config (streaming builds only)')
     ap.add_argument('--repeats', type=int, default=1, help='runs per size; the worst peak is used')
     ap.add_argument('--json', help='write results here')
@@ -99,15 +112,15 @@ def main():
         password = work / 'password'; password.write_text(PASSWORD); password.chmod(0o600)
         rows, failures = [], []
         try:
-            baseline, _ = measure(binary, BASELINE_MIB, work, cert, key, password, args.threshold_bytes, args.repeats)
+            baseline, _ = measure(binary, BASELINE_MIB, work, cert, key, password, args.threshold_bytes, args.repeats, args.scenario)
         except AssertionError as exc:
             print(f'baseline run failed, so nothing can be measured: {str(exc)[:400]}', file=sys.stderr)
             return 2
-        print(f'profile={args.profile}  binary={binary.name}  baseline ({BASELINE_MIB} MiB message): {baseline:.1f} MiB', flush=True)
+        print(f'profile={args.profile}  scenario={args.scenario}  threshold={args.threshold_bytes}  binary={binary.name}  baseline ({BASELINE_MIB} MiB message): {baseline:.1f} MiB', flush=True)
         print(f'{"MiB":>6} {"peak RSS":>10} {"x msg":>7} {"limit":>8} {"seconds":>8}  result')
         for mib in args.sizes:
             try:
-                peak, secs = measure(binary, mib, work, cert, key, password, args.threshold_bytes, args.repeats)
+                peak, secs = measure(binary, mib, work, cert, key, password, args.threshold_bytes, args.repeats, args.scenario)
             except AssertionError as exc:
                 failures.append(f'{mib} MiB: {exc}')
                 print(f'{mib:6d}  FAILED to transfer correctly: {exc}', flush=True)
@@ -125,7 +138,7 @@ def main():
             if args.profile == 'streaming' and slope > 0.02:
                 failures.append(f'slope {slope:.3f} exceeds 0.02')
         if args.json:
-            Path(args.json).write_text(json.dumps({'profile': args.profile, 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+            Path(args.json).write_text(json.dumps({'profile': args.profile, 'scenario': args.scenario, 'threshold_bytes': args.threshold_bytes, 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
                                                    'baseline_mib': round(baseline, 1), 'slope': slope, 'rows': rows, 'failures': failures}, indent=1))
     if failures:
         print('FAIL' + (' (ignored: --report-only)' if args.report_only else ''))

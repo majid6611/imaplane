@@ -12,7 +12,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from e2e import BIN, PASSWORD, ProtocolServer, command
+from e2e import BIN, PASSWORD, ProtocolServer, command, STREAM_EXTRA
 
 RESULTS = []
 
@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='imaplane-c1u1-') as temporary:
         server = ProtocolServer(str(cert), str(key), 'rev1'); servers.append(server)
         server.messages['source'] = bodies
         config = root / (name + '.toml')
-        text = f'state_dir = "{root/name}"\ntimeout_seconds = {timeout}\nmax_message_bytes = 262144\nread_attempts = 4\n'
+        text = f'state_dir = "{root/name}"\ntimeout_seconds = {timeout}\nmax_message_bytes = 262144\nread_attempts = 4\n{STREAM_EXTRA}'
         for role in ['source', 'destination']:
             text += f'[{role}]\nhost = "localhost"\nport = {server.port}\nusername = "{role}"\npassword_file = "{secret}"\nca_file = "{cert}"\n'
         text += '[[folders]]\nsource = "台北/📬"\ndestination = "台北/📬"\n'

@@ -21,6 +21,7 @@ SCRIPTS = ROOT / 'scripts'
 UNICODE_FOLDER = 'Archive/Éléments 📬'
 UNICODE_WIRE = 'Archive/&AMk-l&AOk-ments &2D3c7A-'   # as printed by `imap_snapshot.py list`
 FAILED = []
+EXTRA = f"stream_threshold_bytes = {os.environ['IMAPLANE_TEST_STREAM_THRESHOLD']}\n" if os.environ.get('IMAPLANE_TEST_STREAM_THRESHOLD') else ''
 
 
 def check(name, fn):
@@ -52,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix='imaplane-tools-') as tmp:
 
         folders = ['INBOX', UNICODE_WIRE]
         cfg = root / 'migrate.toml'
-        cfg.write_text(f'state_dir = "{root/"state"}"\ntimeout_seconds = 30\nread_attempts = 4\n' + ''.join(
+        cfg.write_text(f'state_dir = "{root/"state"}"\ntimeout_seconds = 30\nread_attempts = 4\n{EXTRA}' + ''.join(
             f'[{r}]\nhost = "localhost"\nport = {labinfo["ports"][r]}\nusername = "lab"\npassword_file = "{labdir/"password"}"\nca_file = "{labdir/"tls.crt"}"\n'
             for r in ('source', 'destination')) + ''.join(f'[[folders]]\nsource = "{f}"\ndestination = "{f}"\n' for f in ('INBOX', UNICODE_FOLDER)))
         cfg.chmod(0o600)

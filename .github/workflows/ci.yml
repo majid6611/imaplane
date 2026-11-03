@@ -39,8 +39,10 @@ jobs:
         run: python3 tests/local/benchmark.py --binary target/release/imaplane --smoke --messages 10 --latency-ms 0 10 --repeats 1 --output target/benchmark-smoke.json
   memory:
     # Dedicated job: real peak-RSS measurement for large messages (see docs/STREAMING_DESIGN.md).
-    # The "current" profile is a regression ceiling for the in-memory path. When streaming
-    # is enabled by default, switch to --profile streaming. A roughly 1 GiB soak is manual.
+    # The "current" profile is a regression ceiling for the in-memory path; the streaming
+    # profile enforces the design targets for destination verification (phase 3). The fresh
+    # transfer moves to the streaming profile once source streaming lands (phase 4).
+    # A roughly 1 GiB soak is manual.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -50,10 +52,17 @@ jobs:
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
       - run: cargo +stable build --release --locked
-      - name: Peak RSS at 16, 64 and 256 MiB
+      - name: Peak RSS at 16, 64 and 256 MiB (fresh transfer; source read still buffered)
         run: python3 tests/local/memory.py target/release/imaplane --profile current --sizes 16 64 256 --json target/memory.json
+      - name: Peak RSS of destination verification, buffered path (rollback ceiling)
+        run: python3 tests/local/memory.py target/release/imaplane --profile current --scenario verify --sizes 16 64 256 --json target/memory-verify-buffered.json
+      - name: Peak RSS of destination verification, streaming path (targets enforced)
+        run: python3 tests/local/memory.py target/release/imaplane --profile streaming --scenario verify --threshold-bytes 0 --sizes 16 64 256 --json target/memory-verify-streaming.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: memory-measurements
-          path: target/memory.json
+          path: |
+            target/memory.json
+            target/memory-verify-buffered.json
+            target/memory-verify-streaming.json

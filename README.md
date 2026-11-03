@@ -257,6 +257,15 @@ and cannot alter a run.
   proportional to the number of messages. `max_message_bytes` is configurable up to 1 GiB. LIST and
   UID-inventory responses are capped at 16 MiB; other metadata at 1 MiB. Very
   large inventories or messages fail clearly rather than bypass limits.
+- **Optional streaming destination reads (`stream_threshold_bytes`, off by default).**
+  When set, destination messages larger than that many bytes (`0` = all) are read back by
+  streaming the body through SHA-256 instead of holding it in memory, for verification,
+  `verify`, resume, candidate scans, `recover` and `resolve`. The comparison is identical
+  (content hash, INTERNALDATE, supported flags) and a truncated or failed read can never
+  confirm a message. Measured peak RSS of `imaplane verify` for a 256 MiB message fell
+  from 526 MiB to 14 MiB. The **source** read and the APPEND still hold a whole message
+  (about twice its size at peak); streaming those with a disk spool is planned work
+  ([design](docs/STREAMING_DESIGN.md)). The key is not part of the job binding.
 - No built-in OAuth browser/device authorization or token-refresh grant client,
   Gmail label deduplication, provider-specific transformations,
   batch accounts, subscriptions, quota preflight, ongoing synchronization or

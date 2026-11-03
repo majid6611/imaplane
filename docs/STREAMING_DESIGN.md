@@ -370,3 +370,35 @@ the IMAPLANE process only, exact destination bytes checked every run.
 Slope between 64 and 256 MiB: 1.999 MiB of RSS per MiB of message. Run-to-run spread was
 about 0.2 MiB. The `streaming` profile fails on all sizes and on the slope today, as
 intended; the `current` profile passes and is the dedicated CI job's check.
+
+### Phase 3 results: streaming destination verification and candidate scanning
+
+Commits 3a to 3e. Streaming is **off by default** (`stream_threshold_bytes` unset). The
+migration engine does not use streaming APPEND or disk spooling; the source read and the
+APPEND still hold a whole message (phase 4).
+
+Measured peak RSS of the IMAPLANE process (GNU time, one message per run, exact destination
+bytes checked). `verify` never contacts the source, so it isolates the destination read:
+
+| Scenario | Message | Buffered (default) | Streaming (threshold 0) |
+| --- | ---: | ---: | ---: |
+| `verify` | 16 MiB | 46.2 MiB | 14.0 MiB |
+| `verify` | 64 MiB | 141.9 MiB | 14.1 MiB |
+| `verify` | 256 MiB | 525.7 MiB | **13.8 MiB** |
+| `resume` (second `migrate`) | 256 MiB | 526.5 MiB | **14.7 MiB** |
+| fresh `migrate` (source still buffered) | 256 MiB | 526.6 MiB | unchanged, by design |
+
+Slope of RSS against message size: 2.0 MiB per MiB buffered, about 0 streaming. A fresh
+transfer is unchanged because its peak is the source read, which phase 4 addresses.
+
+Both paths are exercised by the whole suite: it was run with the threshold unset and again
+with `IMAPLANE_TEST_STREAM_THRESHOLD=0` (every generated config sets the key). Streaming and
+buffered paths are compared directly by a differential test (18 scripted responses at four
+fragmentation sizes) and by `stream_verify.py`, which requires identical observable results
+in both modes, including a 1 MiB message altered only in its final byte.
+
+Deliberate difference: if a streamed body could belong to another UID (another message's
+response also carries a body and the requested UID has one too), the streaming path fails
+closed where the buffered path would ignore the foreign body. Without a body for the
+requested UID both report "absent".
+

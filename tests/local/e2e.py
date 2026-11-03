@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[2]
 BIN = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'target/debug/imaplane').resolve()
 IMAGE = 'dovecot/dovecot:2.3.21@sha256:1c18c756f20d03867077a1b509a6e2e3008ab1eafa56377b6f2eca12dc1ba581'
 PASSWORD = 'imaplane-test-only'
+# Test-only lever: IMAPLANE_TEST_STREAM_THRESHOLD=0 makes every generated config set
+# stream_threshold_bytes, so the whole suite can run in forced-streaming mode.
+STREAM_EXTRA = f"stream_threshold_bytes = {os.environ['IMAPLANE_TEST_STREAM_THRESHOLD']}\n" if os.environ.get('IMAPLANE_TEST_STREAM_THRESHOLD') else ''
 
 def command(*args, **kw):
     return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw).stdout.strip()
@@ -441,7 +444,7 @@ def main():
             def config(name, source_port=sp.port, destination_port=dp.port, folder_list=None, ca=True, limit=64*1024*1024, auth='auto'):
                 folder_list = folder_list or [(f,f) for f in folders]
                 p = tmp / f'{name}.toml'
-                c = f'state_dir = "{tmp / name}"\nmax_message_bytes = {limit}\ntimeout_seconds = 5\n'
+                c = f'state_dir = "{tmp / name}"\nmax_message_bytes = {limit}\ntimeout_seconds = 5\n{STREAM_EXTRA}'
                 for role, port, user in [('source',source_port,'source'),('destination',destination_port,'destination')]:
                     c += f'[{role}]\nhost = "localhost"\nport = {port}\nusername = "{user}"\npassword_file = "{password}"\nauth = "{auth}"\n'
                     if ca: c += f'ca_file = "{cert}"\n'

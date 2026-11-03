@@ -6,7 +6,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
-from e2e import IMAGE, PASSWORD, ROOT, Proxy, command, connect, snapshot, quoted
+from e2e import IMAGE, PASSWORD, ROOT, Proxy, command, connect, snapshot, quoted, STREAM_EXTRA
 
 class DovecotLab:
     def __init__(self, root):
@@ -47,7 +47,7 @@ class DovecotLab:
         self.proxies.extend(proxies)
         destination=self.client(1,name)
         cfg=self.root/(name+'.toml')
-        text=f'state_dir = {json.dumps(str(self.root/name))}\ntimeout_seconds = 5\n'
+        text=f'state_dir = {json.dumps(str(self.root/name))}\ntimeout_seconds = 5\n{STREAM_EXTRA}'
         for role,user,proxy in [('source','source',proxies[0]),('destination',name,proxies[1])]:
             text+=f'[{role}]\nhost = "localhost"\nport = {proxy.port}\nusername = "{user}"\npassword_file = {json.dumps(str(self.password))}\nca_file = {json.dumps(str(self.cert))}\n'
         for folder in self.folders:

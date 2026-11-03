@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from e2e import PASSWORD, ProtocolServer, command, ROOT
+from e2e import PASSWORD, ProtocolServer, command, ROOT, STREAM_EXTRA
 
 BINARY = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'target/fault-tests/debug/imaplane').resolve()
 FOLDER = '台北/📬'
@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory(prefix='imaplane-skip-crash-') as tmp:
         server = ProtocolServer(str(cert), str(key), 'rev1'); servers.append(server)
         server.messages['source'] = list(three)
         cfg = root / (name + '.toml')
-        text = f'state_dir = "{root/name}"\ntimeout_seconds = 5\nmax_message_bytes = 262144\nread_attempts = 4\n'
+        text = f'state_dir = "{root/name}"\ntimeout_seconds = 5\nmax_message_bytes = 262144\nread_attempts = 4\n{STREAM_EXTRA}'
         for role in ['source', 'destination']:
             text += f'[{role}]\nhost = "localhost"\nport = {server.port}\nusername = "{role}"\npassword_file = "{secret}"\nca_file = "{cert}"\n'
         text += f'[[folders]]\nsource = "{FOLDER}"\ndestination = "{FOLDER}"\n'

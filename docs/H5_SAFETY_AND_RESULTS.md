@@ -91,6 +91,14 @@ python3 tests/local/c1_u1.py target/release/imaplane
 python3 tests/local/skip_crash_matrix.py target/fault-tests/debug/imaplane
 python3 tests/local/diagnostics.py target/release/imaplane
 python3 tests/local/memory.py target/release/imaplane --profile current --sizes 16 64 256   # dedicated CI job
+python3 tests/local/memory.py target/release/imaplane --profile streaming --scenario verify --threshold-bytes 0 --sizes 16 64 256   # dedicated CI job
+python3 tests/local/stream_verify.py target/fault-tests/debug/imaplane
+# Forced-streaming mode: every generated config sets stream_threshold_bytes = 0. Run these
+# again with the variable set (crash_matrix.py also needs IMAPLANE_NORMAL_BINARY=target/release/imaplane):
+IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/e2e.py target/release/imaplane
+IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/reliability.py target/release/imaplane
+IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/crash_matrix.py target/fault-tests/debug/imaplane
+IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/h5_crash_matrix.py target/fault-tests/debug/imaplane
 python3 tests/local/provider_tools_integration.py target/release/imaplane   # needs Docker
 python3 -m unittest discover -s tests/local -p 'test_*.py'
 ```
