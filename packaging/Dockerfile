@@ -15,7 +15,7 @@ ENV CARGO_BUILD_JOBS=2
 COPY Cargo.toml Cargo.lock ./
 COPY vendor vendor
 COPY src src
-COPY tests/foundations.rs tests/safety.rs tests/
+COPY tests/*.rs tests/
 RUN cargo test --locked && cargo build --release --locked && mkdir /output && \
     cp target/release/imaplane /output/imaplane && /output/imaplane --version
 COPY LICENSE /src/LICENSE

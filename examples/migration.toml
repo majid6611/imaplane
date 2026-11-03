@@ -3,7 +3,9 @@
 state_dir = "./migration-state"
 timeout_seconds = 60
 max_message_bytes = 67108864
-read_attempts = 3
+read_attempts = 6
+# Stop this run after repeated identical APPEND rejection status/code pairs.
+append_rejection_limit = 3
 
 [source]
 host = "imap.old.example"

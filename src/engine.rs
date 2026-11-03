@@ -32,6 +32,7 @@ pub struct Report {
     pub scope: String,
     pub complete: bool,
     pub interrupted: bool,
+    pub halt_reason: Option<String>,
     pub entries: Vec<Entry>,
 }
 impl Report {
@@ -42,6 +43,7 @@ impl Report {
             scope: scope.into(),
             complete: false,
             interrupted: false,
+            halt_reason: None,
             entries: Vec::new(),
         }
     }
@@ -66,15 +68,68 @@ fn entry(
     }
 }
 fn transient(e: &anyhow::Error) -> bool {
-    crate::transport::is_transient(e)
+    crate::transport::is_transient(e) || e.is::<SnapshotChanged>()
 }
-fn backoff(attempt: u32) {
-    let jitter = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_millis() as u64
-        % 100;
-    std::thread::sleep(Duration::from_millis((100u64 << attempt.min(5)) + jitter));
+fn retry<T>(attempts: u32, mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    let started = std::time::Instant::now();
+    for attempt in 0..attempts {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if transient(&error) && attempt + 1 < attempts => {
+                let seconds = (1u64 << attempt.min(7)).min(120);
+                if started.elapsed() + Duration::from_secs(seconds) >= Duration::from_secs(600) {
+                    return Err(error);
+                }
+                let jitter = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_millis() as u64
+                    % 250;
+                let until =
+                    std::time::Instant::now() + Duration::from_millis(seconds * 1000 + jitter);
+                while std::time::Instant::now() < until {
+                    if crate::interrupted() {
+                        bail!("operation interrupted");
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+#[derive(Default)]
+struct RejectionCircuit {
+    previous: Option<(&'static str, &'static str)>,
+    consecutive: u32,
+}
+impl RejectionCircuit {
+    fn reject(&mut self, rejection: &crate::transport::AppendRejection) -> u32 {
+        let signature = (rejection.status, rejection.code);
+        self.consecutive = if self.previous == Some(signature) {
+            self.consecutive + 1
+        } else {
+            1
+        };
+        self.previous = Some(signature);
+        self.consecutive
+    }
+    fn success(&mut self) {
+        *self = Self::default();
+    }
+}
+fn rejection_pause(consecutive: u32, stop: &AtomicBool) -> bool {
+    let until = std::time::Instant::now()
+        + Duration::from_secs((1u64 << (consecutive - 1).min(7)).min(120));
+    while std::time::Instant::now() < until {
+        if stop.load(Ordering::Relaxed) || crate::interrupted() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
 }
 
 struct SourceReader<'a> {
@@ -86,40 +141,63 @@ struct SourceReader<'a> {
 impl<'a> SourceReader<'a> {
     fn new(config: &'a Config, password: &'a str) -> Result<Self> {
         Ok(Self {
-            source: Source::connect(
-                &config.source,
-                password,
-                Duration::from_secs(config.timeout_seconds),
-                config.max_message_bytes,
-            )?,
+            source: retry(config.read_attempts, || {
+                Source::connect(
+                    &config.source,
+                    password,
+                    Duration::from_secs(config.timeout_seconds),
+                    config.max_message_bytes,
+                )
+            })?,
             config,
             password,
             selected: None,
         })
     }
     fn read<T>(&mut self, mut f: impl FnMut(&mut Source) -> Result<T>) -> Result<T> {
-        for attempt in 0..self.config.read_attempts {
-            match f(&mut self.source) {
-                Ok(value) => return Ok(value),
-                Err(e) if transient(&e) && attempt + 1 < self.config.read_attempts => {
-                    backoff(attempt);
-                    self.source = Source::connect(
-                        &self.config.source,
-                        self.password,
-                        Duration::from_secs(self.config.timeout_seconds),
-                        self.config.max_message_bytes,
-                    )?;
-                    if let Some((folder, validity)) = &self.selected {
-                        let s = self.source.examine(folder)?;
-                        if s.validity != *validity {
-                            bail!("source UIDVALIDITY changed during reconnect");
-                        }
+        let mut reconnect = false;
+        retry(self.config.read_attempts, || {
+            if reconnect {
+                self.source = Source::connect(
+                    &self.config.source,
+                    self.password,
+                    Duration::from_secs(self.config.timeout_seconds),
+                    self.config.max_message_bytes,
+                )?;
+
+                if let Some((folder, validity)) = &self.selected {
+                    let selected = self.source.examine(folder)?;
+                    if selected.validity != *validity {
+                        bail!("source UIDVALIDITY changed during reconnect");
                     }
                 }
-                Err(e) => return Err(e),
             }
-        }
-        unreachable!()
+            reconnect = true;
+            f(&mut self.source)
+        })
+    }
+
+    fn snapshot(&mut self, name: &str) -> Result<(Selected, Vec<u32>)> {
+        self.selected = None;
+        let result = self.read(|source| {
+            let selected = source.examine(name)?;
+            let next = selected
+                .next
+                .context("source omitted UIDNEXT; cannot bound snapshot")?;
+            let uids = if selected.exists == 0 {
+                Vec::new()
+            } else {
+                source.snapshot_uids(next)?
+            };
+            check_inventory(selected.exists, &uids)?;
+            let after = source.examine(name)?;
+            if after.validity != selected.validity {
+                bail!("source UIDVALIDITY changed during snapshot");
+            }
+            Ok((selected, uids))
+        })?;
+        self.selected = Some((name.into(), result.0.validity));
+        Ok(result)
     }
     fn select(&mut self, name: &str) -> Result<Selected> {
         // A failed selection must not restore a previously selected folder on retry.
@@ -138,41 +216,42 @@ struct DestinationReader<'a> {
 impl<'a> DestinationReader<'a> {
     fn new(config: &'a Config, password: &'a str) -> Result<Self> {
         Ok(Self {
-            destination: Destination::connect(
-                &config.destination,
-                password,
-                Duration::from_secs(config.timeout_seconds),
-                config.max_message_bytes,
-            )?,
+            destination: retry(config.read_attempts, || {
+                Destination::connect(
+                    &config.destination,
+                    password,
+                    Duration::from_secs(config.timeout_seconds),
+                    config.max_message_bytes,
+                )
+            })?,
             config,
             password,
             selected: None,
         })
     }
     fn read<T>(&mut self, mut f: impl FnMut(&mut Destination) -> Result<T>) -> Result<T> {
-        for attempt in 0..self.config.read_attempts {
-            match f(&mut self.destination) {
-                Ok(v) => return Ok(v),
-                Err(e) if transient(&e) && attempt + 1 < self.config.read_attempts => {
-                    backoff(attempt);
-                    self.destination = Destination::connect(
-                        &self.config.destination,
-                        self.password,
-                        Duration::from_secs(self.config.timeout_seconds),
-                        self.config.max_message_bytes,
-                    )?;
-                    if let Some((folder, validity)) = &self.selected {
-                        let s = self.destination.examine(folder)?;
-                        if s.validity != *validity {
-                            bail!("destination UIDVALIDITY changed during reconnect");
-                        }
+        let mut reconnect = false;
+        retry(self.config.read_attempts, || {
+            if reconnect {
+                self.destination = Destination::connect(
+                    &self.config.destination,
+                    self.password,
+                    Duration::from_secs(self.config.timeout_seconds),
+                    self.config.max_message_bytes,
+                )?;
+
+                if let Some((folder, validity)) = &self.selected {
+                    let selected = self.destination.examine(folder)?;
+                    if selected.validity != *validity {
+                        bail!("destination UIDVALIDITY changed during reconnect");
                     }
                 }
-                Err(e) => return Err(e),
             }
-        }
-        unreachable!()
+            reconnect = true;
+            f(&mut self.destination)
+        })
     }
+
     fn select(&mut self, name: &str, writable: bool) -> Result<Selected> {
         self.selected = None;
         let s = self.read(|d| {
@@ -207,20 +286,26 @@ pub fn dry_run(c: &Config) -> Result<serde_json::Value> {
     let folders = destination.read(|d| d.folders())?;
     let mut plans = Vec::new();
     for f in &c.folders {
-        let s = source.select(&f.source)?;
-        let uids = source.read(|s| s.uids())?;
-        check_inventory(s.exists, &uids)?;
+        let (s, uids) = source.snapshot(&f.source)?;
         plans.push(serde_json::json!({"source":f.source,"destination":f.destination,"uid_validity":s.validity,"message_count":uids.len(),"create_destination":!folders.iter().any(|d| same_folder(&d.name,&f.destination))}));
     }
     Ok(
         serde_json::json!({"dry_run":true,"scope":"read-only preflight; no journal or destination writes","folders":plans}),
     )
 }
+#[derive(Debug)]
+struct SnapshotChanged;
+impl std::fmt::Display for SnapshotChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "source UID inventory differs from EXISTS; retry snapshot without discarding state",
+        )
+    }
+}
+impl std::error::Error for SnapshotChanged {}
 fn check_inventory(exists: u32, uids: &[u32]) -> Result<()> {
     if uids.len() != exists as usize {
-        bail!(
-            "source UID inventory differs from EXISTS; source changed during snapshot or server omitted UIDs; retry without discarding state"
-        );
+        return Err(SnapshotChanged.into());
     }
     Ok(())
 }
@@ -265,14 +350,13 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
     preflight(c, &mut source, &mut dest)?;
     // Snapshot ALL configured source folders before any destination writes.
     for f in &c.folders {
-        let s = source.select(&f.source)?;
-        let uids = source.read(|s| s.uids())?;
-        check_inventory(s.exists, &uids)?;
+        let (s, uids) = source.snapshot(&f.source)?;
         job.journal.snapshot(&f.source, s.validity, &uids)?;
     }
     let mut report = Report::new(
         "live destination content, INTERNALDATE and supported flags against the durable source UID snapshot",
     );
+    let mut circuit = RejectionCircuit::default();
     let mut known = dest.read(|d| d.folders())?;
     for (folder, validity, uids) in job.journal.snapshots()? {
         let mapping = c
@@ -337,6 +421,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                         selected.validity,
                     )?);
                     if report.entries.last().is_some_and(|e| e.result == "failed") {
+                        report.interrupted |= stop.load(Ordering::Relaxed);
                         report.finish();
                         return Ok(report);
                     }
@@ -354,6 +439,15 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     ));
                     continue;
                 }
+                Err(e) if crate::transport::is_permanent_message(&e) => {
+                    report.entries.push(entry(
+                        &key,
+                        None,
+                        "skipped_permanent",
+                        format!("source read failed: {e:#}"),
+                    ));
+                    continue;
+                }
                 Err(e) => {
                     report.entries.push(entry(
                         &key,
@@ -361,6 +455,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                         "failed",
                         format!("source read failed: {e:#}"),
                     ));
+                    report.interrupted |= stop.load(Ordering::Relaxed);
                     report.finish();
                     return Ok(report);
                 }
@@ -400,13 +495,31 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                 break;
             }
             job.journal.begin_append(&key)?;
+            // Empty literals could be committed without any body bytes; authorize
+            // those BEFORE sending even the APPEND command prefix.
+            if message.body.is_empty() {
+                job.journal.authorize_literal(&key)?;
+            }
+            crate::fault::point("before_append");
             // NEVER retry this operation. Its state is durable before sending bytes.
             match dest.destination.append(
                 &mapping.destination,
                 &message,
                 r.flags.as_ref().context("missing planned flags")?,
+                || {
+                    crate::fault::point("after_append_continuation");
+                    if !message.body.is_empty() {
+                        job.journal.authorize_literal(&key).map_err(|_| {
+                            std::io::Error::other("cannot durably authorize APPEND literal")
+                        })?;
+                    }
+                    crate::fault::point("before_literal_send");
+                    Ok(())
+                },
             ) {
                 Ok((dv, du)) => {
+                    crate::fault::point("after_append_reply");
+                    circuit.success();
                     drop(message); // Release source content before destination verification.
                     job.journal.acknowledge(&key, dv, du)?;
                     let r = job.journal.record(&key)?.unwrap();
@@ -416,6 +529,27 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                         &mut dest,
                         selected.validity,
                     )?);
+                }
+                Err(e) if crate::transport::append_rejection(&e).is_some() => {
+                    let proof = crate::transport::append_rejection(&e).unwrap();
+                    job.journal.reject_append(&key, &proof)?;
+                    let consecutive = circuit.reject(&proof);
+                    report.entries.push(entry(&key, Some(&r), "rejected", format!("APPEND {} [{}]; retained as planned; consecutive identical rejections: {consecutive}", proof.status, proof.code)));
+                    if consecutive >= c.append_rejection_limit {
+                        report.halt_reason = Some(format!(
+                            "destination rejection circuit open after {consecutive} consecutive {} [{}] responses; no further messages attempted; resolve destination limits before rerunning",
+                            proof.status, proof.code
+                        ));
+                        report.interrupted |= stop.load(Ordering::Relaxed);
+                        report.finish();
+                        return Ok(report);
+                    }
+                    if !rejection_pause(consecutive, &stop) {
+                        report.interrupted = true;
+                        report.finish();
+                        return Ok(report);
+                    }
+                    continue;
                 }
                 Err(e) => {
                     report.entries.push(entry(
@@ -427,11 +561,13 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                         ),
                     ));
                     // The connection may be out of sync, and no further writes are safe.
+                    report.interrupted |= stop.load(Ordering::Relaxed);
                     report.finish();
                     return Ok(report);
                 }
             }
             if report.entries.last().is_some_and(|e| e.result == "failed") {
+                report.interrupted |= stop.load(Ordering::Relaxed);
                 report.finish();
                 return Ok(report);
             }
@@ -440,6 +576,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
             break;
         }
     }
+    report.interrupted |= stop.load(Ordering::Relaxed);
     report.finish();
     Ok(report)
 }
@@ -519,7 +656,11 @@ fn verify_record(
             return Ok(entry(
                 &r.key,
                 Some(r),
-                "failed",
+                if crate::transport::is_permanent_message(&e) {
+                    "verification_failed_permanent"
+                } else {
+                    "failed"
+                },
                 format!("destination read failed: {e:#}"),
             ));
         }
@@ -629,6 +770,60 @@ pub fn verify(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
         }
     }
     report.finish();
+    Ok(report)
+}
+
+/// Recovery is evidence-based, never inferred from an empty search alone.
+pub fn recover_not_sent(c: &Config, folder: &str, uid: u32) -> Result<Report> {
+    require_mappings(c)?;
+    let mapping = c
+        .folders
+        .iter()
+        .find(|f| f.source == folder)
+        .context("folder is not configured")?;
+    let mut job = Job::open(c, false)?;
+    let record = job
+        .journal
+        .records()?
+        .into_iter()
+        .find(|r| r.key.folder == folder && r.key.uid == uid && r.state == "uncertain")
+        .context("no uncertain source record with this folder and UID")?;
+    let dp = c.destination.password("Destination")?;
+    let mut dest = DestinationReader::new(c, &dp)?;
+    let selected = dest.select(&mapping.destination, false)?;
+    let (validity, next) = record
+        .baseline
+        .context("record lacks baseline; manual review required")?;
+    if validity != selected.validity {
+        bail!("destination UIDVALIDITY changed; recovery refused");
+    }
+    let post_baseline: Vec<_> = dest
+        .read(|d| d.uids())?
+        .into_iter()
+        .filter(|uid| *uid >= next)
+        .collect();
+    if post_baseline.len() > 1000 {
+        bail!("candidate search exceeds recovery safety limit; manual review required");
+    }
+    for candidate in post_baseline {
+        let message = dest
+            .read(|d| d.message(candidate))?
+            .context("destination changed during candidate inspection; retry review")?;
+        if matches_record(&record, &message).is_ok() {
+            bail!("matching candidate exists; use manual attribution");
+        }
+    }
+    job.journal
+        .recover_not_sent(&record.key, selected.validity)?;
+    let mut report = Report::new(
+        "audited pre-literal recovery; no upload; rerun migrate to attempt this planned transfer",
+    );
+    report.entries.push(entry(
+        &record.key,
+        Some(&record),
+        "retry_authorized",
+        "durable attempt fence proves literal was never authorized; zero matching candidates",
+    ));
     Ok(report)
 }
 

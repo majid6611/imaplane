@@ -124,6 +124,13 @@ pub enum Status {
 #[non_exhaustive]
 pub enum ResponseCode<'a> {
     Alert,
+    Unavailable,
+    Throttled,
+    InUse,
+    Limit,
+    OverQuota,
+    TooBig,
+
     BadCharset(Option<Vec<Cow<'a, str>>>),
     Capabilities(Vec<Capability<'a>>),
     HighestModSeq(u64), // RFC 4551, section 3.1.1
@@ -166,6 +173,13 @@ impl<'a> ResponseCode<'a> {
     pub fn into_owned(self) -> ResponseCode<'static> {
         match self {
             ResponseCode::Alert => ResponseCode::Alert,
+            ResponseCode::Unavailable => ResponseCode::Unavailable,
+            ResponseCode::Throttled => ResponseCode::Throttled,
+            ResponseCode::InUse => ResponseCode::InUse,
+            ResponseCode::Limit => ResponseCode::Limit,
+            ResponseCode::OverQuota => ResponseCode::OverQuota,
+            ResponseCode::TooBig => ResponseCode::TooBig,
+
             ResponseCode::BadCharset(v) => {
                 ResponseCode::BadCharset(v.map(|vs| vs.into_iter().map(to_owned_cow).collect()))
             }

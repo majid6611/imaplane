@@ -8,7 +8,7 @@ maintainer: IMAPLANE contributors
 description: |
   Additive IMAP mailbox migration with read-only source access, strict TLS,
   durable recovery journals, XOAUTH2 and destination verification.
-license: Apache-2.0
+license: MIT
 contents:
   - src: ${BINARY}
     expand: true

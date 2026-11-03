@@ -8,6 +8,7 @@
 !tests/
 !tests/foundations.rs
 !tests/safety.rs
+!tests/*.rs
 !packaging/
 !packaging/Dockerfile
 

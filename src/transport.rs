@@ -19,20 +19,41 @@ use std::{
 };
 
 const OVERHEAD: usize = 1024 * 1024;
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Control(Arc<Mutex<(usize, Instant)>>, Duration);
 impl Control {
     fn reset(&self, limit: usize) {
         *self.0.lock().unwrap() = (limit, Instant::now() + self.1);
+    }
+    fn remaining(&self) -> io::Result<Duration> {
+        let left = self
+            .0
+            .lock()
+            .unwrap()
+            .1
+            .saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "IMAP idle timeout"));
+        }
+        Ok(left)
+    }
+    fn progress(&self, n: usize) {
+        if n > 0 {
+            self.0.lock().unwrap().1 = Instant::now() + self.1;
+        }
     }
 }
 #[derive(Debug)]
 struct HandshakeSocket {
     socket: TcpStream,
     deadline: Option<Instant>,
+    control: Option<Control>,
 }
 impl HandshakeSocket {
     fn remaining(&self) -> io::Result<Option<Duration>> {
+        if let Some(control) = &self.control {
+            return control.remaining().map(Some);
+        }
         match self.deadline {
             Some(d) => {
                 let left = d.saturating_duration_since(Instant::now());
@@ -50,18 +71,38 @@ impl HandshakeSocket {
 }
 impl Read for HandshakeSocket {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
-        if let Some(left) = self.remaining()? {
-            self.socket.set_read_timeout(Some(left))?;
+        loop {
+            if let Some(left) = self.remaining()? {
+                self.socket.set_read_timeout(Some(left))?;
+            }
+            match self.socket.read(b) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => {
+                    if let (Some(c), Ok(n)) = (&self.control, &result) {
+                        c.progress(*n);
+                    }
+                    return result;
+                }
+            }
         }
-        self.socket.read(b)
     }
 }
 impl Write for HandshakeSocket {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        if let Some(left) = self.remaining()? {
-            self.socket.set_write_timeout(Some(left))?;
+        loop {
+            if let Some(left) = self.remaining()? {
+                self.socket.set_write_timeout(Some(left))?;
+            }
+            match self.socket.write(b) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => {
+                    if let (Some(c), Ok(n)) = (&self.control, &result) {
+                        c.progress(*n);
+                    }
+                    return result;
+                }
+            }
         }
-        self.socket.write(b)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.socket.flush()
@@ -73,39 +114,37 @@ struct BoundedTls {
 }
 impl Read for BoundedTls {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut state = self.control.0.lock().unwrap();
-        let remaining = state.1.saturating_duration_since(Instant::now());
-        if state.0 == 0 || remaining.is_zero() {
+        self.control.remaining()?;
+        let budget = self.control.0.lock().unwrap().0;
+        if budget == 0 {
             return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "IMAP response size/time limit exceeded",
+                io::ErrorKind::InvalidData,
+                "IMAP response size limit exceeded",
             ));
         }
-        self.tls
-            .get_ref()
-            .socket
-            .set_read_timeout(Some(remaining))?;
-        let n = buf.len().min(state.0);
-        let read = self.tls.read(&mut buf[..n])?;
-        state.0 -= read;
+        let n = buf.len().min(budget);
+        let read = loop {
+            match self.tls.read(&mut buf[..n]) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result?,
+            }
+        };
+        self.control.0.lock().unwrap().0 -= read;
+        self.control.progress(read);
         Ok(read)
     }
 }
 impl Write for BoundedTls {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let state = self.control.0.lock().unwrap();
-        let remaining = state.1.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "IMAP write deadline exceeded",
-            ));
-        }
-        self.tls
-            .get_ref()
-            .socket
-            .set_write_timeout(Some(remaining))?;
-        self.tls.write(buf)
+        self.control.remaining()?;
+        let n = loop {
+            match self.tls.write(buf) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result?,
+            }
+        };
+        self.control.progress(n);
+        Ok(n)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.tls.flush()
@@ -139,6 +178,20 @@ pub struct Message {
     pub flags: Vec<String>,
 }
 
+#[derive(Debug)]
+struct PermanentMessageError(&'static str);
+impl std::fmt::Display for PermanentMessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for PermanentMessageError {}
+pub fn is_permanent_message(e: &anyhow::Error) -> bool {
+    e.is::<PermanentMessageError>()
+        || e.downcast_ref::<ProtocolError>()
+            .is_some_and(|p| p.permanent_message)
+}
+
 struct Plain<'a>(&'a str, &'a str);
 impl imap::Authenticator for Plain<'_> {
     type Response = Vec<u8>;
@@ -166,6 +219,8 @@ impl imap::Authenticator for Xoauth2<'_> {
 struct ProtocolError {
     transient: bool,
     description: &'static str,
+    rejection: Option<AppendRejection>,
+    permanent_message: bool,
 }
 impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -177,6 +232,29 @@ pub fn is_transient(e: &anyhow::Error) -> bool {
     e.downcast_ref::<ProtocolError>()
         .is_some_and(|e| e.transient)
 }
+/// Evidence is obtainable only from a parsed, matching tagged NO/BAD response.
+#[derive(Clone, Debug)]
+pub(crate) struct AppendRejection {
+    pub code: &'static str,
+    pub status: &'static str,
+}
+pub(crate) fn append_rejection(error: &anyhow::Error) -> Option<AppendRejection> {
+    error
+        .downcast_ref::<ProtocolError>()
+        .and_then(|e| e.rejection.clone())
+}
+fn rejection_code(code: Option<&imap_proto::ResponseCode<'_>>) -> &'static str {
+    use imap_proto::ResponseCode::*;
+    match code {
+        Some(Unavailable) => "UNAVAILABLE",
+        Some(Throttled) => "THROTTLED",
+        Some(InUse) => "INUSE",
+        Some(Limit) => "LIMIT",
+        Some(OverQuota) => "OVERQUOTA",
+        Some(TooBig) => "TOOBIG",
+        _ => "UNSPECIFIED",
+    }
+}
 trait SafeImap<T> {
     fn safe(self) -> Result<T>;
 }
@@ -185,12 +263,35 @@ impl<T> SafeImap<T> for imap::Result<T> {
         self.map_err(|e| {
             // Do not attach the original error: Parse/Unexpected can contain mail
             // literals, and server NO/BAD text can echo credentials or message data.
+            let permanent_message = matches!(&e, imap::Error::No(no) if matches!(no.code, Some(imap_proto::ResponseCode::TooBig)));
+            let rejection = match &e {
+                imap::Error::No(no) => Some(AppendRejection {
+                    code: rejection_code(no.code.as_ref()),
+                    status: "NO",
+                }),
+                imap::Error::Bad(bad) => Some(AppendRejection {
+                    code: rejection_code(bad.code.as_ref()),
+                    status: "BAD",
+                }),
+                _ => None,
+            };
             let (transient, description) = match e {
+                imap::Error::Bye(bye) if bye.information == "no explanation given" => {
+                    (false, "invalid IMAP response; session must be discarded")
+                }
                 imap::Error::Io(_) | imap::Error::ConnectionLost | imap::Error::Bye(_) => {
                     (true, "IMAP connection lost or I/O limit exceeded")
                 }
-                imap::Error::No(_) => (
-                    false,
+                imap::Error::No(no) => (
+                    matches!(
+                        no.code,
+                        Some(
+                            imap_proto::ResponseCode::Unavailable
+                                | imap_proto::ResponseCode::Throttled
+                                | imap_proto::ResponseCode::InUse
+                                | imap_proto::ResponseCode::Limit
+                        )
+                    ),
                     "IMAP server rejected command (NO); check permissions, quota and server limits",
                 ),
                 imap::Error::Bad(_) => (false, "IMAP server rejected command syntax (BAD)"),
@@ -202,6 +303,8 @@ impl<T> SafeImap<T> for imap::Result<T> {
             anyhow::Error::new(ProtocolError {
                 transient,
                 description,
+                rejection,
+                permanent_message,
             })
         })
     }
@@ -296,7 +399,14 @@ impl Connection {
                 break;
             }
         }
-        let socket = socket.context("could not connect to IMAP host")?;
+        let socket = socket.ok_or_else(|| {
+            anyhow::Error::new(ProtocolError {
+                transient: true,
+                description: "could not connect to IMAP host",
+                rejection: None,
+                permanent_message: false,
+            })
+        })?;
         socket.set_read_timeout(Some(timeout))?;
         socket.set_write_timeout(Some(timeout))?;
         let socket = if e.security == Security::Starttls {
@@ -319,6 +429,7 @@ impl Connection {
                 HandshakeSocket {
                     socket,
                     deadline: Some(Instant::now() + timeout),
+                    control: None,
                 },
             )
             .context("TLS handshake failed (certificate and hostname validation required)")?;
@@ -327,6 +438,7 @@ impl Connection {
             Arc::new(Mutex::new((OVERHEAD, Instant::now() + timeout))),
             timeout,
         );
+        tls.get_mut().control = Some(control.clone());
         let mut client = imap::Client::new(BoundedTls {
             tls,
             control: control.clone(),
@@ -388,11 +500,8 @@ impl Connection {
         } else {
             client.login(&e.username, password)
         }
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "IMAP authentication failed; check credentials and authentication policy"
-            )
-        })?;
+        .map_err(|(error, _)| Err::<(), _>(error).safe().unwrap_err())
+        .context("IMAP authentication failed; check credentials and authentication policy")?;
         control.reset(OVERHEAD);
         let caps = capabilities(
             &session
@@ -467,10 +576,13 @@ impl Connection {
     }
 
     fn uids(&mut self) -> Result<Vec<u32>> {
+        self.uids_range("1:*")
+    }
+    fn uids_range(&mut self, range: &str) -> Result<Vec<u32>> {
         self.reset(OVERHEAD * 16);
         // UID FETCH also works in rev2, where SEARCH can return ESEARCH instead
         // of the legacy SEARCH response understood by this client version.
-        let data = self.session.uid_fetch("1:*", "(UID)").safe()?;
+        let data = self.session.uid_fetch(range, "(UID)").safe()?;
         let mut uids: Vec<_> = data
             .iter()
             .filter_map(|m| m.uid)
@@ -501,7 +613,9 @@ impl Connection {
         }
         let expected = s.size.unwrap() as usize;
         if expected > self.limit {
-            bail!("message UID {uid} exceeds configured max_message_bytes");
+            return Err(
+                PermanentMessageError("message exceeds configured max_message_bytes").into(),
+            );
         }
         drop(size);
         self.reset(expected.saturating_add(OVERHEAD));
@@ -528,6 +642,16 @@ impl Source {
     }
     pub fn uids(&mut self) -> Result<Vec<u32>> {
         self.0.uids()
+    }
+    pub fn snapshot_uids(&mut self, next: u32) -> Result<Vec<u32>> {
+        if next <= 1 {
+            return Ok(Vec::new());
+        }
+        let uids = self.0.uids_range(&format!("1:{}", next - 1))?;
+        if uids.iter().any(|u| *u >= next) {
+            bail!("server returned UID outside snapshot horizon");
+        }
+        Ok(uids)
     }
     pub fn message(&mut self, uid: u32) -> Result<Option<Message>> {
         self.0.message(uid)
@@ -573,6 +697,7 @@ impl Destination {
         folder: &str,
         message: &Message,
         flags: &[String],
+        guard: impl FnOnce() -> io::Result<()>,
     ) -> Result<(u32, u32)> {
         let name = self.0.encoding.encode(folder)?;
         // imap 3 alpha's APPEND builder wraps but does not escape this argument.
@@ -587,7 +712,7 @@ impl Destination {
             .append(&name, &message.body)
             .flags(flags.iter().map(|f| Flag::from(f.as_str())))
             .internal_date(message.date)
-            .finish()
+            .finish_with_literal_guard(guard)
             .safe()
             .context("APPEND did not provide a usable confirmation; transfer remains uncertain")?;
         let uid = match appended.uids.as_deref() {
@@ -662,7 +787,9 @@ fn decode_message(response: &[u8], uid: u32, expected: usize) -> Result<Option<M
                         bail!("FETCH omitted or duplicated INTERNALDATE/FLAGS");
                     }
                     if bodies[0].len() != expected {
-                        bail!("message size differs from RFC822.SIZE");
+                        return Err(
+                            PermanentMessageError("message size differs from RFC822.SIZE").into(),
+                        );
                     }
                     let date = DateTime::parse_from_str(dates[0], "%d-%b-%Y %H:%M:%S %z")
                         .context("invalid INTERNALDATE")?;
@@ -826,6 +953,67 @@ fn decode_list(response: &[u8], encoding: FolderEncoding) -> Result<Vec<Folder>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_socket_read_retries_without_losing_bytes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SIGNALS: AtomicUsize = AtomicUsize::new(0);
+        extern "C" fn handler(_: libc::c_int) {
+            SIGNALS.fetch_add(1, Ordering::Relaxed);
+        }
+        // Target only the worker thread and explicitly disable SA_RESTART so
+        // this exercises an interrupted recv rather than a restarted syscall.
+        let mut previous = unsafe { std::mem::zeroed::<libc::sigaction>() };
+        let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
+        action.sa_sigaction = handler as *const () as usize;
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            assert_eq!(libc::sigaction(libc::SIGUSR1, &action, &mut previous), 0);
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let socket = listener.accept().unwrap().0;
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut socket = HandshakeSocket {
+                socket,
+                deadline: Some(Instant::now() + Duration::from_secs(3)),
+                control: None,
+            };
+            send.send(unsafe { libc::pthread_self() }).unwrap();
+            let mut bytes = [0; 4];
+            let result = socket.read(&mut bytes);
+            (result, bytes)
+        });
+        let thread = receive.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(unsafe { libc::pthread_kill(thread, libc::SIGUSR1) }, 0);
+        std::thread::sleep(Duration::from_millis(50));
+        peer.write_all(b"mail").unwrap();
+        let (result, bytes) = worker.join().unwrap();
+        unsafe {
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR1, &previous, std::ptr::null_mut()),
+                0
+            );
+        }
+        assert!(SIGNALS.load(Ordering::Relaxed) > 0);
+        assert_eq!(result.unwrap(), 4);
+        assert_eq!(&bytes, b"mail");
+    }
+    #[test]
+    fn idle_deadline_advances_only_on_positive_progress_without_resetting_budget() {
+        let control = Control(
+            Arc::new(Mutex::new((123, Instant::now() - Duration::from_secs(1)))),
+            Duration::from_secs(2),
+        );
+        assert!(control.remaining().is_err());
+        control.progress(0);
+        assert!(control.remaining().is_err());
+        control.progress(1);
+        assert!(control.remaining().unwrap() > Duration::from_secs(1));
+        assert_eq!(control.0.lock().unwrap().0, 123);
+    }
     #[test]
     fn missing_flags_duplicate_content_and_size_discrepancies_are_not_confirmed() {
         let valid = b"* 1 FETCH (UID 7 FLAGS () INTERNALDATE \"02-Jan-2020 03:04:05 +0000\" BODY[] {3}\r\nabc)\r\na1 OK done\r\n";

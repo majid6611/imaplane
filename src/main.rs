@@ -54,6 +54,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Return an uncertain transfer to planned only with durable proof no literal was authorized.
+    Recover {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        folder: String,
+        #[arg(long)]
+        uid: u32,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect historical journal evidence. Does not connect to an IMAP server.
     Status {
         #[arg(long)]
@@ -90,6 +101,9 @@ fn print_report(report: &engine::Report, json: bool) -> anyhow::Result<ExitCode>
                 );
             }
         }
+        if let Some(reason) = &report.halt_reason {
+            println!("Stopped: {reason}");
+        }
         println!("Complete for recorded snapshot: {}", report.complete);
     }
     Ok(ExitCode::from(if report.complete { 0 } else { 2 }))
@@ -99,6 +113,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let signal = stop.clone();
     ctrlc::set_handler(move || {
         signal.store(true, Ordering::Relaxed);
+        imaplane::interrupt();
     })?;
     match cli.command {
         Command::Inspect { config } => {
@@ -133,6 +148,15 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             &engine::resolve(&Config::load(&config)?, &folder, uid, destination_uid)?,
             json,
         ),
+        Command::Recover {
+            config,
+            folder,
+            uid,
+            json,
+        } => print_report(
+            &engine::recover_not_sent(&Config::load(&config)?, &folder, uid)?,
+            json,
+        ),
         Command::Status { state, json } => {
             let summary = Journal::open_read_only(&state)?.summary()?;
             if json {
@@ -156,7 +180,11 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(error) => {
             eprintln!("imaplane: {:?}", format!("{error:#}"));
-            ExitCode::FAILURE
+            if imaplane::interrupted() {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
