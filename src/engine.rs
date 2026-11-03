@@ -658,6 +658,17 @@ fn matches_record(r: &Record, m: &Message) -> Result<()> {
     }
     Ok(())
 }
+fn verification_failure(
+    j: &mut Journal,
+    r: &Record,
+    result: &str,
+    detail: impl Into<String>,
+) -> Result<Entry> {
+    // Persist observed failure; do not erase historical confirmation merely
+    // because a new check started and could be interrupted.
+    j.invalidate(&r.key)?;
+    Ok(entry(&r.key, Some(r), result, detail))
+}
 fn verify_record(
     j: &mut Journal,
     r: &Record,
@@ -667,44 +678,45 @@ fn verify_record(
     let (dv, du) = r
         .destination
         .context("record has no destination identity")?;
-    j.invalidate(&r.key)?;
     if dv != validity {
-        return Ok(entry(
-            &r.key,
-            Some(r),
+        return verification_failure(
+            j,
+            r,
             "destination_changed",
             "destination UIDVALIDITY differs from APPENDUID",
-        ));
+        );
     }
     crate::fault::point("before_verification_fetch");
     let m = match d.read(|d| d.message(du)) {
         Ok(Some(m)) => m,
         Ok(None) => {
-            return Ok(entry(
-                &r.key,
-                Some(r),
-                "missing",
-                "destination UID no longer exists",
-            ));
+            return verification_failure(j, r, "missing", "destination UID no longer exists");
         }
         Err(e) => {
-            return Ok(entry(
-                &r.key,
-                Some(r),
+            return verification_failure(
+                j,
+                r,
                 if crate::transport::is_permanent_message(&e) {
                     "verification_failed_permanent"
                 } else {
                     "failed"
                 },
                 format!("destination read failed: {e:#}"),
-            ));
+            );
         }
     };
     crate::fault::point("after_verification_fetch");
     if let Err(e) = matches_record(r, &m) {
-        return Ok(entry(&r.key, Some(r), "mismatch", e.to_string()));
+        return verification_failure(j, r, "mismatch", e.to_string());
     }
-    j.confirm_content(&r.key, dv, du, &m.body)?;
+    if r.state == "confirmed" {
+        // Exact read-back above is still mandatory for this run. Its historical
+        // confirmation already exists durably, so no new transition is needed.
+        crate::fault::point("before_confirm");
+        crate::fault::point("after_confirm");
+    } else {
+        j.confirm_content(&r.key, dv, du, &m.body)?;
+    }
     Ok(entry(
         &r.key,
         Some(r),

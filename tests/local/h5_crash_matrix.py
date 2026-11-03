@@ -62,6 +62,19 @@ with tempfile.TemporaryDirectory(prefix='imaplane-h5-crashes-') as tmp:
                 assert dst.uid('STORE','1','-FLAGS.SILENT','(\\Flagged)')[0]=='OK'
             assert run(cfg,'verify')['complete']; lab.check(dst)
             print('PASS verify',point,'nth 4',flush=True)
+        cfg,dst,proxies=lab.config('observedmismatch')
+        run(cfg)
+        appends=sum(v=='APPEND' for v,_ in proxies[1].commands)
+        dst.select('INBOX'); assert dst.uid('STORE','1','+FLAGS.SILENT','(\\Flagged)')[0]=='OK'
+        mismatch=run(cfg,'verify',code=2)
+        assert any(e['result']=='mismatch' for e in mismatch['entries'])
+        with sqlite3.connect(root/'observedmismatch'/'journal.sqlite3') as db:
+            assert db.execute("select count(*) from transfers where state='accepted'").fetchone()[0]==1
+            assert db.execute("select count(*) from transfers where state='confirmed'").fetchone()[0]==5
+        assert dst.uid('STORE','1','-FLAGS.SILENT','(\\Flagged)')[0]=='OK'
+        assert run(cfg,'verify')['complete']; lab.check(dst)
+        assert sum(v=='APPEND' for v,_ in proxies[1].commands)==appends
+        print('PASS observed mismatch durably downgrades history; restoration re-verifies without APPEND',flush=True)
         for role,point in [(0,'after_source_reconnect'),(1,'after_destination_reconnect')]:
             cfg,dst,proxies=lab.config('reconnect'+str(role)); proxies[role].drop_body_nth=2
             run(cfg,point=point)

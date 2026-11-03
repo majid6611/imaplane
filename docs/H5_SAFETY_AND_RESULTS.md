@@ -98,3 +98,28 @@ against [SQLite's WAL-reset advisory](https://www.sqlite.org/wal.html#walresetbu
 which identifies fixes in 3.51.3 and later (or listed backports). This iteration
 keeps the existing rollback journal. A future WAL change requires a separately
 validated patched dependency and its own read-only/status/recovery tests.
+
+
+## Completed prerequisite control and increment 1
+
+The prerequisites are commit `82b316d`; its frozen normal binary passed 30
+original and 42 expanded fault scenarios. The 100-message mixed/two-folder A/A
+control has five repetitions per label (20 fresh/resume runs), in
+[the complete control artifact](benchmarks/h5-control.json). Counters were
+identical across labels/runs: fresh 24.17 syncs and 7.23 exchanges/message;
+resume 8.00 syncs and 2.21 exchanges/message. Startup/end fsync probe medians
+were 0.63/3.75 ms. Wall-time drift is therefore observed, not corrected away.
+
+Increment 1 is commit `2ddad4b`: preparation is one FULL transaction, followed
+by the unchanged separate FULL literal authorization and acknowledgement.
+Pre-commit fault points can now leave no new record because preparation rolls
+back atomically. Tests allow this only at internal preparation boundaries and
+require no APPEND plus all earlier confirmations preserved. Post-commit fence
+states, no-retry and exact verification assertions stay strict. The unit,
+security, e2e, reliability and both crash suites passed before the next increment.
+
+The [12-message A/B smoke artifact](benchmarks/h5-s1-smoke.json) is a counter
+check, not a five-repetition performance claim: fresh syncs fell from 25.42 to
+17.42/message (8 fewer), with identical exchanges. Resume counters were unchanged.
+Small-run startup costs differ from the 100-message control; do not compare
+per-message setup overhead across different dataset sizes.
