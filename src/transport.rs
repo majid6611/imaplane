@@ -221,6 +221,15 @@ struct ProtocolError {
     description: &'static str,
     rejection: Option<AppendRejection>,
     permanent_message: bool,
+    /// Sanitized status/code summary, used only by opt-in diagnostics.
+    wire: Option<Wire>,
+}
+/// Everything here is a fixed name or a strictly validated code atom; never server text.
+#[derive(Clone, Debug)]
+struct Wire {
+    outcome: &'static str,
+    code: &'static str,
+    unlisted: Option<String>,
 }
 impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -323,22 +332,39 @@ const NAMED_CODES: &[&str] = &[
 /// `[ATOM ...]` text. Only a strict, bounded atom is considered, then matched
 /// case-insensitively against the fixed allowlist above.
 fn code_from_text(information: &str) -> &'static str {
-    let Some(rest) = information.strip_prefix('[') else {
-        return "UNSPECIFIED";
-    };
+    leading_atom(information)
+        .and_then(|atom| {
+            NAMED_CODES
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case(atom))
+                .copied()
+        })
+        .unwrap_or("UNSPECIFIED")
+}
+/// A leading `[ATOM` / `[ATOM ...]` token, only if it is a bounded protocol identifier.
+fn leading_atom(information: &str) -> Option<&str> {
+    let rest = information.strip_prefix('[')?;
     let end = rest.find([']', ' ']).unwrap_or(rest.len()).min(33);
     let atom = &rest[..end];
-    if atom.is_empty()
-        || atom.len() > 32
-        || !atom.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
-        return "UNSPECIFIED";
+    (!atom.is_empty()
+        && atom.len() <= 32
+        && atom.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    .then_some(atom)
+}
+/// Diagnostics only: the validated atom of a code IMAPLANE has no name for.
+fn unlisted_atom(code: Option<&imap_proto::ResponseCode<'_>>, information: &str) -> Option<String> {
+    use imap_proto::ResponseCode::*;
+    match code {
+        Some(Alert) => Some("ALERT".into()),
+        Some(Parse) => Some("PARSE".into()),
+        Some(ReadOnly) => Some("READ-ONLY".into()),
+        Some(ReadWrite) => Some("READ-WRITE".into()),
+        Some(BadCharset(_)) => Some("BADCHARSET".into()),
+        Some(_) => None,
+        None => leading_atom(information)
+            .filter(|atom| !NAMED_CODES.iter().any(|n| n.eq_ignore_ascii_case(atom)))
+            .map(str::to_ascii_uppercase),
     }
-    NAMED_CODES
-        .iter()
-        .find(|name| name.eq_ignore_ascii_case(atom))
-        .copied()
-        .unwrap_or("UNSPECIFIED")
 }
 fn rejection_code(code: Option<&imap_proto::ResponseCode<'_>>, information: &str) -> &'static str {
     use imap_proto::ResponseCode::*;
@@ -374,6 +400,33 @@ impl<T> SafeImap<T> for imap::Result<T> {
                 }),
                 _ => None,
             };
+            let wire = Some(match &e {
+                imap::Error::No(x) => Wire {
+                    outcome: "NO",
+                    code: rejection_code(x.code.as_ref(), &x.information),
+                    unlisted: unlisted_atom(x.code.as_ref(), &x.information),
+                },
+                imap::Error::Bad(x) => Wire {
+                    outcome: "BAD",
+                    code: rejection_code(x.code.as_ref(), &x.information),
+                    unlisted: unlisted_atom(x.code.as_ref(), &x.information),
+                },
+                imap::Error::Bye(x) => Wire {
+                    outcome: "BYE",
+                    code: rejection_code(x.code.as_ref(), &x.information),
+                    unlisted: unlisted_atom(x.code.as_ref(), &x.information),
+                },
+                imap::Error::Io(_) | imap::Error::ConnectionLost => Wire {
+                    outcome: "IO",
+                    code: "-",
+                    unlisted: None,
+                },
+                _ => Wire {
+                    outcome: "INVALID",
+                    code: "-",
+                    unlisted: None,
+                },
+            });
             let (transient, description) = match e {
                 imap::Error::Bye(bye) if bye.information == "no explanation given" => {
                     (false, "invalid IMAP response; session must be discarded")
@@ -404,6 +457,7 @@ impl<T> SafeImap<T> for imap::Result<T> {
                 description,
                 rejection,
                 permanent_message,
+                wire,
             })
         })
     }
@@ -504,6 +558,7 @@ impl Connection {
                 description: "could not connect to IMAP host",
                 rejection: None,
                 permanent_message: false,
+                wire: None,
             })
         })?;
         socket.set_read_timeout(Some(timeout))?;
@@ -731,36 +786,198 @@ impl Connection {
 pub struct Source(Connection);
 impl Source {
     pub fn connect(e: &Endpoint, password: &str, timeout: Duration, limit: usize) -> Result<Self> {
-        Ok(Self(Connection::connect(e, password, timeout, limit)?))
+        let result = Connection::connect(e, password, timeout, limit);
+        diag_connect("source", &result);
+        Ok(Self(result?))
     }
     pub fn folders(&mut self) -> Result<Vec<Folder>> {
-        self.0.list()
+        observed("source", "list", count_detail, || self.0.list())
     }
     pub fn examine(&mut self, folder: &str) -> Result<Selected> {
-        self.0.select_folder(folder, false)
+        observed("source", "examine", selected_detail, || {
+            self.0.select_folder(folder, false)
+        })
     }
     pub fn uids(&mut self) -> Result<Vec<u32>> {
-        self.0.uids()
+        observed("source", "uid_search", count_detail, || self.0.uids())
     }
     pub fn snapshot_uids(&mut self, next: u32) -> Result<Vec<u32>> {
         if next <= 1 {
             return Ok(Vec::new());
         }
-        let uids = self.0.uids_range(&format!("1:{}", next - 1))?;
-        if uids.iter().any(|u| *u >= next) {
-            bail!("server returned UID outside snapshot horizon");
-        }
-        Ok(uids)
+        observed("source", "uid_search_range", count_detail, || {
+            let uids = self.0.uids_range(&format!("1:{}", next - 1))?;
+            if uids.iter().any(|u| *u >= next) {
+                bail!("server returned UID outside snapshot horizon");
+            }
+            Ok(uids)
+        })
     }
     pub fn message(&mut self, uid: u32) -> Result<Option<Message>> {
-        self.0.message(uid)
+        observed("source", "uid_fetch", message_detail, || {
+            self.0.message(uid)
+        })
     }
+}
+
+/// Fixed capability names that may appear in diagnostics; everything else is only counted.
+const DIAG_CAPS: &[&str] = &[
+    "IMAP4REV1",
+    "IMAP4REV2",
+    "UIDPLUS",
+    "AUTH=PLAIN",
+    "AUTH=XOAUTH2",
+    "AUTH=LOGIN",
+    "LOGINDISABLED",
+    "STARTTLS",
+    "ENABLE",
+    "UTF8=ACCEPT",
+    "UTF8=ONLY",
+    "MOVE",
+    "LITERAL+",
+    "LITERAL-",
+    "IDLE",
+    "NAMESPACE",
+    "ID",
+    "UNSELECT",
+    "CHILDREN",
+    "SASL-IR",
+    "CONDSTORE",
+    "QRESYNC",
+    "MULTIAPPEND",
+    "SPECIAL-USE",
+    "XLIST",
+    "LIST-EXTENDED",
+    "X-GM-EXT-1",
+    "BINARY",
+    "COMPRESS=DEFLATE",
+];
+fn diag_object(
+    pairs: impl IntoIterator<Item = (&'static str, serde_json::Value)>,
+) -> serde_json::Map<String, serde_json::Value> {
+    pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+}
+fn diag_connect(role: &'static str, result: &Result<Connection>) {
+    use serde_json::json;
+    let mut fields = diag_object([("role", json!(role))]);
+    match result {
+        Ok(c) => {
+            let mut names: Vec<_> = c
+                .caps
+                .iter()
+                .filter(|c| DIAG_CAPS.contains(&c.as_str()))
+                .cloned()
+                .collect();
+            names.sort();
+            let limit = c.caps.iter().find_map(|c| {
+                c.strip_prefix("APPENDLIMIT=")
+                    .and_then(|n| n.parse::<u64>().ok())
+            });
+            fields.extend(diag_object([
+                ("outcome", json!("OK")),
+                ("capabilities", json!(names)),
+                ("other_capability_count", json!(c.caps.len() - names.len())),
+                ("appendlimit", json!(limit)),
+            ]));
+        }
+        Err(e) => fields.extend(diag_failure(e)),
+    }
+    crate::diagnostics::event("connect", fields);
+}
+fn diag_failure(e: &anyhow::Error) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::json;
+    match e.downcast_ref::<ProtocolError>() {
+        Some(p) => {
+            let wire = p.wire.clone();
+            diag_object([
+                (
+                    "outcome",
+                    json!(wire.as_ref().map_or("LOCAL", |w| w.outcome)),
+                ),
+                ("code", json!(wire.as_ref().map_or("-", |w| w.code))),
+                (
+                    "unlisted_code",
+                    json!(wire.as_ref().and_then(|w| w.unlisted.clone())),
+                ),
+                (
+                    "scope",
+                    json!(p.rejection.as_ref().map(|r| r.scope().name())),
+                ),
+                ("transient", json!(p.transient)),
+            ])
+        }
+        None => diag_object([("outcome", json!("LOCAL_ERROR"))]),
+    }
+}
+/// Run one wire operation; when diagnostics are off this is exactly `f()`.
+fn observed<T>(
+    role: &'static str,
+    op: &'static str,
+    detail: impl FnOnce(&T) -> Vec<(&'static str, serde_json::Value)>,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if !crate::diagnostics::enabled() {
+        return f();
+    }
+    let started = Instant::now();
+    let result = f();
+    let mut fields = diag_object([
+        ("role", role.into()),
+        ("op", op.into()),
+        ("ms", (started.elapsed().as_millis() as u64).into()),
+    ]);
+    match &result {
+        Ok(value) => {
+            fields.insert("outcome".into(), "OK".into());
+            fields.extend(diag_object(detail(value)));
+        }
+        Err(e) => fields.extend(diag_failure(e)),
+    }
+    crate::diagnostics::event("command", fields);
+    result
+}
+// Must take `&Vec<T>` to fit the `FnOnce(&T)` callback with `T = Vec<_>`.
+#[allow(clippy::ptr_arg)]
+fn count_detail<T>(v: &Vec<T>) -> Vec<(&'static str, serde_json::Value)> {
+    vec![("count", v.len().into())]
+}
+fn message_detail(m: &Option<Message>) -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("found", m.is_some().into()),
+        ("bytes", m.as_ref().map(|m| m.body.len()).into()),
+    ]
+}
+fn selected_detail(s: &Selected) -> Vec<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+    const SYSTEM: [&str; 6] = [
+        "\\Seen",
+        "\\Answered",
+        "\\Flagged",
+        "\\Deleted",
+        "\\Draft",
+        "\\*",
+    ];
+    let system: Vec<_> = s
+        .flags
+        .iter()
+        .filter(|f| SYSTEM.iter().any(|k| k.eq_ignore_ascii_case(f)))
+        .cloned()
+        .collect();
+    vec![
+        ("writable", json!(s.writable)),
+        ("exists", json!(s.exists)),
+        ("has_uidnext", json!(s.next.is_some())),
+        ("system_flags", json!(system)),
+        ("custom_flag_count", json!(s.flags.len() - system.len())),
+    ]
 }
 
 pub struct Destination(Connection);
 impl Destination {
     pub fn connect(e: &Endpoint, password: &str, timeout: Duration, limit: usize) -> Result<Self> {
-        let c = Connection::connect(e, password, timeout, limit)?;
+        let result = Connection::connect(e, password, timeout, limit);
+        diag_connect("destination", &result);
+        let c = result?;
         // Without this, a routine successful upload may have no durable identity.
         if !c.caps.contains("UIDPLUS") && !c.caps.contains("IMAP4REV2") {
             bail!("destination must support UIDPLUS or IMAP4rev2 for APPENDUID tracking");
@@ -768,40 +985,75 @@ impl Destination {
         Ok(Self(c))
     }
     pub fn folders(&mut self) -> Result<Vec<Folder>> {
-        self.0.list()
+        observed("destination", "list", count_detail, || self.0.list())
     }
     pub fn examine(&mut self, folder: &str) -> Result<Selected> {
-        self.0.select_folder(folder, false)
+        observed("destination", "examine", selected_detail, || {
+            self.0.select_folder(folder, false)
+        })
     }
     pub fn uids(&mut self) -> Result<Vec<u32>> {
-        self.0.uids()
+        observed("destination", "uid_search", count_detail, || self.0.uids())
     }
     pub fn message(&mut self, uid: u32) -> Result<Option<Message>> {
-        self.0.message(uid)
+        observed("destination", "uid_fetch", message_detail, || {
+            self.0.message(uid)
+        })
     }
     pub fn select(&mut self, folder: &str) -> Result<Selected> {
-        self.0.select_folder(folder, true)
+        observed("destination", "select", selected_detail, || {
+            self.0.select_folder(folder, true)
+        })
     }
     /// Destination-only liveness probe. It carries no message data and, being
     /// a read of connection state, never takes part in an uncertain transfer.
     pub fn noop(&mut self) -> Result<()> {
-        self.0.reset(OVERHEAD);
-        self.0
-            .session
-            .noop()
-            .safe()
-            .context("destination NOOP liveness probe")
+        observed(
+            "destination",
+            "noop",
+            |_| Vec::new(),
+            || {
+                self.0.reset(OVERHEAD);
+                self.0
+                    .session
+                    .noop()
+                    .safe()
+                    .context("destination NOOP liveness probe")
+            },
+        )
     }
     pub fn create(&mut self, folder: &str) -> Result<()> {
-        let name = self.0.encoding.encode(folder)?;
-        self.0.reset(OVERHEAD);
-        self.0
-            .session
-            .create(name)
-            .safe()
-            .context("create destination folder")
+        observed(
+            "destination",
+            "create",
+            |_| Vec::new(),
+            || {
+                let name = self.0.encoding.encode(folder)?;
+                self.0.reset(OVERHEAD);
+                self.0
+                    .session
+                    .create(name)
+                    .safe()
+                    .context("create destination folder")
+            },
+        )
     }
     pub fn append(
+        &mut self,
+        folder: &str,
+        message: &Message,
+        flags: &[String],
+        guard: impl FnOnce() -> io::Result<()>,
+    ) -> Result<(u32, u32)> {
+        let bytes = message.body.len();
+        observed(
+            "destination",
+            "append",
+            |_| vec![("bytes", bytes.into()), ("appenduid", true.into())],
+            || self.append_inner(folder, message, flags, guard),
+        )
+    }
+    fn append_inner(
         &mut self,
         folder: &str,
         message: &Message,
@@ -1168,6 +1420,41 @@ mod tests {
             };
             assert_eq!((rejection.code, rejection.scope()), (code, scope), "{text}");
         }
+    }
+    #[test]
+    fn diagnostics_only_ever_name_validated_atoms_or_fixed_names() {
+        use imap_proto::ResponseCode as C;
+        // A vendor code is reported as a bounded atom, upper-cased, never with its text.
+        assert_eq!(
+            unlisted_atom(None, "[x-vendor-odd] PRIVATE secret sentence").as_deref(),
+            Some("X-VENDOR-ODD")
+        );
+        // Named codes are not "unlisted"; hostile or oversized atoms yield nothing.
+        assert_eq!(unlisted_atom(None, "[NOPERM] x"), None);
+        for hostile in [
+            "[a/b] x",
+            "plain text",
+            "[]",
+            &format!("[{}]", "A".repeat(33)),
+        ] {
+            assert_eq!(unlisted_atom(None, hostile), None, "{hostile:?}");
+        }
+        // Typed codes IMAPLANE has no journal name for map to fixed protocol names.
+        assert_eq!(
+            unlisted_atom(Some(&C::Alert), "PRIVATE").as_deref(),
+            Some("ALERT")
+        );
+        assert_eq!(
+            unlisted_atom(Some(&C::ReadOnly), "").as_deref(),
+            Some("READ-ONLY")
+        );
+        assert_eq!(unlisted_atom(Some(&C::TooBig), ""), None);
+        // The journal-facing code stays on the allowlist regardless.
+        assert_eq!(rejection_code(Some(&C::Alert), "PRIVATE"), "UNSPECIFIED");
+        assert_eq!(
+            rejection_code(None, "[x-vendor-odd] PRIVATE"),
+            "UNSPECIFIED"
+        );
     }
     #[test]
     fn code_extraction_is_strict_and_bounded() {

@@ -1,13 +1,21 @@
 # Gmail and Microsoft 365 compatibility testing guide
 
-Status: **plan only. No real account has been contacted.** IMAPLANE has been tested
-against Dovecot and scripted servers, never a live provider. Everything in the
-"Provider facts to verify" table is an expectation from public documentation or
-general experience, not an observation, and must be confirmed during testing.
+Status: **Stage 0 (preparation) is complete; no real provider has been contacted.**
+IMAPLANE has been tested against Dovecot and scripted servers, never a live
+provider. Everything in "Provider facts to verify" is an expectation from public
+documentation or general experience, not an observation, and must be confirmed.
 
 Goal: find out whether IMAPLANE's safety guarantees hold against real Gmail and
-Microsoft 365 IMAP servers, in **both directions**, using small disposable
-accounts. This is a compatibility exercise, not a production migration.
+Microsoft 365 IMAP servers, using small disposable accounts. Every test pairs **one
+provider with one local Dovecot**, in this order of priority:
+
+1. Gmail to Dovecot
+2. Dovecot to Gmail
+3. Microsoft 365 to Dovecot
+4. Dovecot to Microsoft 365
+
+A local Dovecot is a controlled counterpart: any surprise is attributable to the
+provider. Gmail-to-Microsoft-365 directly is deliberately out of scope.
 
 ## 1. Hard rules
 
@@ -47,81 +55,70 @@ accounts. This is a compatibility exercise, not a production migration.
 Re-check current provider documentation immediately before testing; limits and
 authentication rules change.
 
-## 3. Prerequisites
+## 3. Tooling (built and tested in Stage 0)
+
+| Tool | Purpose |
+| --- | --- |
+| `scripts/provider_lab.py` | `up`/`down`/`status` for loopback-only disposable Dovecot containers; `seed` loads the synthetic corpus into a Dovecot **source**; `config` writes a path-only IMAPLANE config for any of the four directions. Refuses to seed anything it did not create. |
+| `scripts/imap_snapshot.py` | Independent, read-only (EXAMINE, BODY.PEEK, command allowlist) snapshot of any mailbox, plus `same` (source unchanged?) and `copy` (destination equals source: content hash, multiplicity, INTERNALDATE, flags). Shares no code with IMAPLANE. |
+| `scripts/oauth_token.py` | Loopback + PKCE consent flow, then keeps an access-token file fresh. Tokens only in 0600 files, never printed. Google design is exercised against a fake endpoint only; the Microsoft preset is **untested**. |
+| `imaplane --diagnostics-file PATH` | Opt-in sanitized protocol log (see section 7). Off by default. |
+
+Other prerequisites:
 
 - IMAPLANE built from a clean, committed tree; record `git rev-parse HEAD` and the
-  binary's SHA-256. Run the full local suites first (`cargo test`, clippy, and the
-  `tests/local` scripts, including `c1_u1.py` and `skip_crash_matrix.py`).
-- Two accounts per direction: a **source** holding only synthetic mail, and an
-  **empty destination** of the other provider. Different provider per side.
-- Auth ready for each: an app password file, or an access-token file refreshed by an
-  external tool, both mode `0600`. Tokens are IMAP-scoped and short-lived.
-- IMAP enabled on both mailboxes.
-- An **independent, read-only before/after snapshot** of the source (UIDVALIDITY,
-  UID list, size and SHA-256 per message) taken with a separate client. This does
-  not exist yet; building it is a prerequisite and needs the owner's approval to
-  handle credentials.
-- A way to see raw tagged responses. IMAPLANE deliberately discards server text and
-  records only an allowlisted code and scope, so a new code or message text is
-  invisible to it. This is a tooling gap (see section 9).
+  binary's SHA-256. Run the local suites first (`cargo test`, clippy, the `tests/local`
+  scripts including `c1_u1.py`, `diagnostics.py`, `skip_crash_matrix.py` and
+  `provider_tools_integration.py`).
+- A disposable provider account with OAuth2 set up. Google: see
+  [GOOGLE_OAUTH_SETUP.md](GOOGLE_OAUTH_SETUP.md). Microsoft 365: not written yet.
+- OAuth2/XOAUTH2 is the preferred authentication method for both providers.
 
-## 4. Configuration skeletons
+## 4. Configuration
 
-Copy outside the repository. Placeholders only; never paste real values into a file
-under version control. Run `imaplane inspect` first and use the **exact** folder names
-and delimiter it prints; names such as `[Gmail]/Sent Mail` and `Sent Items` can be
-localized.
+Do not hand-write configs. Generate them (paths only, no secrets, mode 0600):
 
-Direction A, Gmail to Microsoft 365:
-
-```toml
-state_dir = "/private/dir/state-A"
-timeout_seconds = 60
-max_message_bytes = 26214400        # stay near the provider limit while probing
-
-[source]
-host = "imap.gmail.com"
-port = 993
-username = "<gmail test address>"
-password_file = "/private/dir/gmail.app-password"      # or auth = "xoauth2" + access_token_file
-
-[destination]
-host = "outlook.office365.com"
-port = 993
-username = "<m365 test address>"
-auth = "xoauth2"
-access_token_file = "/private/dir/m365.access-token"
-
-[[folders]]
-source = "INBOX"
-destination = "INBOX"
+```sh
+python3 scripts/provider_lab.py up --dir lab --roles destination        # provider is the SOURCE
+python3 scripts/provider_lab.py up --dir lab --roles source             # provider is the DESTINATION
+python3 scripts/provider_lab.py config --dir lab --direction gmail-to-dovecot \
+    --provider-user DISPOSABLE@gmail.com --token-file access.token --state-dir state --out run.toml
 ```
 
-Direction B swaps the roles: `[source]` is Microsoft 365, `[destination]` is Gmail.
-Map a small set of folders; do **not** map both a Gmail label and `[Gmail]/All Mail`
-unless duplication is the thing being tested.
+`--direction` is one of `gmail-to-dovecot`, `dovecot-to-gmail`, `m365-to-dovecot`,
+`dovecot-to-m365`. Run `imap_snapshot.py list` first and map folders using the exact
+names it prints (modified UTF-7 for non-ASCII). Do **not** map both a Gmail label and
+`[Gmail]/All Mail` unless duplication is the thing being tested.
 
 ## 5. Synthetic corpus
 
-Generate deterministically (fixed seed), keep the generator and the manifest of
-SHA-256 values outside the repo. Cover: tiny text; no Message-ID; non-ASCII headers
-and UTF-8 body; bare LF and very long lines; 8-bit content; nested `message/rfc822`;
-inline image; ~1 MiB, ~10 MiB, just-under-limit and just-over-limit attachments; a
-legitimate **duplicate pair** (identical bytes and Message-ID); old (1999) and
-mid-timezone INTERNALDATE values; flag combinations (`\Seen`, `\Flagged`,
-`\Answered`, `\Draft`, a custom keyword, `\Deleted`); a Unicode-named and a nested
-folder; an empty folder.
+`provider_lab.py seed` loads a deterministic corpus into a Dovecot **source** and
+writes `corpus-manifest.json` (SHA-256, size, flags, date per message). It covers: tiny
+text; no Message-ID; non-ASCII headers and UTF-8 body; bare LF and a very long line;
+8-bit content; nested `message/rfc822`; an inline image; a 1 MiB attachment; a
+legitimate **duplicate pair** (identical bytes and Message-ID); a 1999 INTERNALDATE and
+a negative-offset timezone; flag combinations including a custom keyword; and a
+Unicode-named nested folder. `--include-large` adds 10 MiB and `--oversize-bytes N`
+adds one message of that size, to probe provider limits. Everything is synthetic.
+
+For the Dovecot-to-provider directions this corpus is the source. For the
+provider-to-Dovecot directions the provider mailbox holds a few hand-made messages
+first (Stage 1b); afterwards the corpus that Dovecot-to-Gmail placed in the provider
+can be migrated back to a fresh Dovecot and compared with the manifest.
 
 ## 6. Staged plan
 
 Each stage has a gate. Do not advance on a failed or unexplained gate.
 
-**Stage 0, no mail moved.** `inspect`, `migrate --dry-run`, and CAPABILITY for both
-sides (pre-auth CAPABILITY needs no credentials). Gate: both authenticate, both list
-the expected folders, destination advertises UIDPLUS (P3), TLS verifies with the
-system trust store.
+**Stage 0, preparation (done).** Tooling built and rehearsed end to end against two
+local Dovecot containers; no provider contacted.
 
-**Stage 1, one message.** One small message, one folder. Gate: `complete` true, exit
+**Stage 1a, first contact, no mail moved.** OAuth authorization, `imap_snapshot.py list`,
+`inspect` and `migrate --dry-run` with diagnostics on. Gate: authenticates, lists the
+expected folders, the destination advertises UIDPLUS (P3), TLS verifies with the system
+trust store, the diagnostics file looks as expected.
+
+**Stage 1b, a handful of messages.** 3 to 5 hand-made messages, one folder (Gmail to Dovecot first; the full corpus reaches Gmail via Dovecot to Gmail, which also allows a corpus round trip compared against `corpus-manifest.json`). Gate: `complete` true, exit
 0; `verify` complete; destination message matches; source snapshot unchanged;
 journal shows one confirmed APPENDUID. Then rerun `migrate`: **zero** APPEND.
 
@@ -152,10 +149,26 @@ journal shows one confirmed APPENDUID. Then rerun `migrate`: **zero** APPEND.
 ## 7. Evidence to record per run
 
 Provider, direction, date, IMAPLANE commit and binary hash; the JSON report; journal
-summary (`status`); counts of APPEND commands and reconnects; any `uncertain`,
-`rejected` or `skipped_by_operator` entries with their recorded code and scope;
-before/after source snapshot comparison; elapsed time. Remove addresses and mailbox
-names before anything leaves the private directory.
+summary (`status`); the diagnostics file; the before/after snapshot comparisons; counts
+of APPEND commands and reconnects; any `uncertain`, `rejected` or `skipped_by_operator`
+entries with their code and scope; elapsed time. Remove addresses and mailbox names
+before anything leaves the private directory.
+
+### What the diagnostics file contains
+
+One JSON line per event. **Recorded:** role (source/destination); operation class
+(`list`, `examine`, `select`, `uid_search`, `uid_fetch`, `append`, `create`, `noop`);
+tagged status (`OK`, `NO`, `BAD`, `BYE`, `IO`); the response-code name when IMAPLANE
+knows it; for any other code, the validated atom (at most 32 characters of
+`A-Z 0-9 -`, e.g. `ALERT`) in `unlisted_code`; the failure scope IMAPLANE assigned;
+elapsed milliseconds; counts and byte sizes; whether APPENDUID was present; writable or
+read-only; the system flags a mailbox advertises; capability names from a fixed list
+(including `X-GM-EXT-1`), a count of the other capabilities, and `APPENDLIMIT` if
+advertised.
+
+**Never recorded:** passwords, tokens, usernames, folder names, message content or
+headers, UIDs, or any free-form server text. A failure whose code has no usable atom
+shows as `UNSPECIFIED`, which is itself informative.
 
 ## 8. Stop and clean-up
 
@@ -165,24 +178,21 @@ lockout/abuse warning. Then: do not rerun; preserve the journal and report; reco
 what was observed. Clean-up: revoke app passwords and tokens, delete the test
 mailboxes or accounts, securely delete configs, journals and `*.bak` backups.
 
-## 9. Known gaps before live testing
+## 9. Remaining gaps and risks
 
-1. **Raw response visibility.** To learn the exact code and text a provider returns
-   for oversize, throttle or permission errors, a separate read-only capture method
-   is needed. Options: a manual `openssl s_client` session for CAPABILITY only; a
-   small standalone probe script. Adding an opt-in diagnostic to IMAPLANE would
-   conflict with the rule that server text is never stored, so it is not proposed.
-2. **Independent source snapshot tool** (section 3).
-3. **Ambiguous by design.** Provider-specific rejections, including bandwidth
-   `[ALERT]` replies, are treated as ambiguous and stop the run. That is
-   deliberately conservative; Stage 3 decides whether any provider needs a narrower,
-   evidence-based classification.
-4. **Fixed 2-second idle probe threshold** is untested against real idle timeouts.
-5. No arm64, no IMAP4rev2-only server, and no parallel transfers are in scope.
+1. **Raw server text stays invisible by design.** Diagnostics reveal status and code,
+   not the wording. If a provider returns a `NO` with no code, only `UNSPECIFIED` is
+   recorded; a manual `openssl s_client` session (CAPABILITY only) is the fallback.
+2. **Ambiguous by design.** Provider-specific rejections, including bandwidth `[ALERT]`
+   replies, are ambiguous and stop the run. Stage 3 decides whether a provider needs a
+   narrower, evidence-based classification.
+3. **Fixed 2-second idle probe threshold** is untested against real idle timeouts.
+4. **Microsoft 365** OAuth setup guidance and the Microsoft token preset are untested.
+5. **Gmail bandwidth and connection limits** are expectations (P9); a large corpus may
+   hit them. Keep early runs tiny.
+6. No arm64, no IMAP4rev2-only server, and no parallel transfers are in scope.
 
-## 10. Decisions for the project owner
+## 10. What needs the project owner
 
-- Which auth mode for each provider (app password vs OAuth2), and who creates the
-  disposable accounts and the Microsoft 365 app registration.
-- Whether to build the source-snapshot and response-capture helpers (section 9).
-- The explicit go-ahead to begin Stage 0.
+- The disposable accounts and OAuth clients (Google steps are in GOOGLE_OAUTH_SETUP.md).
+- Explicit go-ahead for Stage 1a (first live contact) and again for each later stage.

@@ -206,6 +206,7 @@ class ProtocolServer:
         self.source_fetch_no = False
         self.wrong_rejection_tag = False
         self.restart_once = False
+        self.xoauth2_token = None  # when set, AUTH=XOAUTH2 is offered and checked
         self.idle_drop = None  # seconds; destination connection silently closes when idle this long
         self.drop_on_append = False  # destination closes without a reply when APPEND arrives
         self.throttle_code = b'THROTTLED'
@@ -228,6 +229,7 @@ class ProtocolServer:
                 mode = self.mode
                 caps = b'UIDPLUS AUTH=PLAIN'
                 caps += b' IMAP4rev2' if mode == 'rev2' else b' IMAP4rev1'
+                if self.xoauth2_token: caps += b' AUTH=XOAUTH2 APPENDLIMIT=26214400 X-GM-EXT-1 X-PRIVATE-VENDOR'
                 if mode.startswith('dual'): caps += b' IMAP4rev2 ENABLE'
                 if mode.startswith('utf8'): caps += b' UTF8=ONLY UTF8=ACCEPT ENABLE'
                 enabled = mode == 'rev2'
@@ -242,7 +244,15 @@ class ProtocolServer:
                     if verb == b'CAPABILITY': client.sendall(b'* CAPABILITY '+caps+b'\r\n')
                     elif verb == b'AUTHENTICATE':
                         client.sendall(b'+ \r\n')
-                        user = base64.b64decode(reader.readline()).split(b'\0')[1].decode()
+                        raw = base64.b64decode(reader.readline())
+                        if args and args[0].upper() == b'XOAUTH2':
+                            match = re.fullmatch(rb'user=(.*)\x01auth=Bearer (.*)\x01\x01', raw, re.S)
+                            if not (self.xoauth2_token and match and match.group(2).decode() == self.xoauth2_token):
+                                client.sendall(b'+ '+base64.b64encode(b'{"status":"401"}')+b'\r\n'); reader.readline()
+                                client.sendall(tag+b' NO [AUTHENTICATIONFAILED] PRIVATE invalid credentials\r\n'); continue
+                            user = match.group(1).decode()
+                        else:
+                            user = raw.split(b'\0')[1].decode()
                         assert user in self.messages
                         if mode.endswith('bad-auth'):
                             client.sendall(tag+b' NO rejected credential: '+PASSWORD.encode()+b'\r\n')

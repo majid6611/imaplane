@@ -15,6 +15,11 @@ use std::{
     about = "Additive, resumable IMAP-to-IMAP migration with read-only source access"
 )]
 struct Cli {
+    /// Opt in to sanitized protocol diagnostics (status, response-code names, timings,
+    /// counts) appended to this private file. Never records credentials, tokens,
+    /// usernames, folder names, message content or server text. Off by default.
+    #[arg(long, global = true, value_name = "PATH")]
+    diagnostics_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -136,6 +141,9 @@ fn print_report(report: &engine::Report, json: bool) -> anyhow::Result<ExitCode>
     Ok(ExitCode::from(if report.complete { 0 } else { 2 }))
 }
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    if let Some(path) = &cli.diagnostics_file {
+        imaplane::diagnostics::enable(path)?;
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let signal = stop.clone();
     ctrlc::set_handler(move || {

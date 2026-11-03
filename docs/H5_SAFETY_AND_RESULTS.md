@@ -89,6 +89,8 @@ python3 tests/local/crash_matrix.py
 python3 tests/local/h5_crash_matrix.py
 python3 tests/local/c1_u1.py target/release/imaplane
 python3 tests/local/skip_crash_matrix.py target/fault-tests/debug/imaplane
+python3 tests/local/diagnostics.py target/release/imaplane
+python3 tests/local/provider_tools_integration.py target/release/imaplane   # needs Docker
 python3 -m unittest discover -s tests/local -p 'test_*.py'
 ```
 

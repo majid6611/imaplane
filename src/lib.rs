@@ -1,5 +1,6 @@
 //! Migration foundations. Network migration is not exposed until recovery is tested.
 pub mod config;
+pub mod diagnostics;
 pub mod engine;
 pub mod folders;
 pub mod job;

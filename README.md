@@ -227,9 +227,18 @@ and replaced if dead, then re-selected with the UIDVALIDITY check. A successful
 probe cannot promise the connection survives the APPEND itself; a failure during
 APPEND is still uncertain and never replayed.
 
-Planned Gmail and Microsoft 365 compatibility testing (not yet started; no live
-provider has been contacted) is described in
-[docs/PROVIDER_COMPATIBILITY_TESTING.md](docs/PROVIDER_COMPATIBILITY_TESTING.md).
+Gmail and Microsoft 365 compatibility testing is prepared but **not started; no live
+provider has been contacted**. See
+[docs/PROVIDER_COMPATIBILITY_TESTING.md](docs/PROVIDER_COMPATIBILITY_TESTING.md) and, for
+Google, [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md). Supporting tools in
+`scripts/`: `imap_snapshot.py` (independent read-only snapshot and comparison),
+`oauth_token.py` (OAuth2 token files for XOAUTH2) and `provider_lab.py` (loopback
+Dovecot lab and config generator).
+
+`imaplane --diagnostics-file PATH <command>` opts in to a sanitized protocol log: it
+records statuses, response-code names, timings and counts, and never credentials,
+tokens, usernames, folder names, message content or server text. It is off by default
+and cannot alter a run.
 
 ## Preservation policy and limitations
 
