@@ -104,6 +104,8 @@ def main():
     if not binary.is_file() or not Path('/usr/bin/time').exists():
         print('need the IMAPLANE binary and GNU time (/usr/bin/time)', file=sys.stderr)
         return 2
+    from freshness import require_fresh
+    require_fresh(binary)
     limit = limit_current if args.profile == 'current' else limit_streaming
     with tempfile.TemporaryDirectory(prefix='imaplane-memory-') as tmp:
         work = Path(tmp); os.chmod(work, 0o700)

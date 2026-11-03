@@ -93,6 +93,8 @@ python3 tests/local/diagnostics.py target/release/imaplane
 python3 tests/local/memory.py target/release/imaplane --profile current --sizes 16 64 256   # dedicated CI job
 python3 tests/local/memory.py target/release/imaplane --profile streaming --scenario verify --threshold-bytes 0 --sizes 16 64 256   # dedicated CI job
 python3 tests/local/stream_verify.py target/fault-tests/debug/imaplane
+# Every suite refuses a binary older than the Rust sources or Cargo manifests (tests/local/freshness.py);
+# rebuild first, or set IMAPLANE_ALLOW_STALE_BINARY=1 to bypass deliberately.
 # Forced-streaming mode: every generated config sets stream_threshold_bytes = 0. Run these
 # again with the variable set (crash_matrix.py also needs IMAPLANE_NORMAL_BINARY=target/release/imaplane):
 IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/e2e.py target/release/imaplane

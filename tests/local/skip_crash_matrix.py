@@ -17,6 +17,8 @@ from pathlib import Path
 from e2e import PASSWORD, ProtocolServer, command, ROOT, STREAM_EXTRA
 
 BINARY = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'target/fault-tests/debug/imaplane').resolve()
+from freshness import require_fresh
+require_fresh(BINARY, 'fault-injection binary')
 FOLDER = '台北/📬'
 body = b'Subject: fixture\r\n\r\nbytes\r\n'
 three = [body + b'0', body + b'1', body + b'2']

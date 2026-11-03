@@ -15,6 +15,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 BIN = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'target/debug/imaplane').resolve()
+from freshness import require_fresh
+require_fresh(BIN)
 TOKEN = 'synthetic-token-v1'
 
 class Server:

@@ -5,6 +5,8 @@ from pathlib import Path
 from harness import DovecotLab
 from e2e import ROOT, snapshot, ProtocolServer
 BINARY=Path(sys.argv[1] if len(sys.argv)>1 else ROOT/'target/fault-tests/debug/imaplane').resolve()
+from freshness import require_fresh
+require_fresh(BINARY, 'fault-injection binary')
 
 def run(cfg,action='migrate',point=None,nth=1,code=0,extra=()):
     env=os.environ.copy(); env.pop('IMAPLANE_FAULT_POINT',None); env.pop('IMAPLANE_FAULT_NTH',None)

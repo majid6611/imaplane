@@ -403,6 +403,8 @@ def snapshot(m, folders):
     return result
 
 def main():
+    from freshness import require_fresh
+    require_fresh(BIN)
     with tempfile.TemporaryDirectory(prefix='imaplane-e2e-') as tmp:
         tmp = Path(tmp)
         cert, key = tmp / 'tls.crt', tmp / 'tls.key'

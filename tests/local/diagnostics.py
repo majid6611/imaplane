@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 from e2e import BIN, PASSWORD, ProtocolServer, command, STREAM_EXTRA
+from freshness import require_fresh
+require_fresh(BIN)
 
 TOKEN = 'TEST-ONLY-ACCESS-TOKEN-0123456789'
 BODY_MARKER = b'SECRET-BODY-MARKER'

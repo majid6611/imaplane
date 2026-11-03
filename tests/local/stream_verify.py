@@ -19,6 +19,8 @@ from pathlib import Path
 from e2e import PASSWORD, ProtocolServer, command, ROOT
 
 BINARY = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'target/fault-tests/debug/imaplane').resolve()
+from freshness import require_fresh
+require_fresh(BINARY, 'fault-injection binary')
 FOLDER = '台北/📬'
 SMALL = b'Subject: small\r\n\r\ntiny\r\n'
 LARGE = b'Subject: large\r\n\r\n' + os.urandom(1 << 20) + b'\r\ntail\r\n'   # 9 chunks of 128 KiB

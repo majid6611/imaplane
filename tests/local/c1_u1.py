@@ -13,6 +13,8 @@ import tempfile
 import traceback
 from pathlib import Path
 from e2e import BIN, PASSWORD, ProtocolServer, command, STREAM_EXTRA
+from freshness import require_fresh
+require_fresh(BIN)
 
 RESULTS = []
 

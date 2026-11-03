@@ -15,6 +15,8 @@ from harness import DovecotLab
 from e2e import PASSWORD, ProtocolServer, ROOT
 
 BINARY=Path(sys.argv[1] if len(sys.argv)>1 else 'target/fault-tests/debug/imaplane').resolve()
+from freshness import require_fresh
+require_fresh(BINARY, 'fault-injection binary')
 POINTS={
  'before_plan':'none','after_plan':'planned','before_metadata':'planned','after_metadata':'planned',
  'before_baseline':'planned','after_baseline':'planned','before_begin_append':'planned',
@@ -38,7 +40,10 @@ with tempfile.TemporaryDirectory(prefix='imaplane-crash-matrix-') as temporary:
     with DovecotLab(root) as lab:
         body=b'From: source@example.test\r\nSubject: duplicate\r\n\r\nunchanged source\r\n'
         lab.seed([body,body,b'Subject: final\r\n\r\nlast\r\n'])
+        # The regular (non fault-injection) binary: set IMAPLANE_NORMAL_BINARY explicitly. The
+        # repository's target/release or target/debug is used only if it is fresh.
         regular=Path(os.environ.get('IMAPLANE_NORMAL_BINARY',str(ROOT/'target/release/imaplane' if (ROOT/'target/release/imaplane').exists() else ROOT/'target/debug/imaplane')))
+        require_fresh(regular,'regular binary (set IMAPLANE_NORMAL_BINARY)')
         cfg,destination,_=lab.config('normalfeatureoff')
         env=os.environ.copy(); env['IMAPLANE_FAULT_POINT']='after_append_reply'
         normal=subprocess.run([str(regular),'migrate','--config',str(cfg),'--json'],env=env,capture_output=True,text=True,timeout=45)
