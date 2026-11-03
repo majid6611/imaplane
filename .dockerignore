@@ -1,0 +1,16 @@
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!vendor/
+!vendor/**
+!tests/
+!tests/foundations.rs
+!tests/safety.rs
+!packaging/
+!packaging/Dockerfile
+
+!LICENSE
+!scripts/
+!scripts/collect-licenses.py

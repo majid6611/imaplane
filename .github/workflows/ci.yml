@@ -1,0 +1,23 @@
+name: Rust
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install --yes libssl-dev pkg-config
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - run: cargo +stable fmt --check
+      - run: cargo +stable test --locked
+      - name: Patched parser upstream regression tests
+        run: cargo +stable test --manifest-path vendor/imap-proto/Cargo.toml --target-dir target/vendor-tests
+      - run: cargo +stable clippy --locked --all-targets -- -D warnings
+      - run: cargo +stable build --locked
+      - run: python3 tests/local/security.py
+      - name: TLS migration and recovery tests with disposable Dovecot servers
+        run: python3 tests/local/e2e.py

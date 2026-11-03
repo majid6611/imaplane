@@ -1,0 +1,68 @@
+name: Linux packages
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  pull_request:
+    paths: ['Cargo.toml', 'Cargo.lock', 'src/**', 'vendor/**', 'tests/**', 'examples/**', 'README.md', 'docs/**', 'packaging/**', 'scripts/**', '.github/workflows/release.yml']
+permissions:
+  contents: read
+jobs:
+  packages:
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64, format: deb}
+          - {runner: ubuntu-24.04, arch: amd64, format: rpm}
+          - {runner: ubuntu-24.04-arm, arch: arm64, format: deb}
+          - {runner: ubuntu-24.04-arm, arch: arm64, format: rpm}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release tag against manifest
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          version = tomllib.load(open('Cargo.toml','rb'))['package']['version']
+          if os.environ['GITHUB_REF_TYPE'] == 'tag':
+              assert os.environ['GITHUB_REF_NAME'] == 'v'+version, 'tag must match Cargo.toml'
+          PY
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and unit-test natively in package-family userland
+        run: scripts/build-packages.sh '${{ matrix.format }}' '${{ matrix.arch }}'
+      - name: Install, execute and uninstall package in a clean container
+        run: scripts/test-package.sh dist/packages/*.${{ matrix.format }}
+      - name: Native TLS, STARTTLS and XOAUTH2 fixtures
+        run: python3 tests/local/security.py dist/build-${{ matrix.format }}-${{ matrix.arch }}/imaplane
+      - name: Full Dovecot migration and crash recovery fixtures
+        if: matrix.format == 'deb' && matrix.arch == 'amd64'
+        run: python3 tests/local/e2e.py dist/build-deb-amd64/imaplane
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.format }}-${{ matrix.arch }}
+          path: dist/packages/*
+          if-no-files-found: error
+  publish:
+    needs: packages
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: dist
+      - name: Checksum and publish tested development packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum -- *.deb *.rpm > SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "IMAPLANE $RELEASE_TAG" --generate-notes ./*
+          gh release edit "$RELEASE_TAG" --draft=false

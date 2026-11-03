@@ -1,0 +1,41 @@
+# Copy this file outside the repository and replace the example values.
+# Relative paths are resolved against THIS configuration file's directory.
+state_dir = "./migration-state"
+timeout_seconds = 60
+max_message_bytes = 67108864
+read_attempts = 3
+
+[source]
+host = "imap.old.example"
+port = 993
+username = "mailbox@example.com"
+# Omit password_file to use an interactive, no-echo terminal prompt.
+password_file = "./source.password"
+auth = "auto" # auto prefers SASL PLAIN, then LOGIN; always inside verified TLS
+# ca_file = "./private-ca.pem" # optional additional trusted CA; no insecure mode
+
+[destination]
+host = "imap.new.example"
+port = 993
+username = "mailbox@example.com"
+password_file = "./destination.password"
+auth = "auto"
+
+# Use `inspect` to discover exact Unicode folder names and delimiters.
+# Mappings are explicit; there is no automatic delimiter or namespace rewriting.
+[[folders]]
+source = "INBOX"
+destination = "INBOX"
+
+# Add further folders only after verifying the first folder's migration.
+# [[folders]]
+# source = "Archives/Éléments envoyés"
+# destination = "Importation/Archives/Éléments envoyés"
+
+# Optional per-endpoint settings (place inside [source] or [destination]):
+# security = "starttls"  # mandatory upgrade; also set port = 143 explicitly
+# auth = "xoauth2"       # alias: "oauth2"; never falls back to a password
+# access_token_file = "./access-token" # omit password_file when using XOAUTH2
+# Tokens must already be authorized for IMAP, owned by you, and mode 0600/0400.
+# Use an external token manager; replace this file atomically before expiration.
+# Default security = "tls" and port = 993 preserve existing configuration behavior.

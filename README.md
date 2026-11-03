@@ -1,0 +1,331 @@
+# IMAPLANE
+
+A Rust command-line tool for additive IMAP-to-IMAP mailbox migration on Linux.
+The core workflow is functional and tested with disposable local Dovecot servers
+and TLS protocol fixtures. **This is development software, not a production-ready
+release.** Start with a small test folder and verify the results.
+
+IMAPLANE reads the source using `EXAMINE` and `UID FETCH ... BODY.PEEK[]`. Its
+source adapter exposes no write, flag-update, delete, expunge or subscription
+operations. It copies original message bytes to a separate destination account;
+attachments are part of those bytes. It never uses IMAP MOVE. Server access logs
+and server-side bookkeeping are outside the client's control.
+
+Implemented:
+
+- Implicit TLS or mandatory STARTTLS with certificate/hostname validation and
+  TLS 1.2 minimum. System trust plus an optional custom CA; no insecure fallback.
+- SASL PLAIN, LOGIN and XOAUTH2 inside TLS. Passwords use protected files or
+  terminal prompts; bearer access tokens use protected files. No inline secrets.
+- IMAP4rev1 modified UTF-7, negotiated UTF-8, dual-mode rev2 enablement and
+  rev2-only session handling. Unicode names are not normalized or case-folded.
+- Folder discovery, explicit one-to-one folder mappings, and destination folder
+  creation. Existing destination mail is retained.
+- Durable source UID snapshots, SHA-256 fingerprints, INTERNALDATE and supported
+  persistent flags; one exclusive job lock and private SQLite state.
+- Sequential copying with per-message size limits, bounded wire responses,
+  network timeouts, reconnect/retry for transient reads, and resumable transfers.
+- Live destination verification of exact content, date and flags, with separate
+  confirmed, uncertain, missing, changed, failed and mismatch results.
+- Safe handling of Ctrl-C, process termination and lost APPEND confirmations.
+  Uncertain uploads are not automatically repeated. Candidate discovery and
+  explicit, audited operator attribution are available.
+
+## Build and checks
+
+Install stable Rust (1.85 or newer) and the platform build prerequisites. On
+Debian/Ubuntu these include `build-essential`, `pkg-config` and `libssl-dev`.
+SQLite is bundled; OpenSSL is linked through `native-tls`.
+
+```sh
+cargo build --release --locked
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --check
+./target/release/imaplane --help
+```
+
+To install the executable for your user:
+
+```sh
+cargo install --path . --locked
+```
+
+DEB and RPM build/install scripts and a gated GitHub Actions release workflow
+are included; see [packaging instructions](docs/PACKAGING.md). No GitHub release
+has been published by this local session. Keep the `vendor/` directory:
+its small, documented parser patch is required for rev2-only capability parsing.
+See [third-party notes](vendor/README.md).
+
+## Test a real migration
+
+Use two distinct accounts. Aliases that authenticate to the same underlying
+mail store must not be used as opposite endpoints. IMAP cannot reliably prove
+that two differently named login identities are different physical accounts.
+A read-only source credential provides an additional server-enforced safeguard.
+
+1. Copy [examples/migration.toml](examples/migration.toml) to a private working
+   directory. Set the server names and account names. Start with just INBOX or a
+   small explicit source folder mapped to a new destination test folder.
+2. Omit `password_file` to receive terminal prompts, or create separate UTF-8
+   password files using a text editor. They must be regular files owned by your
+   user, without symlinks or any group/other permissions. Use mode `0600` or
+   `0400`. One trailing newline is removed.
+   Never put real credentials in this repository.
+3. Discover names, review the mapping, and run a read-only preflight:
+
+```sh
+imaplane inspect --config /path/to/migration.toml
+imaplane migrate --config /path/to/migration.toml --dry-run
+```
+
+`inspect` prints JSON folder names, hierarchy delimiters and selectability for
+both servers. Use these exact Unicode names in `[[folders]]`. No automatic
+namespace or hierarchy translation is attempted. Dry-run creates no state,
+folders or messages, and does not establish that destination writes will succeed.
+
+4. Copy, then verify against the saved evidence:
+
+```sh
+imaplane migrate --config /path/to/migration.toml
+imaplane verify --config /path/to/migration.toml
+```
+
+`state_dir` is created with mode `0700`; its files contain sensitive mailbox
+metadata and fingerprints, but no passwords or raw messages. Keep this directory
+through every retry. Its account identities and folder mappings are fixed: a
+changed mapping requires a separate job. Never run the same job using a copied
+state directory concurrently. Use local storage with working SQLite locking
+and durability semantics; network filesystems have not been validated.
+
+Progress goes to stderr. Add `--json` to migrate/verify for a versioned JSON
+report on stdout. To retain a private report:
+
+```sh
+umask 077
+imaplane migrate --config /path/to/migration.toml --json > migration-report.json
+imaplane verify --config /path/to/migration.toml --json > verification-report.json
+```
+
+Exit codes: `0` means the recorded snapshot passed all required destination
+checks (or a read-only inspect/dry-run completed), `2` means incomplete,
+interrupted, uncertain or mismatching work, and `1` means an invocation,
+configuration, storage, authentication, transport or other operational error.
+Argument parsing/help use Clap's standard exit conventions. Fatal operational
+errors can prevent a final JSON report; journal evidence still survives.
+
+The first run saves each configured folder's UID set. New arrivals are outside
+that job's snapshot, even after resume. This is not continuous synchronization.
+A new state directory starts an independent copy and can duplicate mail already
+copied by another job. Do not discard state to resolve an uncertain transfer.
+
+## Recovery and verification
+
+Rerun the same `migrate` command after interruption. Confirmed and acknowledged
+messages are read back again; they are not uploaded again. Planned records may
+continue copying. Source UIDVALIDITY changes stop migration. Destination
+UIDVALIDITY changes, missing messages, changed bytes, dates or flags are reported;
+IMAPLANE does not overwrite or automatically recreate those destination messages.
+
+Each upload is committed as **uncertain before any APPEND bytes are sent**. A
+successful reply with APPENDUID is **accepted**. It becomes **confirmed** only
+after the exact destination UID passes content, INTERNALDATE and flag checks.
+A crash between these steps is recoverable without guessing. Metadata comparison
+uses the original timestamp as an instant (not its timezone spelling) and
+case-insensitive flag matching.
+
+A lost confirmation can leave an upload uncertain even if the message exists.
+Resuming inspects up to 1,000 destination UIDs at/after the saved UIDNEXT baseline
+and lists candidates matching content, date and flags. Neither Message-ID nor a
+unique hash match proves attribution when identical deliveries can coexist.
+IMAPLANE therefore leaves these candidates **uncertain** and never blindly retries.
+
+When you have independently identified the destination UID belonging to this
+transfer, explicitly attribute it:
+
+```sh
+imaplane resolve --config /path/to/migration.toml \
+  --folder INBOX --uid 123 --destination-uid 456
+imaplane verify --config /path/to/migration.toml
+imaplane migrate --config /path/to/migration.toml
+```
+
+`resolve` verifies exact content, date, flags and destination UIDVALIDITY, rejects
+UIDs before the saved baseline and UIDs already assigned to another source
+record, and writes an attribution audit entry. It never uploads. It exits `2`
+because resolving one message does not establish whole-job completion; run
+`verify`/`migrate` afterward. The operator is responsible for attribution among
+otherwise identical candidates. If there is no identifiable candidate, the job
+remains uncertain; there is deliberately no unsafe force-retry command.
+
+For offline historical evidence only:
+
+```sh
+imaplane status --state /path/to/migration-state/journal.sqlite3 --json
+```
+
+`status` does not contact either server, cannot establish current completeness,
+and always exits `2` when it successfully reports a journal. Its confirmed count
+is historical content evidence; use `verify` for live content and metadata checks.
+`verify` uses the saved source evidence and contacts only the destination, so it
+cannot report later source changes or prove an atomic cross-server snapshot.
+
+## Preservation policy and limitations
+
+- `\Recent` is session-only and never copied. `\Deleted` is intentionally omitted
+  and reported to avoid making migrated mail vulnerable to an external expunge.
+  Unsupported or unsafe keywords/flags are also omitted and reported. A confirmed
+  result means all **supported, planned** flags match; review `omitted_flags` for
+  fidelity limitations even when the job completes.
+- Destination UIDPLUS or IMAP4rev2 support, stable UIDVALIDITY and UIDNEXT are
+  required. UIDPLUS advertised but missing APPENDUID yields an uncertain record.
+- Messages are fetched individually into bounded memory rather than disk-spooled.
+  The default cap is 64 MiB per message; peak memory includes the parser buffer
+  and a content copy (vector capacity may exceed content length). The source
+  message buffer is released before destination verification. This is not a total
+  process RSS limit: UID snapshots and JSON/text report entries consume memory
+  proportional to the number of messages. `max_message_bytes` is configurable up to 1 GiB. LIST and
+  UID-inventory responses are capped at 16 MiB; other metadata at 1 MiB. Very
+  large inventories or messages fail clearly rather than bypass limits.
+- No built-in OAuth browser/device authorization or token-refresh grant client,
+  Gmail label deduplication, provider-specific transformations,
+  batch accounts, subscriptions, quota preflight, ongoing synchronization or
+  automatic incremental passes. Treat Gmail virtual/label folders carefully:
+  different source folder instances are copied independently.
+- Arbitrary folder control characters, noncanonical modified UTF-7, special-use
+  attribute migration, binary literal8 extensions and unusual server responses
+  are not fully supported. Explicit mappings do not detect every server's hidden
+  case-insensitivity or shared namespace aliases; review exact destination names.
+- Read failures retry with bounded backoff. APPEND is never retried automatically,
+  including conservative uncertainty on some explicit server rejections. Ctrl-C
+  requests a stop between operations; an in-flight network operation may run
+  until its configured timeout. Killing the process may require attribution.
+- Version 2 journals remain unchanged. Version 1 journals upgrade transactionally
+  without changing bindings, fingerprints or transfer states. Missing legacy
+  metadata is not invented: old uncertain transfers remain uncertain and legacy
+  content-only confirmation is not treated as full metadata verification. Offline
+  status can read either version without upgrading or writing it.
+- Testing covers local Dovecot 2.3 plus rev1/rev2 scripted TLS fixtures. Large-scale,
+  multi-provider, sustained performance, full RFC9051 interoperability, quotas,
+  malicious-server fuzzing and all crash/power-loss/storage failures have not been
+  exhaustively tested. No production-readiness claim is made.
+
+## Persistent isolated Docker Compose lab
+
+For a ready-to-use local environment with two Dovecot servers, 120 synthetic
+emails, attachments, Unicode folders, verified test TLS, and deterministic
+interruption/resume checks:
+
+```sh
+./scripts/lab.sh up
+./scripts/lab.sh cli migrate --dry-run
+./scripts/lab.sh cli migrate
+./scripts/lab.sh cli verify
+./scripts/lab.sh test
+./scripts/lab.sh recovery
+```
+
+The CLI runs inside an internal-only network with fixed test endpoints, no
+published IMAP ports, test-only credentials and separate mail volumes. No real
+configuration is loaded. `./scripts/lab.sh reset` recreates only this lab;
+`./scripts/lab.sh down` stops it while preserving its mail and journals.
+See [the Compose lab instructions](tests/compose/README.md) for exact repeatable
+commands, configuration paths, reports, reset behavior and isolation limits.
+
+## Local end-to-end tests
+
+With Docker, Python 3 and OpenSSL installed:
+
+```sh
+cargo build --locked
+python3 tests/local/security.py
+python3 tests/local/e2e.py
+# Or pass a release binary:
+python3 tests/local/e2e.py target/release/imaplane
+```
+
+The suite starts two disposable Dovecot containers from a pinned image, uses
+random loopback-only ports, generates a temporary TLS certificate, seeds only
+synthetic mail, and removes its containers in cleanup. The image download needs
+network access. It does not use your configuration or real mail credentials.
+
+It checks Unicode/escaped folder discovery and creation; exact attachment bytes,
+flags and dates; identical legitimate messages; preservation of source and
+existing destination mail; no duplicate uploads on resume; newly arriving mail
+outside the snapshot; TLS rejection; password authentication methods; read reconnects;
+job locking; size limits; verification discrepancies; lost APPEND replies;
+Ctrl-C; SIGKILL; and audited resolution. Separate security fixtures test XOAUTH2, strict STARTTLS, rotating tokens on
+reconnect and refusal paths. Scripted TLS fixtures exercise rev1,
+rev2-only, dual-mode ENABLE, UTF8=ONLY and unsuccessful enablement. See
+[technical design](docs/TECHNICAL_DESIGN.md) for architecture and remaining gates.
+
+Licensed under [Apache-2.0](LICENSE). The vendored parser retains its upstream
+MIT/Apache-2.0 licenses. No imapcopy source code is included.
+
+
+## XOAUTH2 and mandatory STARTTLS
+
+Existing configurations keep implicit TLS, port 993, and their previous auth
+behavior. New settings belong inside an endpoint section:
+
+```toml
+[source]
+host = "imap.example.com"
+port = 143
+security = "starttls"
+username = "mailbox@example.com"
+auth = "xoauth2"
+access_token_file = "./source.access-token"
+# ca_file = "./private-ca.pem"
+```
+
+Omit `password_file` when using XOAUTH2. The token file contains only a bearer
+**access token**, not a refresh token or a JSON response. It uses the same owner,
+permissions, symlink and size checks as password files. The token is re-read on
+every connection, including reconnects; atomically replace the file using a
+trusted external token manager before expiration. IMAPLANE never runs an arbitrary
+credential command or falls back to a password after XOAUTH2 failure. OAuth
+consent, token acquisition and refresh are managed outside this tool.
+
+For implicit TLS, retain `security = "tls"` (the default) and port 993. For
+STARTTLS, explicitly configure `security = "starttls"` and port 143 (or your server's
+configured upgrade port). The server must advertise STARTTLS and complete the
+upgrade; credentials are sent only after certificate validation. Pre-TLS
+capabilities are discarded and queried again inside TLS. DNS lookup time still
+depends on the operating system; handshake and protocol I/O have deadlines.
+Changing auth or security on the same host/port/user does not change journal
+identity. Changing a bound account, port or mapping still correctly refuses resume.
+
+**Provider status:** the XOAUTH2 wire format is implemented and tested using
+local TLS fixtures, including Google's error challenge exchange. Gmail and
+Microsoft 365 have **not** been tested with live accounts in this environment.
+The implementation is intended to interoperate with their documented XOAUTH2
+mechanisms, not certified for either provider. A valid token alone does not
+ensure that IMAP is enabled or that tenant/consent policies permit access.
+
+- For Gmail, follow [Google's IMAP XOAUTH2 documentation](https://developers.google.com/workspace/gmail/imap/xoauth2-protocol),
+  including the documented `https://mail.google.com/` scope and account policy.
+- For Microsoft 365, follow [Microsoft's IMAP OAuth documentation](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth/).
+  Delegated IMAP access uses `https://outlook.office.com/IMAP.AccessAsUser.All`;
+  application permissions require additional Exchange service-principal and
+  mailbox authorization. Do not substitute a Microsoft Graph token for an
+  Exchange IMAP token.
+
+## Reliability audit and evidence
+
+See [the audit record](docs/RELIABILITY_AUDIT.md) for confirmed findings, fixes,
+test coverage and remaining assumptions. Tests exercise synthetic mail only;
+passing them does not establish production readiness or live-provider support.
+Malformed protocol responses are sanitized to avoid leaking message literals or
+server-echoed credentials through error output. A failed read that leaves session
+state uncertain stops the pass rather than continuing uploads on that session.
+
+
+Latest local validation (2026-11-02): **23 project tests and 82 parser tests pass**;
+Clippy/formatting pass; the expanded Dovecot migration/crash suite and local
+XOAUTH2/STARTTLS security suites pass against release binaries. amd64 DEB and RPM
+packages pass clean installation, execution and removal. cargo-audit reports zero
+known crate vulnerabilities/warnings at the advisory database revision recorded
+in the audit. These results do not establish live Gmail/Microsoft 365 compatibility
+or tested arm64 support; those remain explicitly unvalidated here. Package
+builds collect dependency and Rust toolchain notices automatically.
