@@ -208,11 +208,19 @@ impl<'a> SourceReader<'a> {
         Ok(s)
     }
 }
+/// A successful APPENDUID proves the next allocated UID must be larger.
+/// Reconnect SELECT may already have observed an even higher lower bound.
+fn append_lower_bound(previous: Option<u32>, acknowledged_uid: u32) -> Option<u32> {
+    acknowledged_uid
+        .checked_add(1)
+        .map(|next| previous.unwrap_or(next).max(next))
+}
 struct DestinationReader<'a> {
     config: &'a Config,
     password: &'a str,
     destination: Destination,
-    selected: Option<(String, u32)>,
+    selected: Option<(String, u32, bool)>,
+    cached: Option<Selected>,
 }
 impl<'a> DestinationReader<'a> {
     fn new(config: &'a Config, password: &'a str) -> Result<Self> {
@@ -228,6 +236,7 @@ impl<'a> DestinationReader<'a> {
             config,
             password,
             selected: None,
+            cached: None,
         })
     }
     fn read<T>(&mut self, mut f: impl FnMut(&mut Destination) -> Result<T>) -> Result<T> {
@@ -241,12 +250,20 @@ impl<'a> DestinationReader<'a> {
                     self.config.max_message_bytes,
                 )?;
 
-                if let Some((folder, validity)) = &self.selected {
-                    let selected = self.destination.examine(folder)?;
-                    crate::fault::point("after_destination_reconnect");
-                    if selected.validity != *validity {
+                if let Some((folder, validity, writable)) = self.selected.clone() {
+                    let selected = if writable {
+                        self.destination.select(&folder)?
+                    } else {
+                        self.destination.examine(&folder)?
+                    };
+                    if selected.validity != validity {
                         bail!("destination UIDVALIDITY changed during reconnect");
                     }
+                    if writable && !selected.writable {
+                        bail!("destination became read-only during reconnect");
+                    }
+                    self.cached = Some(selected);
+                    crate::fault::point("after_destination_reconnect");
                 }
             }
             reconnect = true;
@@ -256,6 +273,7 @@ impl<'a> DestinationReader<'a> {
 
     fn select(&mut self, name: &str, writable: bool) -> Result<Selected> {
         self.selected = None;
+        self.cached = None;
         let s = self.read(|d| {
             if writable {
                 d.select(name)
@@ -263,8 +281,29 @@ impl<'a> DestinationReader<'a> {
                 d.examine(name)
             }
         })?;
-        self.selected = Some((name.into(), s.validity));
+        if writable && !s.writable {
+            bail!("destination folder is read-only");
+        }
+        self.selected = Some((name.into(), s.validity, writable));
+        self.cached = Some(s.clone());
         Ok(s)
+    }
+    fn writable_selection(&mut self, name: &str) -> Result<Selected> {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|(folder, _, writable)| folder == name && *writable)
+        {
+            if let Some(selected) = &self.cached {
+                return Ok(selected.clone());
+            }
+        }
+        self.select(name, true)
+    }
+    fn advance_baseline(&mut self, acknowledged_uid: u32) {
+        if let Some(selected) = &mut self.cached {
+            selected.next = append_lower_bound(selected.next, acknowledged_uid);
+        }
     }
 }
 
@@ -476,7 +515,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                 ));
                 continue;
             }
-            let current = dest.select(&mapping.destination, true)?;
+            let current = dest.writable_selection(&mapping.destination)?;
             if current.validity != selected.validity {
                 bail!("destination UIDVALIDITY changed before APPEND");
             }
@@ -533,6 +572,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     circuit.success();
                     drop(message); // Release source content before destination verification.
                     job.journal.acknowledge(&key, dv, du)?;
+                    dest.advance_baseline(du);
                     let r = job.journal.record(&key)?.unwrap();
                     report.entries.push(verify_record(
                         &mut job.journal,
@@ -924,6 +964,13 @@ pub fn resolve(c: &Config, folder: &str, uid: u32, destination_uid: u32) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn append_baseline_is_monotone_and_does_not_wrap_uids() {
+        assert_eq!(append_lower_bound(Some(1), 7), Some(8));
+        assert_eq!(append_lower_bound(Some(50), 40), Some(50));
+        assert_eq!(append_lower_bound(None, 3), Some(4));
+        assert_eq!(append_lower_bound(Some(u32::MAX), u32::MAX), None);
+    }
     #[test]
     fn transfer_flags_enforce_safe_supported_flags_without_deleted_or_recent() {
         let source = [

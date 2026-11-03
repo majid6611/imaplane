@@ -123,3 +123,29 @@ check, not a five-repetition performance claim: fresh syncs fell from 25.42 to
 17.42/message (8 fewer), with identical exchanges. Resume counters were unchanged.
 Small-run startup costs differ from the 100-message control; do not compare
 per-message setup overhead across different dataset sizes.
+
+
+Increment 2 is commit `80ad8be`: successful current exact read-back retains an
+already durable historical confirmation instead of invalidating/reconfirming it.
+Observed mismatch/missing/failed checks still durably invalidate history. Fresh
+accepted transfers still require a FULL confirmation after exact verification.
+The unit, protocol/security/reliability suites and 30+43 fault scenarios passed.
+The [counter smoke check](benchmarks/h5-s2-smoke.json) retained identical read
+exchanges while healthy resume sync calls fell from 8.00 to 0.00/message.
+Zero here means no client fsync/fdatasync calls in that measured process, not
+zero server I/O or device activity. A crash during a new check leaves historical
+confirmation; offline status never proves current destination integrity.
+
+Increment 3 reuses writable destination selection. Each reconnect restores the
+original writable/read-only mode and checks UIDVALIDITY; a writable SELECT is
+mandatory before another APPEND. Validated APPENDUID+1 advances a monotone lower
+bound, without integer wrap. A fresh selection after reconnect can raise it.
+The unit, security/e2e/reliability suites and all 73 fault scenarios passed before
+committing this increment. Exact read-back, separate durable authorization/ack,
+manual uncertainty, and sequential APPEND remain unchanged. An idle connection
+failure first discovered by APPEND can still leave prepared uncertainty requiring
+explicit recover. Cached lower bounds can widen the candidate scan under concurrent
+deliveries; overflow is explicitly incomplete, never silently attributed.
+
+The mixed-profile harness now validates its memory budget against the actual
+attachment sizes rather than the unrelated uniform-size option.

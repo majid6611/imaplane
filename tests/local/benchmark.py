@@ -84,7 +84,8 @@ def main():
     if not 2<=args.messages<=10000 or not 0<=args.attachment_bytes<=16*1024*1024 or not 1<=args.repeats<=20 or any(not 0<=x<=1000 for x in args.latency_ms):
         parser.error('messages 2..10000; attachment bytes 0..16MiB; repeats 1..20; latency 0..1000ms')
     if len(set(args.latency_ms)) != len(args.latency_ms): parser.error('latency values must be unique')
-    if args.messages*args.attachment_bytes>128*1024*1024: parser.error('dataset attachment memory budget is 128 MiB')
+    attachment_total = sum([1024,8192,131072,1048576][(i//2)%4] for i in range(args.messages)) if args.mixed else args.messages*args.attachment_bytes
+    if attachment_total>128*1024*1024: parser.error('dataset attachment memory budget is 128 MiB')
     if args.output.exists(): parser.error('output already exists; choose a new baseline file')
     binary=args.binary.resolve()
     if not binary.is_file(): parser.error('build the regular release binary first')
