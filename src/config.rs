@@ -63,6 +63,11 @@ pub struct Config {
     pub read_attempts: u32,
     #[serde(default = "rejection_limit")]
     pub append_rejection_limit: u32,
+    /// Destination reads of messages larger than this many bytes stream through a hasher
+    /// instead of being held in memory. Absent (the default) means never; 0 means always.
+    /// Not part of the job binding, so it can be changed between runs.
+    #[serde(default)]
+    pub stream_threshold_bytes: Option<usize>,
 }
 fn rejection_limit() -> u32 {
     3
@@ -125,9 +130,11 @@ impl Config {
             || !(1..=100).contains(&c.append_rejection_limit)
             || c.max_message_bytes == 0
             || c.max_message_bytes > 1024 * 1024 * 1024
+            || c.stream_threshold_bytes
+                .is_some_and(|t| t > 1024 * 1024 * 1024)
         {
             bail!(
-                "invalid limits: timeout 1..3600, attempts 1..10, rejection limit 1..100, message bytes 1..1073741824"
+                "invalid limits: timeout 1..3600, attempts 1..10, rejection limit 1..100, message bytes 1..1073741824, stream threshold 0..1073741824"
             );
         }
         let mut sources = std::collections::HashSet::new();

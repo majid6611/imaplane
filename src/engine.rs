@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     job::Job,
-    journal::{AppendMetadata, Journal, MessageKey, Record, fingerprint},
+    journal::{AppendMetadata, Journal, MessageKey, Record},
     transport::{Destination, Message, Selected, Source, valid_flag},
 };
 use anyhow::{Context, Result, bail};
@@ -256,6 +256,17 @@ impl<'a> DestinationReader<'a> {
     }
     fn touch(&mut self) {
         self.last_activity = std::time::Instant::now();
+    }
+    /// Digest of one destination message. Larger than `stream_threshold_bytes` it is
+    /// streamed through a hasher and never held in memory; otherwise it is read whole as
+    /// before. `chunk_point` names the crash-test hook that fires per streamed chunk.
+    fn digest(
+        &mut self,
+        uid: u32,
+        chunk_point: &'static str,
+    ) -> Result<Option<crate::transport::MessageDigest>> {
+        let threshold = self.config.stream_threshold_bytes;
+        self.read(|d| d.message_digest(uid, threshold, chunk_point))
     }
     /// Detect an idle-dropped destination BEFORE any journal transition for the
     /// next APPEND. A dead connection is replaced through the normal read path,
@@ -720,7 +731,12 @@ fn transfer_flags(flags: &[String], supported: &[String]) -> (Vec<String>, Vec<S
     (kept.into_iter().collect(), omitted.into_iter().collect())
 }
 fn matches_record(r: &Record, m: &Message) -> Result<()> {
-    if fingerprint(&m.body) != r.hash {
+    matches_digest(r, &m.digest())
+}
+/// The one comparison of journal evidence against a destination message: content hash,
+/// INTERNALDATE and supported persistent flags.
+fn matches_digest(r: &Record, m: &crate::transport::MessageDigest) -> Result<()> {
+    if m.sha256 != r.hash {
         bail!("content hash mismatch");
     }
     if Some(m.date.timestamp()) != r.date {
@@ -773,7 +789,7 @@ fn verify_record(
         );
     }
     crate::fault::point("before_verification_fetch");
-    let m = match d.read(|d| d.message(du)) {
+    let m = match d.digest(du, "verification_stream_chunk") {
         Ok(Some(m)) => m,
         Ok(None) => {
             return verification_failure(j, r, "missing", "destination UID no longer exists");
@@ -792,7 +808,7 @@ fn verify_record(
         }
     };
     crate::fault::point("after_verification_fetch");
-    if let Err(e) = matches_record(r, &m) {
+    if let Err(e) = matches_digest(r, &m) {
         return verification_failure(j, r, "mismatch", e.to_string());
     }
     if r.state == "confirmed" {
@@ -801,7 +817,7 @@ fn verify_record(
         crate::fault::point("before_confirm");
         crate::fault::point("after_confirm");
     } else {
-        j.confirm_content(&r.key, dv, du, &m.body)?;
+        j.confirm_content_fingerprint(&r.key, dv, du, &m.sha256)?;
     }
     Ok(entry(
         &r.key,

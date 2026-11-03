@@ -109,6 +109,58 @@ fn config_rejects_unknown_fields_and_duplicate_inbox_aliases_without_echoing_inp
 }
 
 #[test]
+fn stream_threshold_is_optional_bounded_and_not_part_of_the_job_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    let text = config_text(&temp.path().join("state"), &temp.path().join("password"));
+    // Absent: streaming is off, which keeps existing configurations behaving exactly as before.
+    fs::write(&path, &text).unwrap();
+    let off = Config::load(&path).unwrap();
+    assert_eq!(off.stream_threshold_bytes, None);
+    let (binding, folders) = (off.binding().unwrap(), text.contains("[[folders]]"));
+    assert!(folders);
+    // The key must precede the tables; 0 means always, and the value never changes the binding.
+    for (value, expected) in [
+        ("0", Some(0)),
+        ("8388608", Some(8 << 20)),
+        ("1073741824", Some(1 << 30)),
+    ] {
+        fs::write(&path, format!("stream_threshold_bytes = {value}\n{text}")).unwrap();
+        let c = Config::load(&path).unwrap();
+        assert_eq!(c.stream_threshold_bytes, expected);
+        assert_eq!(
+            c.binding().unwrap(),
+            binding,
+            "the threshold must not alter the job binding"
+        );
+    }
+    for bad in ["-1", "1073741825", "\"8MiB\"", "1.5"] {
+        fs::write(&path, format!("stream_threshold_bytes = {bad}\n{text}")).unwrap();
+        assert!(Config::load(&path).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn confirming_with_a_precomputed_fingerprint_requires_the_journaled_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut j = Journal::create(&temp.path().join("journal.sqlite3"), "binding").unwrap();
+    let k = key();
+    j.plan(&k, b"hello").unwrap();
+    j.begin_append(&k).unwrap();
+    j.acknowledge(&k, 5, 9).unwrap();
+    // A digest of different content must not confirm, and must leave the record accepted.
+    assert!(
+        j.confirm_content_fingerprint(&k, 5, 9, &imaplane::journal::fingerprint(b"other"))
+            .is_err()
+    );
+    assert_eq!(j.record(&k).unwrap().unwrap().state, "accepted");
+    // The right digest confirms, exactly like the slice-taking form.
+    j.confirm_content_fingerprint(&k, 5, 9, &imaplane::journal::fingerprint(b"hello"))
+        .unwrap();
+    assert_eq!(j.record(&k).unwrap().unwrap().state, "confirmed");
+}
+
+#[test]
 fn legacy_journal_upgrade_preserves_evidence_and_status_is_read_only() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("legacy.sqlite3");

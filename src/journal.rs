@@ -373,11 +373,24 @@ impl Journal {
         uid: u32,
         body: &[u8],
     ) -> Result<()> {
+        self.confirm_content_fingerprint(key, validity, uid, &fingerprint(body))
+    }
+
+    /// Same transition with a fingerprint already computed (for example while streaming).
+    /// The SQL still requires it to equal the stored fingerprint, so a digest that does not
+    /// match the journaled content can never confirm.
+    pub fn confirm_content_fingerprint(
+        &mut self,
+        key: &MessageKey,
+        validity: u32,
+        uid: u32,
+        fingerprint: &str,
+    ) -> Result<()> {
         crate::fault::point("before_confirm");
         let count = self.0.execute(
             "UPDATE transfers SET state='confirmed' WHERE folder=?1 AND uid_validity=?2 AND uid=?3
              AND state='accepted' AND destination_validity=?4 AND destination_uid=?5 AND fingerprint=?6",
-            params![key.folder, key.uid_validity, key.uid, validity, uid, fingerprint(body)],
+            params![key.folder, key.uid_validity, key.uid, validity, uid, fingerprint],
         ).context("persist content verification")?;
         require_one(count)?;
         crate::fault::point("after_confirm");

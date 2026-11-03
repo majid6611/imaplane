@@ -207,6 +207,8 @@ class ProtocolServer:
         self.wrong_rejection_tag = False
         self.restart_once = False
         self.xoauth2_token = None  # when set, AUTH=XOAUTH2 is offered and checked
+        self.truncate_dest_fetch_at = None  # destination body FETCH: send this many bytes, then close
+        self.drop_reply_after_commit = False  # APPEND is stored but the reply is never sent
         self.idle_drop = None  # seconds; destination connection silently closes when idle this long
         self.drop_on_append = False  # destination closes without a reply when APPEND arrives
         self.throttle_code = b'THROTTLED'
@@ -320,6 +322,8 @@ class ProtocolServer:
                                         threading.Thread(target=restart,daemon=True).start()
                                         return
                                     payload = prefix+b' FLAGS (\\Seen) INTERNALDATE "02-Jan-2020 03:04:05 +0000" BODY[] {'+str(len(body)).encode()+b'}\r\n'+body+b')\r\n'
+                                    if user == 'destination' and self.truncate_dest_fetch_at is not None and len(payload) > self.truncate_dest_fetch_at:
+                                        client.sendall(payload[:self.truncate_dest_fetch_at]); return
                                     if self.slow:
                                         for offset in range(0, len(payload), 4096):
                                             client.sendall(payload[offset:offset+4096]); time.sleep(.08)
@@ -357,6 +361,7 @@ class ProtocolServer:
                             for _ in range(20):
                                 client.sendall(b'* OK progress\r\n'); time.sleep(.1)
                         self.messages[user].append(data[:-2])
+                        if self.drop_reply_after_commit: return
                         client.sendall(tag+b' OK [APPENDUID '+str(self.append_validity).encode()+b' '+str(self.append_uid_override if self.append_uid_override is not None else len(self.messages[user])).encode()+b'] appended\r\n')
                         continue
                     else:

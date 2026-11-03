@@ -852,13 +852,17 @@ impl Connection {
         &mut self,
         uid: u32,
         stream_above: Option<usize>,
+        chunk_point: &'static str,
     ) -> Result<(Option<MessageDigest>, bool)> {
         let Some(expected) = self.size_of(uid)? else {
             return Ok((None, false));
         };
         if stream_above.is_some_and(|threshold| expected > threshold) {
             self.reset(expected.saturating_add(OVERHEAD));
-            Ok((stream_digest(&mut self.session, uid, expected)?, true))
+            Ok((
+                stream_digest(&mut self.session, uid, expected, chunk_point)?,
+                true,
+            ))
         } else {
             let message = self.fetch_buffered(uid, expected)?;
             Ok((message.map(|m| m.digest()), false))
@@ -874,6 +878,7 @@ fn stream_digest<T: Read + Write>(
     session: &mut imap::Session<T>,
     uid: u32,
     expected: usize,
+    chunk_point: &'static str,
 ) -> Result<Option<MessageDigest>> {
     let mut hasher = Sha256::new();
     let mut seen = 0u64;
@@ -881,6 +886,8 @@ fn stream_digest<T: Read + Write>(
         .uid_fetch_body_stream(uid, expected as u64, &mut |chunk| {
             hasher.update(chunk);
             seen += chunk.len() as u64;
+            // Crash-test hook (absent in default builds): die part-way through the body.
+            crate::fault::point(chunk_point);
             Ok(())
         })
         .safe()?;
@@ -1132,12 +1139,13 @@ impl Destination {
         &mut self,
         uid: u32,
         stream_above: Option<usize>,
+        chunk_point: &'static str,
     ) -> Result<Option<MessageDigest>> {
         if !crate::diagnostics::enabled() {
-            return Ok(self.0.digest(uid, stream_above)?.0);
+            return Ok(self.0.digest(uid, stream_above, chunk_point)?.0);
         }
         let started = Instant::now();
-        let result = self.0.digest(uid, stream_above);
+        let result = self.0.digest(uid, stream_above, chunk_point);
         let mut fields = diag_object([
             ("role", "destination".into()),
             ("op", "uid_fetch_digest".into()),
@@ -1769,7 +1777,7 @@ mod tests {
         });
         client.read_greeting().unwrap();
         let mut session = client.login("u", "p").map_err(|e| e.0).unwrap();
-        match stream_digest(&mut session, uid, expected) {
+        match stream_digest(&mut session, uid, expected, "") {
             Ok(None) => Outcome::Absent,
             Ok(Some(d)) => found(&d),
             Err(e) => classify(&e),
