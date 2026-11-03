@@ -1098,7 +1098,26 @@ pub fn valid_flag(flag: &str) -> bool {
             .all(|b| (0x21..=0x7e).contains(&b) && !b"(){%*\"\\]".contains(&b))
 }
 
-fn decode_message(response: &[u8], uid: u32, expected: usize) -> Result<Option<Message>> {
+/// What one FETCH response says about one message, after every structural check.
+/// `body` is empty when the body literal was streamed out of the response.
+struct ParsedFetch {
+    body: Vec<u8>,
+    date: DateTime<FixedOffset>,
+    flags: Vec<String>,
+}
+/// The single place that validates a message FETCH response, used by both the buffered
+/// path and the streaming path so they cannot diverge.
+///
+/// `streamed_len` is `Some` when the body literal was streamed out and replaced by an empty
+/// literal in `response`; the size check then uses that length. The size check happens as
+/// soon as the matching body is found, before later responses are examined, exactly as the
+/// original decoder did, so the same error is reported for the same input.
+fn parse_fetch(
+    response: &[u8],
+    uid: u32,
+    expected: usize,
+    streamed_len: Option<usize>,
+) -> Result<Option<ParsedFetch>> {
     use imap_proto::AttributeValue as A;
     let mut rest = response;
     let mut message = None;
@@ -1147,14 +1166,14 @@ fn decode_message(response: &[u8], uid: u32, expected: usize) -> Result<Option<M
                     if dates.len() != 1 || flags.len() != 1 {
                         bail!("FETCH omitted or duplicated INTERNALDATE/FLAGS");
                     }
-                    if bodies[0].len() != expected {
+                    if streamed_len.unwrap_or(bodies[0].len()) != expected {
                         return Err(
                             PermanentMessageError("message size differs from RFC822.SIZE").into(),
                         );
                     }
                     let date = DateTime::parse_from_str(dates[0], "%d-%b-%Y %H:%M:%S %z")
                         .context("invalid INTERNALDATE")?;
-                    message = Some(Message {
+                    message = Some(ParsedFetch {
                         body: bodies[0].to_vec(),
                         date,
                         flags: flags[0].iter().map(ToString::to_string).collect(),
@@ -1165,6 +1184,16 @@ fn decode_message(response: &[u8], uid: u32, expected: usize) -> Result<Option<M
         rest = next;
     }
     Ok(message)
+}
+
+fn decode_message(response: &[u8], uid: u32, expected: usize) -> Result<Option<Message>> {
+    Ok(
+        parse_fetch(response, uid, expected, None)?.map(|parsed| Message {
+            body: parsed.body,
+            date: parsed.date,
+            flags: parsed.flags,
+        }),
+    )
 }
 
 // Parse selection with the established protocol parser rather than imap's
@@ -1387,6 +1416,92 @@ mod tests {
         let mut duplicate = valid.to_vec();
         duplicate.extend(valid);
         assert!(decode_message(&duplicate, 7, 3).is_err());
+    }
+    /// Outcome class of a decode, for pinning behavior across refactors.
+    fn decode_outcome(response: &[u8], uid: u32, expected: usize) -> String {
+        match decode_message(response, uid, expected) {
+            Ok(None) => "none".into(),
+            Ok(Some(m)) => format!(
+                "ok body={} date={} flags={:?}",
+                String::from_utf8_lossy(&m.body),
+                m.date.timestamp(),
+                m.flags
+            ),
+            Err(e) if e.is::<PermanentMessageError>() => "permanent".into(),
+            Err(_) => "error".into(),
+        }
+    }
+    const D: &str = "INTERNALDATE \"02-Jan-2020 03:04:05 +0000\"";
+    #[test]
+    fn decode_message_behavior_is_pinned_for_valid_and_malformed_responses() {
+        let ok = format!("* 1 FETCH (UID 7 FLAGS (\\Seen) {D} BODY[] {{3}}\r\nabc)\r\n");
+        let ts = chrono::DateTime::parse_from_rfc3339("2020-01-02T03:04:05+00:00")
+            .unwrap()
+            .timestamp();
+        let good = format!("ok body=abc date={ts} flags=[\"\\\\Seen\"]");
+        let case = |response: &str, uid: u32, expected: usize| {
+            decode_outcome(response.as_bytes(), uid, expected)
+        };
+        assert_eq!(case(&ok, 7, 3), good);
+        // Attribute order must not matter.
+        let body_first = format!("* 1 FETCH (BODY[] {{3}}\r\nabc UID 7 FLAGS (\\Seen) {D})\r\n");
+        assert_eq!(case(&body_first, 7, 3), good);
+        // Size mismatch is a permanent-message error, whichever way it differs.
+        assert_eq!(case(&ok, 7, 4), "permanent");
+        assert_eq!(case(&ok, 7, 2), "permanent");
+        // A different UID, or a response without a body, is "no message", not an error.
+        assert_eq!(case(&ok, 8, 3), "none");
+        assert_eq!(
+            case(
+                &format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] NIL)\r\n"),
+                7,
+                3
+            ),
+            "none"
+        );
+        assert_eq!(
+            case(&format!("* 1 FETCH (UID 7 FLAGS () {D})\r\n"), 7, 3),
+            "none"
+        );
+        assert_eq!(case("", 7, 3), "none");
+        // Quoted-string body (legal for small data) is accepted like a literal.
+        assert!(
+            case(
+                &format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] \"abc\")\r\n"),
+                7,
+                3
+            )
+            .starts_with("ok body=abc")
+        );
+        // Structural problems are errors.
+        let no_flags = format!("* 1 FETCH (UID 7 {D} BODY[] {{3}}\r\nabc)\r\n");
+        let no_date = "* 1 FETCH (UID 7 FLAGS () BODY[] {3}\r\nabc)\r\n";
+        let two_flags = format!("* 1 FETCH (UID 7 FLAGS () FLAGS () {D} BODY[] {{3}}\r\nabc)\r\n");
+        let two_dates = format!("* 1 FETCH (UID 7 FLAGS () {D} {D} BODY[] {{3}}\r\nabc)\r\n");
+        let two_uids = format!("* 1 FETCH (UID 7 UID 7 FLAGS () {D} BODY[] {{3}}\r\nabc)\r\n");
+        let two_bodies =
+            format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] {{3}}\r\nabc BODY[] {{3}}\r\nabc)\r\n");
+        let bad_date = "* 1 FETCH (UID 7 FLAGS () INTERNALDATE \"nonsense\" BODY[] {3}\r\nabc)\r\n";
+        for (name, r) in [
+            ("no flags", no_flags.as_str()),
+            ("no date", no_date),
+            ("two flags", two_flags.as_str()),
+            ("two dates", two_dates.as_str()),
+            ("two uids", two_uids.as_str()),
+            ("two bodies", two_bodies.as_str()),
+            ("bad date", bad_date),
+            ("garbage", "not an imap response\r\n"),
+        ] {
+            assert_eq!(case(r, 7, 3), "error", "{name}");
+        }
+        // The same message twice is ambiguous.
+        assert_eq!(case(&format!("{ok}{ok}"), 7, 3), "error");
+        // Ordering of failures is part of the behavior: the size check happens when the body
+        // is found, before a later duplicate is seen.
+        assert_eq!(case(&format!("{ok}{ok}"), 7, 4), "permanent");
+        // Unrelated FETCH responses (other UIDs, even with bodies) are ignored.
+        let other = format!("* 2 FETCH (UID 9 FLAGS () {D} BODY[] {{2}}\r\nzz)\r\n{ok}");
+        assert_eq!(case(&other, 7, 3), good);
     }
     #[test]
     fn xoauth_error_challenge_never_repeats_token() {
