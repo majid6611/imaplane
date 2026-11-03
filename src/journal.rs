@@ -45,7 +45,7 @@ impl Journal {
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        Self::configure(conn)
+        Self::configure(conn, Some(path))
     }
 
     /// Create a new private file without overwriting any existing job.
@@ -78,7 +78,7 @@ impl Journal {
         tx.execute("INSERT INTO job VALUES (1, ?1)", [binding])?;
         tx.pragma_update(None, "user_version", 2)?;
         tx.commit()?;
-        drop(conn);
+        drop(Self::configure(conn, None)?);
         temporary.persist_noclobber(path).map_err(|e| e.error)?;
         std::fs::File::open(parent)?.sync_all()?;
         Self::open(path)
@@ -97,9 +97,21 @@ impl Journal {
         Ok(Self(conn))
     }
 
-    fn configure(mut conn: Connection) -> Result<Self> {
+    fn configure(mut conn: Connection, path: Option<&Path>) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if ![1, 2, SCHEMA_VERSION].contains(&version) {
+            bail!("unsupported journal schema {version}");
+        }
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        if version < SCHEMA_VERSION {
+            if let Some(path) = path {
+                crate::fault::point("before_upgrade_backup");
+                backup_before_upgrade(&conn, path, version)?;
+                crate::fault::point("after_upgrade_backup");
+            }
+            crate::fault::point("before_schema_upgrade");
+        }
         if version == 1 {
             // Transactional additive upgrade. Never invent metadata or transfer evidence.
             let tx = conn.transaction()?;
@@ -111,6 +123,7 @@ impl Journal {
                 CREATE TABLE snapshots (folder TEXT PRIMARY KEY, validity INTEGER NOT NULL, uids TEXT NOT NULL);
                 CREATE TABLE resolutions (folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL, destination_validity INTEGER NOT NULL, destination_uid INTEGER NOT NULL, observed_at TEXT NOT NULL);")?;
             tx.pragma_update(None, "user_version", 2)?;
+            crate::fault::point("v1_upgrade_before_commit");
             tx.commit()?;
         } else if version != 2 && version != SCHEMA_VERSION {
             bail!("unsupported journal schema {version}; expected {SCHEMA_VERSION}");
@@ -122,7 +135,9 @@ impl Journal {
                 CREATE TABLE recovery_events (folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL, observed_at TEXT NOT NULL, evidence TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS append_rejections (folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL, observed_at TEXT NOT NULL, evidence TEXT NOT NULL);")?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            crate::fault::point("schema_upgrade_before_commit");
             tx.commit()?;
+            crate::fault::point("after_schema_upgrade");
         }
         conn.pragma_update(None, "trusted_schema", false)?;
         Ok(Self(conn))
@@ -410,7 +425,9 @@ impl Journal {
     }
 
     pub fn invalidate(&mut self, key: &MessageKey) -> Result<()> {
+        crate::fault::point("before_invalidate");
         self.0.execute("UPDATE transfers SET state='accepted' WHERE folder=?1 AND uid_validity=?2 AND uid=?3 AND state='confirmed'",params![key.folder,key.uid_validity,key.uid])?;
+        crate::fault::point("after_invalidate");
         Ok(())
     }
 
@@ -439,6 +456,50 @@ impl Journal {
         }
         Ok(result)
     }
+}
+
+/// SQLite online backup includes committed WAL pages. Publish without clobbering
+/// even symlinks; failures stop migration before any schema change.
+fn backup_before_upgrade(conn: &Connection, path: &Path, version: i64) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let temporary = tempfile::NamedTempFile::new_in(parent)?;
+    let mut destination = Connection::open(temporary.path())?;
+    {
+        let backup = rusqlite::backup::Backup::new(conn, &mut destination)?;
+        backup.run_to_completion(128, std::time::Duration::from_millis(10), None)?;
+    }
+    let integrity: String = destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if integrity != "ok" {
+        bail!("pre-upgrade backup failed integrity check");
+    }
+    drop(destination);
+    temporary.as_file().sync_all()?;
+    let stem = path
+        .file_name()
+        .context("journal has no filename")?
+        .to_string_lossy();
+    let mut temporary = temporary;
+    for suffix in 0..10000 {
+        let name = if suffix == 0 {
+            format!("{stem}.v{version}.bak")
+        } else {
+            format!("{stem}.v{version}.bak.{suffix}")
+        };
+        match temporary.persist_noclobber(parent.join(name)) {
+            Ok(_) => {
+                std::fs::File::open(parent)?.sync_all()?;
+                return Ok(());
+            }
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temporary = error.file;
+            }
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+    bail!("too many pre-upgrade backups; refusing upgrade")
 }
 
 pub fn fingerprint(body: &[u8]) -> String {
@@ -561,5 +622,98 @@ mod recovery_tests {
             "prepared"
         );
         journal.recover_not_sent(&key, 11).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod upgrade_backup_tests {
+    use super::*;
+    #[test]
+    fn backup_includes_committed_pages_still_in_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        let mut journal = Journal::create(&path, "binding").unwrap();
+        journal.0.execute_batch("DROP TABLE append_attempts; DROP TABLE recovery_events; PRAGMA user_version=2; PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;").unwrap();
+        let key = MessageKey {
+            folder: "INBOX".into(),
+            uid_validity: 7,
+            uid: 9,
+        };
+        journal.plan(&key, b"committed only in WAL").unwrap();
+        let upgraded = Journal::open(&path).unwrap();
+        assert_eq!(
+            upgraded.record(&key).unwrap().unwrap().hash,
+            fingerprint(b"committed only in WAL")
+        );
+        let backup = Connection::open(dir.path().join("journal.sqlite3.v2.bak")).unwrap();
+        assert_eq!(
+            backup
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT fingerprint FROM transfers", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            fingerprint(b"committed only in WAL")
+        );
+    }
+    #[test]
+    fn backup_is_consistent_private_and_never_overwrites_previous_evidence() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        let mut journal = Journal::create(&path, "binding").unwrap();
+        let key = MessageKey {
+            folder: "INBOX".into(),
+            uid_validity: 7,
+            uid: 1,
+        };
+        journal.plan(&key, b"preserved").unwrap();
+        journal
+            .0
+            .execute_batch(
+                "DROP TABLE append_attempts; DROP TABLE recovery_events; PRAGMA user_version=2;",
+            )
+            .unwrap();
+        drop(journal);
+        let first = dir.path().join("journal.sqlite3.v2.bak");
+        std::fs::write(&first, b"existing backup must survive").unwrap();
+        let journal = Journal::open(&path).unwrap();
+        assert_eq!(
+            journal.record(&key).unwrap().unwrap().hash,
+            fingerprint(b"preserved")
+        );
+        assert_eq!(
+            std::fs::read(first).unwrap(),
+            b"existing backup must survive"
+        );
+        let saved = dir.path().join("journal.sqlite3.v2.bak.1");
+        assert_eq!(
+            std::fs::metadata(&saved).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        let backup = Connection::open(saved).unwrap();
+        assert_eq!(
+            backup
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT fingerprint FROM transfers", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            fingerprint(b"preserved")
+        );
+        assert_eq!(
+            backup
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
     }
 }

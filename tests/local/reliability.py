@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='imaplane-reliability-') as temporary:
         assert not s.messages['destination']
         assert sum(v == b'APPEND' for user,v,args in s.events) == 1
         print('PASS mismatched rejection tags remain uncertain and are never resent')
-        for code in [b'OVERQUOTA', b'THROTTLED']:
+        for code in [b'UNAVAILABLE', b'THROTTLED']:
             s,c=fixture('circuit-'+code.decode(),[body+str(i).encode() for i in range(8)])
             s.rejection_script=[code]*8
             start=time.monotonic(); rejected=run(c,2)
@@ -84,10 +84,30 @@ with tempfile.TemporaryDirectory(prefix='imaplane-reliability-') as temporary:
             s.rejection_script=[]
             assert run(c)['complete']; assert len(s.messages['destination'])==8
         s,c=fixture('circuit-reset',[body+str(i).encode() for i in range(5)])
-        s.rejection_script=[b'OVERQUOTA',b'OVERQUOTA',None,b'OVERQUOTA',b'OVERQUOTA']
+        s.rejection_script=[b'UNAVAILABLE',b'UNAVAILABLE',None,b'UNAVAILABLE',b'UNAVAILABLE']
         reset=run(c,2); assert reset['halt_reason'] is None and len(reset['entries'])==5
         assert run(c)['complete']; assert len(s.messages['destination'])==5
         print('PASS rejection circuit, interruptible backoff, coded journal evidence and successful-APPEND reset')
+        for code in [b'TOOBIG',b'OVERQUOTA']:
+            bodies=[body+b'x'*100000]*3+[body]*5
+            s,c=fixture('head-of-line-'+code.decode(),bodies)
+            s.rejection_script=[code]*3
+            report=run(c,2)
+            assert report['halt_reason'] is None and [e['result'] for e in report['entries']]==['rejected']*3+['confirmed']*5
+            assert s.messages['destination']==bodies[3:]
+            assert run(c)['complete']; assert len(s.messages['destination'])==8
+        print('PASS TOOBIG/OVERQUOTA do not block later smaller messages; no APPEND replay')
+        for name in ['wrong-epoch','old-uid']:
+            s,c=fixture('append-'+name,[body]*2)
+            if name=='wrong-epoch': s.append_validity=78
+            else:
+                s.messages['destination']=[b'Subject: preexisting\r\n\r\nkeep\r\n']; s.append_uid_override=1
+            p=subprocess.run([str(BIN),'migrate','--config',str(c),'--json'],capture_output=True,text=True,timeout=10)
+            assert p.returncode==1
+            with sqlite3.connect(root/('append-'+name)/'journal.sqlite3') as db:
+                assert db.execute("select state from transfers").fetchall()==[('uncertain',)]
+            assert sum(v==b'APPEND' for user,v,args in s.events)==1
+        print('PASS mismatched APPENDUID epoch/UID lower bound stop before acknowledgement or later APPEND')
         s,c=fixture('session-no',[body]*8); s.source_fetch_no=True
         failed=run(c,2)
         assert len(failed['entries'])==1 and failed['entries'][0]['result']=='failed'

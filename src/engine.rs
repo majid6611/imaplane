@@ -167,6 +167,7 @@ impl<'a> SourceReader<'a> {
 
                 if let Some((folder, validity)) = &self.selected {
                     let selected = self.source.examine(folder)?;
+                    crate::fault::point("after_source_reconnect");
                     if selected.validity != *validity {
                         bail!("source UIDVALIDITY changed during reconnect");
                     }
@@ -242,6 +243,7 @@ impl<'a> DestinationReader<'a> {
 
                 if let Some((folder, validity)) = &self.selected {
                     let selected = self.destination.examine(folder)?;
+                    crate::fault::point("after_destination_reconnect");
                     if selected.validity != *validity {
                         bail!("destination UIDVALIDITY changed during reconnect");
                     }
@@ -519,6 +521,11 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
             ) {
                 Ok((dv, du)) => {
                     crate::fault::point("after_append_reply");
+                    if dv != selected.validity || du < baseline.1 {
+                        bail!(
+                            "APPENDUID differs from destination epoch or precedes the saved UID baseline; transfer remains uncertain"
+                        );
+                    }
                     circuit.success();
                     drop(message); // Release source content before destination verification.
                     job.journal.acknowledge(&key, dv, du)?;
@@ -533,6 +540,29 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                 Err(e) if crate::transport::append_rejection(&e).is_some() => {
                     let proof = crate::transport::append_rejection(&e).unwrap();
                     job.journal.reject_append(&key, &proof)?;
+                    // OVERQUOTA may depend on this message's size. Do not let
+                    // large messages permanently block later smaller messages.
+                    if !proof.server_wide() && !matches!(proof.code, "TOOBIG" | "OVERQUOTA") {
+                        report.entries.push(entry(
+                            &key,
+                            Some(&r),
+                            "rejected",
+                            format!(
+                                "APPEND {} [{}]; unclassified rejection; no automatic replay",
+                                proof.status, proof.code
+                            ),
+                        ));
+                        report.halt_reason = Some(
+                            "unclassified destination rejection; operator review required".into(),
+                        );
+                        report.finish();
+                        return Ok(report);
+                    }
+                    if !proof.server_wide() {
+                        circuit.success();
+                        report.entries.push(entry(&key, Some(&r), "rejected", format!("APPEND {} [{}]; message rejected, retained as planned; continuing to later messages", proof.status, proof.code)));
+                        continue;
+                    }
                     let consecutive = circuit.reject(&proof);
                     report.entries.push(entry(&key, Some(&r), "rejected", format!("APPEND {} [{}]; retained as planned; consecutive identical rejections: {consecutive}", proof.status, proof.code)));
                     if consecutive >= c.append_rejection_limit {
@@ -642,6 +672,7 @@ fn verify_record(
             "destination UIDVALIDITY differs from APPENDUID",
         ));
     }
+    crate::fault::point("before_verification_fetch");
     let m = match d.read(|d| d.message(du)) {
         Ok(Some(m)) => m,
         Ok(None) => {
@@ -665,6 +696,7 @@ fn verify_record(
             ));
         }
     };
+    crate::fault::point("after_verification_fetch");
     if let Err(e) = matches_record(r, &m) {
         return Ok(entry(&r.key, Some(r), "mismatch", e.to_string()));
     }
@@ -691,7 +723,12 @@ fn reconcile(r: &Record, d: &mut DestinationReader<'_>, validity: u32) -> Result
         return Ok(result);
     }
     let uids = d.read(|d| d.uids())?;
-    for uid in uids.into_iter().filter(|u| *u >= next).take(1000) {
+    let candidates: Vec<_> = uids.into_iter().filter(|u| *u >= next).collect();
+    if candidates.len() > 1000 {
+        result.detail = "candidate search incomplete: more than 1000 post-baseline UIDs; no automatic attribution or retry".into();
+        return Ok(result);
+    }
+    for uid in candidates {
         if let Some(m) = d.read(|d| d.message(uid))? {
             if matches_record(r, &m).is_ok() {
                 result.candidate_uids.push(uid);

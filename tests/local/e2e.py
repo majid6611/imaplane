@@ -50,7 +50,11 @@ class Proxy:
     Drops an APPEND success reply after upstream committed it when armed.
     Can also drop the first source UID FETCH to test reconnect behavior.
     """
-    def __init__(self, port, cert, key, drop_append=False, drop_fetch=False, pause_append=False, pause_verify=False, latency_ms=0):
+    def __init__(self, port, cert, key, drop_append=False, drop_fetch=False, pause_append=False, pause_verify=False, latency_ms=0, drop_body_nth=0, mid_body_nth=0):
+        self.drop_body_nth=drop_body_nth; self.body_count=0
+        self.mid_body_nth=mid_body_nth; self.append_count=0
+        self.partial_received=threading.Event(); self.release_partial=threading.Event()
+        self.sessions=[]
         self.latency_ms = latency_ms
         self.round_trips = 0
         self.upstream = port
@@ -89,6 +93,7 @@ class Proxy:
                 break
             threading.Thread(target=self.connection, args=(s,), daemon=True).start()
     def connection(self, raw):
+        session=[]; self.sessions.append(session)
         try:
             with self.server_ctx.wrap_socket(raw, server_side=True) as client:
                 with self.client_ctx.wrap_socket(socket.create_connection(('127.0.0.1', self.upstream)), server_hostname='localhost') as server:
@@ -104,6 +109,10 @@ class Proxy:
                             raise AssertionError('invalid client command')
                         tag, verb = parts[:2]
                         verb = verb.strip().upper()
+                        session.append(verb.decode())
+                        if verb == b'UID' and b'BODY.PEEK' in line:
+                            self.body_count+=1
+                            if self.body_count==self.drop_body_nth: return
                         # Only protocol verbs + fixed FETCH request attributes are logged.
                         self.commands.append((verb.decode(), parts[2].decode().strip() if verb == b'UID' else ''))
                         if verb == b'UID' and b'FETCH' in line and self.drop_fetch:
@@ -129,6 +138,11 @@ class Proxy:
                                 size = int(re.search(rb'\{(\d+)\}\r\n$', line).group(1))
                                 payload = cf.read(size + 2)
                                 if len(payload) != size + 2: return # Expected EOF at pre-literal crash points.
+                                self.append_count+=1
+                                if self.append_count==self.mid_body_nth:
+                                    server.sendall(payload[:max(1,len(payload)//2)])
+                                    self.partial_received.set(); self.release_partial.wait(30)
+                                    return
                                 server.sendall(payload)
                         while True:
                             response = sf.readline()
@@ -160,6 +174,7 @@ class Proxy:
             self.errors.append(repr(exc))
     def close(self):
         self.stopped = True
+        self.release_partial.set()
         self.listener.close()
         for s in self.sockets:
             with contextlib.suppress(OSError):
@@ -194,6 +209,8 @@ class ProtocolServer:
         self.throttle_code = b'THROTTLED'
         self.source_validity = 77
         self.destination_validity = 77
+        self.append_validity = 77
+        self.append_uid_override = None
         self.messages = {'source': [b'Subject: protocol fixture\r\n\r\nraw message\r\n'], 'destination': []}
         threading.Thread(target=self.serve,daemon=True).start()
     def serve(self):
@@ -323,7 +340,7 @@ class ProtocolServer:
                             for _ in range(20):
                                 client.sendall(b'* OK progress\r\n'); time.sleep(.1)
                         self.messages[user].append(data[:-2])
-                        client.sendall(tag+b' OK [APPENDUID 77 '+str(len(self.messages[user])).encode()+b'] appended\r\n')
+                        client.sendall(tag+b' OK [APPENDUID '+str(self.append_validity).encode()+b' '+str(self.append_uid_override if self.append_uid_override is not None else len(self.messages[user])).encode()+b'] appended\r\n')
                         continue
                     else:
                         raise AssertionError((mode,verb))

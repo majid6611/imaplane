@@ -11,3 +11,6 @@
 /IMAPLANE_PROJECT_BRIEF.md
 
 /vendor/imap/Cargo.lock
+
+# Sensitive pre-upgrade journal snapshots.
+*.sqlite3.v*.bak*

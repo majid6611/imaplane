@@ -238,6 +238,12 @@ pub(crate) struct AppendRejection {
     pub code: &'static str,
     pub status: &'static str,
 }
+impl AppendRejection {
+    pub(crate) fn server_wide(&self) -> bool {
+        matches!(self.code, "UNAVAILABLE" | "THROTTLED" | "INUSE" | "LIMIT")
+    }
+}
+
 pub(crate) fn append_rejection(error: &anyhow::Error) -> Option<AppendRejection> {
     error
         .downcast_ref::<ProtocolError>()
