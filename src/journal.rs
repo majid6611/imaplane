@@ -249,6 +249,17 @@ impl Journal {
         body: &[u8],
         metadata: AppendMetadata<'_>,
     ) -> Result<Record> {
+        self.prepare_append_fingerprint(key, &fingerprint(body), metadata)
+    }
+
+    /// The same single FULL preparation commit, for content whose SHA-256 was computed while
+    /// streaming. Identical checks: a differing stored fingerprint refuses to replace evidence.
+    pub(crate) fn prepare_append_fingerprint(
+        &mut self,
+        key: &MessageKey,
+        hash: &str,
+        metadata: AppendMetadata<'_>,
+    ) -> Result<Record> {
         crate::fault::point("before_plan");
         if key.uid == 0
             || key.uid_validity == 0
@@ -257,7 +268,7 @@ impl Journal {
         {
             bail!("invalid append identity or baseline");
         }
-        let hash = fingerprint(body);
+        let hash = hash.to_string();
         let tx = self.0.transaction()?;
         let old: Option<(String, String, Option<i64>)> = tx.query_row("SELECT fingerprint,state,date FROM transfers WHERE folder=?1 AND uid_validity=?2 AND uid=?3", params![key.folder,key.uid_validity,key.uid], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some((previous, state, date)) = &old {

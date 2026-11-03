@@ -139,6 +139,9 @@ pub struct Spool {
     file: File,
     written: u64,
     hasher: Sha256,
+    /// Test-only: fail every write once this many bytes were written, as a full disk would.
+    #[cfg(test)]
+    pub(crate) fail_after: Option<u64>,
 }
 impl Spool {
     /// Create an anonymous spool in `dir` for a message of `needed` bytes.
@@ -163,11 +166,20 @@ impl Spool {
             file,
             written: 0,
             hasher: Sha256::new(),
+            #[cfg(test)]
+            fail_after: None,
         })
     }
 
     /// Append bytes, hashing them first. A failure leaves the spool unusable.
     pub fn write_chunk(&mut self, data: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_after
+            .is_some_and(|limit| self.written + data.len() as u64 > limit)
+        {
+            return Err(io::Error::from_raw_os_error(libc::ENOSPC));
+        }
         self.file.write_all(data)?;
         self.hasher.update(data);
         self.written += data.len() as u64;
@@ -185,6 +197,7 @@ impl Spool {
             mut file,
             written,
             hasher,
+            ..
         } = self;
         let sha256 = format!("{:x}", hasher.finalize());
         file.seek(SeekFrom::Start(0))?;

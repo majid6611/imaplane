@@ -844,6 +844,36 @@ impl Connection {
             .safe()?;
         decode_message(&data, uid, expected)
     }
+    /// A source message for transfer. Above `stream_above` bytes it is streamed into a
+    /// verified spool; otherwise it is fetched whole, exactly as before. The flag says whether
+    /// the spool path ran.
+    fn read_for_transfer(
+        &mut self,
+        uid: u32,
+        stream_above: Option<usize>,
+        spool: &SpoolConfig,
+    ) -> Result<(Option<Transfer>, bool)> {
+        let Some(expected) = self.size_of(uid)? else {
+            return Ok((None, false));
+        };
+        if stream_above.is_some_and(|threshold| expected > threshold) {
+            // Directory, filesystem and free-space checks happen before anything is read.
+            let target =
+                crate::spool::Spool::create(&spool.dir, expected as u64, spool.allow_memory_backed)
+                    .map_err(anyhow::Error::new)?;
+            self.reset(expected.saturating_add(OVERHEAD));
+            Ok((
+                spool_message_into(&mut self.session, uid, expected, target)?
+                    .map(Transfer::Spooled),
+                true,
+            ))
+        } else {
+            Ok((
+                self.fetch_buffered(uid, expected)?.map(Transfer::Buffered),
+                false,
+            ))
+        }
+    }
     /// Digest of one message. Above `stream_above` bytes the body is streamed through the
     /// hasher and never held in memory; otherwise it is fetched whole, exactly as before,
     /// and digested. The two paths must (and are tested to) give the same answer.
@@ -870,16 +900,29 @@ impl Connection {
     }
 }
 
-/// Stream one message body through SHA-256 and return its digest, validated by the same
-/// `parse_fetch` as the buffered path. Nothing is returned unless the whole literal was
-/// read, matched the expected size and was followed by a complete tagged OK, so a
-/// truncated, short or failed read can never yield a digest.
-fn stream_digest<T: Read + Write>(
+/// What a streamed FETCH established about one message. The body itself went to the sink.
+struct StreamedMeta {
+    sha256: String,
+    size: u64,
+    date: DateTime<FixedOffset>,
+    flags: Vec<String>,
+    /// Non-empty only for a short body sent as a quoted string rather than a literal: it is
+    /// already in the response skeleton and was NOT passed to the sink.
+    inline: Vec<u8>,
+}
+
+/// Stream one message body through SHA-256 into `sink`, validated by the same `parse_fetch`
+/// as the buffered path. Nothing is returned unless the whole literal was read, matched the
+/// expected size and was followed by a complete tagged OK, so a truncated, short or failed
+/// read can never yield a result. The sink may fail (for example a full disk); that aborts
+/// the stream and the error comes back as `Error::Io`.
+fn stream_message<T: Read + Write>(
     session: &mut imap::Session<T>,
     uid: u32,
     expected: usize,
     chunk_point: &'static str,
-) -> Result<Option<MessageDigest>> {
+    sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> Result<Option<StreamedMeta>> {
     let mut hasher = Sha256::new();
     let mut seen = 0u64;
     let fetched = session
@@ -888,32 +931,205 @@ fn stream_digest<T: Read + Write>(
             seen += chunk.len() as u64;
             // Crash-test hook (absent in default builds): die part-way through the body.
             crate::fault::point(chunk_point);
-            Ok(())
+            sink(chunk)
         })
         .safe()?;
     let streamed_len = fetched.body_len.map(|n| n as usize);
     let Some(parsed) = parse_fetch(&fetched.skeleton, uid, expected, streamed_len)? else {
         return Ok(None);
     };
-    let (sha256, size) = match fetched.body_len {
+    let (sha256, size, inline) = match fetched.body_len {
         Some(n) => {
             if seen != n || !parsed.body.is_empty() {
                 bail!("streamed body does not match its FETCH response");
             }
-            (format!("{:x}", hasher.finalize()), n)
+            (format!("{:x}", hasher.finalize()), n, Vec::new())
         }
-        // A short body sent as a quoted string, not a literal: it is already in the skeleton.
         None => (
             crate::journal::fingerprint(&parsed.body),
             parsed.body.len() as u64,
+            parsed.body,
         ),
     };
-    Ok(Some(MessageDigest {
+    Ok(Some(StreamedMeta {
         sha256,
         size,
         date: parsed.date,
         flags: parsed.flags,
+        inline,
     }))
+}
+
+/// Digest of one message, streamed and not kept.
+fn stream_digest<T: Read + Write>(
+    session: &mut imap::Session<T>,
+    uid: u32,
+    expected: usize,
+    chunk_point: &'static str,
+) -> Result<Option<MessageDigest>> {
+    Ok(
+        stream_message(session, uid, expected, chunk_point, &mut |_| Ok(()))?.map(|m| {
+            MessageDigest {
+                sha256: m.sha256,
+                size: m.size,
+                date: m.date,
+                flags: m.flags,
+            }
+        }),
+    )
+}
+
+/// Where and how large source messages are spooled.
+#[derive(Clone, Debug)]
+pub struct SpoolConfig {
+    pub dir: std::path::PathBuf,
+    pub allow_memory_backed: bool,
+}
+/// A source message that was streamed into a verified spool instead of memory.
+pub struct SpooledMessage {
+    pub spool: crate::spool::SealedSpool,
+    pub date: DateTime<FixedOffset>,
+    pub flags: Vec<String>,
+}
+impl SpooledMessage {
+    pub fn size(&self) -> u64 {
+        self.spool.size
+    }
+    /// Lowercase hex SHA-256, identical to `journal::fingerprint` of the same bytes.
+    pub fn sha256(&self) -> &str {
+        &self.spool.sha256
+    }
+}
+/// A source message ready to transfer: whole in memory (small) or in a verified spool (large).
+pub enum Transfer {
+    Buffered(Message),
+    Spooled(SpooledMessage),
+}
+
+/// Stream a source message into `spool`, then verify it. Everything that can go wrong here
+/// (truncation, size or length mismatch, malformed or failed reads, a full disk) happens
+/// BEFORE the caller writes anything to the journal or the destination, so a failure leaves
+/// nothing behind but the error. A spool write failure is returned as the typed, non-retryable
+/// `SpoolError`, never disguised as a transient network error.
+fn spool_message_into<T: Read + Write>(
+    session: &mut imap::Session<T>,
+    uid: u32,
+    expected: usize,
+    mut spool: crate::spool::Spool,
+) -> Result<Option<SpooledMessage>> {
+    let mut sink_error: Option<crate::spool::SpoolError> = None;
+    let streamed = stream_message(
+        session,
+        uid,
+        expected,
+        "source_stream_chunk",
+        &mut |chunk| {
+            spool.write_chunk(chunk).inspect_err(|e| {
+                sink_error = Some(crate::spool::classify(e));
+            })
+        },
+    );
+    let meta = match streamed {
+        Ok(meta) => meta,
+        Err(e) => {
+            return Err(match sink_error {
+                Some(spool_error) => anyhow::Error::new(spool_error),
+                None => e,
+            });
+        }
+    };
+    let Some(meta) = meta else {
+        return Ok(None);
+    };
+    if !meta.inline.is_empty() {
+        spool
+            .write_chunk(&meta.inline)
+            .map_err(|e| anyhow::Error::new(crate::spool::classify(&e)))?;
+    }
+    if spool.written() != meta.size {
+        bail!("spooled length differs from the streamed length");
+    }
+    crate::fault::point("spool_after_fetch");
+    let sealed = spool.seal().map_err(anyhow::Error::new)?;
+    if sealed.sha256 != meta.sha256 {
+        return Err(anyhow::Error::new(crate::spool::SpoolError::Corrupt));
+    }
+    crate::fault::point("spool_sealed");
+    Ok(Some(SpooledMessage {
+        spool: sealed,
+        date: meta.date,
+        flags: meta.flags,
+    }))
+}
+
+/// Outcome of a streaming APPEND. `phase` says how far the literal got, so the caller can
+/// tell a provably unsent APPEND from an uncertain one; the conservative recovery rules do
+/// not change because of it.
+pub struct StreamedOutcome {
+    pub result: Result<(u32, u32)>,
+    pub phase: imap::AppendPhase,
+    pub body_bytes_sent: u64,
+}
+fn appended_identity(appended: imap::types::Appended) -> Result<(u32, u32)> {
+    let uid = match appended.uids.as_deref() {
+        Some([UidSetMember::Uid(u)]) => *u,
+        Some([UidSetMember::UidRange(r)]) if r.start() == r.end() => *r.start(),
+        _ => bail!("APPEND succeeded without a single APPENDUID; transfer remains uncertain"),
+    };
+    Ok((
+        appended
+            .uid_validity
+            .filter(|v| *v != 0)
+            .context("missing APPENDUID validity")?,
+        uid,
+    ))
+}
+/// APPEND a spooled message. The guard (durable authorization) runs after the `+` continuation
+/// and before the first body byte, exactly as for the buffered APPEND, and the literal is read
+/// from the spool and re-hashed on the way out.
+fn append_from_spool<T: Read + Write>(
+    session: &mut imap::Session<T>,
+    name: &str,
+    flags: &[String],
+    spooled: &mut SpooledMessage,
+    guard: impl FnOnce() -> io::Result<()>,
+) -> StreamedOutcome {
+    let (size, date) = (spooled.size(), spooled.date);
+    let mut reader = match spooled.spool.reader("append_stream_chunk") {
+        Ok(reader) => reader,
+        Err(e) => {
+            return StreamedOutcome {
+                result: Err(anyhow::Error::new(crate::spool::classify(&e))),
+                phase: imap::AppendPhase::NotAuthorized,
+                body_bytes_sent: 0,
+            };
+        }
+    };
+    let mut command = session.append_stream(name);
+    command
+        .flags(flags.iter().map(|f| Flag::from(f.as_str())))
+        .internal_date(date);
+    let out = command.finish_streaming(size, &mut reader, guard);
+    let result = out
+        .result
+        .safe()
+        .context("APPEND did not provide a usable confirmation; transfer remains uncertain")
+        .and_then(appended_identity);
+    StreamedOutcome {
+        result,
+        phase: out.phase,
+        body_bytes_sent: out.body_bytes_sent,
+    }
+}
+fn phase_name(phase: imap::AppendPhase) -> &'static str {
+    use imap::AppendPhase::*;
+    match phase {
+        NotAuthorized => "not_authorized",
+        Authorized => "authorized",
+        BodyStarted => "body_started",
+        BodyComplete => "body_complete",
+        Responded => "responded",
+    }
 }
 
 pub struct Source(Connection);
@@ -950,6 +1166,58 @@ impl Source {
         observed("source", "uid_fetch", message_detail, || {
             self.0.message(uid)
         })
+    }
+    /// Read one message for transfer: whole in memory when small, streamed into a verified
+    /// spool above `stream_above` bytes. Nothing is durable until the caller writes the journal.
+    pub fn read_for_transfer(
+        &mut self,
+        uid: u32,
+        stream_above: Option<usize>,
+        spool: &SpoolConfig,
+    ) -> Result<Option<Transfer>> {
+        if !crate::diagnostics::enabled() {
+            return Ok(self.0.read_for_transfer(uid, stream_above, spool)?.0);
+        }
+        let started = Instant::now();
+        let result = self.0.read_for_transfer(uid, stream_above, spool);
+        let mut fields = diag_object([
+            ("role", "source".into()),
+            ("op", "uid_fetch_transfer".into()),
+            ("ms", (started.elapsed().as_millis() as u64).into()),
+        ]);
+        match &result {
+            Ok((transfer, spooled)) => {
+                fields.insert("outcome".into(), "OK".into());
+                fields.insert("found".into(), transfer.is_some().into());
+                fields.insert("spooled".into(), (*spooled).into());
+                let bytes = match transfer {
+                    Some(Transfer::Buffered(m)) => Some(m.body.len() as u64),
+                    Some(Transfer::Spooled(s)) => Some(s.size()),
+                    None => None,
+                };
+                fields.insert("bytes".into(), bytes.into());
+            }
+            Err(e) => {
+                fields.extend(diag_failure(e));
+                if let Some(spool_error) = e.downcast_ref::<crate::spool::SpoolError>() {
+                    fields.insert("outcome".into(), "SPOOL".into());
+                    fields.insert("code".into(), spool_error_name(spool_error).into());
+                }
+            }
+        }
+        crate::diagnostics::event("command", fields);
+        Ok(result?.0)
+    }
+}
+fn spool_error_name(e: &crate::spool::SpoolError) -> &'static str {
+    use crate::spool::SpoolError::*;
+    match e {
+        Unsupported => "SPOOL_UNSUPPORTED",
+        MemoryBacked => "SPOOL_MEMORY_BACKED",
+        NoSpace => "SPOOL_NO_SPACE",
+        BadDirectory(_) => "SPOOL_BAD_DIRECTORY",
+        Corrupt => "SPOOL_CORRUPT",
+        Io(_) => "SPOOL_IO",
     }
 }
 
@@ -1239,18 +1507,52 @@ impl Destination {
             .finish_with_literal_guard(guard)
             .safe()
             .context("APPEND did not provide a usable confirmation; transfer remains uncertain")?;
-        let uid = match appended.uids.as_deref() {
-            Some([UidSetMember::Uid(u)]) => *u,
-            Some([UidSetMember::UidRange(r)]) if r.start() == r.end() => *r.start(),
-            _ => bail!("APPEND succeeded without a single APPENDUID; transfer remains uncertain"),
+        appended_identity(appended)
+    }
+    /// APPEND a message that lives in a verified spool, streaming the literal. The guard
+    /// (durable authorization) runs after the continuation and before any body byte.
+    pub fn append_spooled(
+        &mut self,
+        folder: &str,
+        spooled: &mut SpooledMessage,
+        flags: &[String],
+        guard: impl FnOnce() -> io::Result<()>,
+    ) -> StreamedOutcome {
+        let refused = |e: anyhow::Error| StreamedOutcome {
+            result: Err(e),
+            phase: imap::AppendPhase::NotAuthorized,
+            body_bytes_sent: 0,
         };
-        Ok((
-            appended
-                .uid_validity
-                .filter(|v| *v != 0)
-                .context("missing APPENDUID validity")?,
-            uid,
-        ))
+        let name = match self.0.encoding.encode(folder) {
+            // imap 3 alpha's APPEND builder wraps but does not escape this argument.
+            Ok(name) => name.replace('\\', "\\\\").replace('"', "\\\""),
+            Err(e) => return refused(e),
+        };
+        if flags.iter().any(|f| !valid_flag(f)) {
+            return refused(anyhow::anyhow!("unsafe IMAP flag"));
+        }
+        self.0.reset(OVERHEAD);
+        let started = Instant::now();
+        let out = append_from_spool(&mut self.0.session, &name, flags, spooled, guard);
+        if crate::diagnostics::enabled() {
+            let mut fields = diag_object([
+                ("role", "destination".into()),
+                ("op", "append".into()),
+                ("ms", (started.elapsed().as_millis() as u64).into()),
+                ("phase", phase_name(out.phase).into()),
+                ("streamed", true.into()),
+                ("bytes", spooled.size().into()),
+            ]);
+            match &out.result {
+                Ok(_) => {
+                    fields.insert("outcome".into(), "OK".into());
+                    fields.insert("appenduid".into(), true.into());
+                }
+                Err(e) => fields.extend(diag_failure(e)),
+            }
+            crate::diagnostics::event("command", fields);
+        }
+        out
     }
 }
 pub fn valid_flag(flag: &str) -> bool {
@@ -1694,12 +1996,13 @@ mod tests {
         assert_eq!(case(&other, 7, 3), good);
     }
     // ------------------------------------------------------------ streaming digest (3b)
-    /// Duplex stream that replays a script with fragmented reads and discards writes.
+    /// Duplex stream that replays a script with fragmented reads and records what is written.
     struct Replay {
         incoming: Vec<u8>,
         pos: usize,
         max_read: usize,
         step: usize,
+        written: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     }
     impl Read for Replay {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -1716,6 +2019,7 @@ mod tests {
     }
     impl Write for Replay {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.written.borrow_mut().extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -1774,6 +2078,7 @@ mod tests {
             pos: 0,
             max_read,
             step: 7,
+            written: Default::default(),
         });
         client.read_greeting().unwrap();
         let mut session = client.login("u", "p").map_err(|e| e.0).unwrap();
@@ -2053,6 +2358,333 @@ mod tests {
         // A stream failure produced by a real malformed response (bare-LF literal marker).
         let bad = b"* 1 FETCH (UID 7 FLAGS () INTERNALDATE \"02-Jan-2020 03:04:05 +0000\" BODY[] {3}\nabc)\r\n";
         assert_eq!(streaming_outcome(bad, 7, 3, 64), Outcome::Failed);
+    }
+
+    // ------------------------------------------------------------ spool transfer (4.2)
+    type Log = std::rc::Rc<std::cell::RefCell<Vec<u8>>>;
+    fn private_spool_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+    fn session_over(script: Vec<u8>, max_read: usize) -> (imap::Session<Replay>, Log) {
+        let wire = Replay {
+            incoming: script,
+            pos: 0,
+            max_read,
+            step: 7,
+            written: Default::default(),
+        };
+        let log = wire.written.clone();
+        let mut client = imap::Client::new(wire);
+        client.read_greeting().unwrap();
+        (client.login("u", "p").map_err(|e| e.0).unwrap(), log)
+    }
+    fn fetch_script(response: &[u8]) -> Vec<u8> {
+        let mut script = b"* OK hello\r\na1 OK logged in\r\n".to_vec();
+        script.extend_from_slice(response);
+        script.extend_from_slice(b"a2 OK UID FETCH completed\r\n");
+        script
+    }
+    fn read_all(spooled: &mut SpooledMessage) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut reader = spooled.spool.reader("").unwrap();
+        let mut buf = vec![0u8; 7001];
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            if n == 0 {
+                return out;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+    }
+    fn spool_of(bytes: &[u8], dir: &std::path::Path) -> SpooledMessage {
+        let mut spool = crate::spool::Spool::create(dir, bytes.len() as u64, true).unwrap();
+        spool.write_chunk(bytes).unwrap();
+        SpooledMessage {
+            spool: spool.seal().unwrap(),
+            date: DateTime::parse_from_str("02-Jan-2020 03:04:05 +0000", "%d-%b-%Y %H:%M:%S %z")
+                .unwrap(),
+            flags: vec!["\\Seen".into()],
+        }
+    }
+
+    #[test]
+    fn a_spooled_source_read_is_exact_and_matches_the_buffered_decode() {
+        let dir = private_spool_dir();
+        for (i, len) in [0usize, 1, 4095, 128 * 1024, 128 * 1024 + 1, 300_000]
+            .into_iter()
+            .enumerate()
+        {
+            let body = pseudo(i as u64 + 11, len);
+            for body_first in [false, true] {
+                let response = fetch(&body, body_first);
+                let want = decode_message(&response, 7, len).unwrap().unwrap();
+                for max_read in [3, 1000, 1 << 20] {
+                    let (mut session, _) = session_over(fetch_script(&response), max_read);
+                    let target = crate::spool::Spool::create(dir.path(), len as u64, true).unwrap();
+                    let mut got = spool_message_into(&mut session, 7, len, target)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        got.sha256(),
+                        crate::journal::fingerprint(&body),
+                        "len {len}"
+                    );
+                    assert_eq!(
+                        (got.size(), got.date, &got.flags),
+                        (len as u64, want.date, &want.flags)
+                    );
+                    assert_eq!(
+                        read_all(&mut got),
+                        body,
+                        "len {len} first {body_first} read {max_read}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "the spool is anonymous"
+        );
+    }
+
+    #[test]
+    fn a_missing_message_and_a_quoted_body_spool_correctly() {
+        let dir = private_spool_dir();
+        let none = format!("* 1 FETCH (UID 9 FLAGS () {D} BODY[] NIL)\r\n");
+        let (mut session, _) = session_over(fetch_script(none.as_bytes()), 64);
+        let target = crate::spool::Spool::create(dir.path(), 3, true).unwrap();
+        assert!(
+            spool_message_into(&mut session, 7, 3, target)
+                .unwrap()
+                .is_none()
+        );
+        let quoted = format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] \"abc\")\r\n");
+        let (mut session, _) = session_over(fetch_script(quoted.as_bytes()), 64);
+        let target = crate::spool::Spool::create(dir.path(), 3, true).unwrap();
+        let mut got = spool_message_into(&mut session, 7, 3, target)
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_all(&mut got), b"abc");
+        assert_eq!(got.sha256(), crate::journal::fingerprint(b"abc"));
+    }
+
+    #[test]
+    fn a_truncated_source_stream_never_yields_a_spooled_message() {
+        let dir = private_spool_dir();
+        let body = pseudo(3, 60_000);
+        let script = fetch_script(&fetch(&body, false));
+        let header = b"* OK hello\r\na1 OK logged in\r\n".len();
+        let mut cuts: Vec<usize> = (0..50)
+            .map(|i| header + i * (script.len() - header) / 50)
+            .collect();
+        cuts.extend([script.len() - 1, script.len() - 10, script.len() - 28]);
+        for cut in cuts {
+            for max_read in [1usize, 97, 1 << 20] {
+                let (mut session, _) = session_over(script[..cut].to_vec(), max_read);
+                let target =
+                    crate::spool::Spool::create(dir.path(), body.len() as u64, true).unwrap();
+                let err = spool_message_into(&mut session, 7, body.len(), target)
+                    .err()
+                    .unwrap_or_else(|| panic!("cut {cut} must fail"));
+                assert!(
+                    err.downcast_ref::<crate::spool::SpoolError>().is_none(),
+                    "a network failure is not a spool failure"
+                );
+            }
+        }
+        let (mut session, _) = session_over(script, 4096);
+        let target = crate::spool::Spool::create(dir.path(), body.len() as u64, true).unwrap();
+        assert!(
+            spool_message_into(&mut session, 7, body.len(), target)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_full_disk_is_a_typed_non_transient_failure_not_a_network_error() {
+        let dir = private_spool_dir();
+        let body = pseudo(8, 300_000);
+        let (mut session, _) = session_over(fetch_script(&fetch(&body, false)), 4096);
+        let mut target = crate::spool::Spool::create(dir.path(), body.len() as u64, true).unwrap();
+        target.fail_after = Some(100_000);
+        let err = spool_message_into(&mut session, 7, body.len(), target)
+            .err()
+            .unwrap();
+        assert!(matches!(
+            err.downcast_ref::<crate::spool::SpoolError>(),
+            Some(crate::spool::SpoolError::NoSpace)
+        ));
+        assert!(
+            !is_transient(&err),
+            "a full disk must not be retried as a connection problem"
+        );
+        assert!(
+            !is_permanent_message(&err),
+            "and it is not a property of the message"
+        );
+        assert!(
+            session.is_desynced(),
+            "the interrupted response poisons the connection"
+        );
+        assert!(
+            !format!("{err:#}").contains(dir.path().to_str().unwrap()),
+            "no path in the error"
+        );
+    }
+
+    #[test]
+    fn a_wrong_announced_length_is_refused_before_anything_is_spooled() {
+        let dir = private_spool_dir();
+        let body = vec![b'x'; 100];
+        let (mut session, _) = session_over(fetch_script(&fetch(&body, false)), 64);
+        let target = crate::spool::Spool::create(dir.path(), 99, true).unwrap();
+        let err = spool_message_into(&mut session, 7, 99, target)
+            .err()
+            .unwrap();
+        assert!(is_permanent_message(&err));
+    }
+
+    fn append_script(response: &str) -> Vec<u8> {
+        let mut script = b"* OK hello\r\na1 OK logged in\r\n".to_vec();
+        script.extend_from_slice(response.as_bytes());
+        script
+    }
+    fn command_line(len: usize) -> Vec<u8> {
+        format!("a2 APPEND \"INBOX\" (\\Seen) \"02-Jan-2020 03:04:05 +0000\" {{{len}}}\r\n")
+            .into_bytes()
+    }
+    const FLAGS: [&str; 1] = ["\\Seen"];
+
+    #[test]
+    fn a_spooled_append_authorizes_before_any_body_byte_and_sends_the_exact_literal() {
+        let dir = private_spool_dir();
+        let body = pseudo(5, 400_000);
+        let mut spooled = spool_of(&body, dir.path());
+        let (mut session, log) = session_over(
+            append_script("+ ready\r\na2 OK [APPENDUID 5 9] done\r\n"),
+            7,
+        );
+        let base = log.borrow().len(); // the LOGIN exchange precedes the APPEND
+        let at_guard = std::cell::Cell::new(None);
+        let probe = log.clone();
+        let flags: Vec<String> = FLAGS.iter().map(ToString::to_string).collect();
+        let out = append_from_spool(&mut session, "INBOX", &flags, &mut spooled, || {
+            at_guard.set(Some(probe.borrow().len()));
+            Ok(())
+        });
+        assert_eq!(out.result.unwrap(), (5, 9));
+        assert_eq!(
+            (out.phase, out.body_bytes_sent),
+            (imap::AppendPhase::Responded, body.len() as u64)
+        );
+        let cmd = command_line(body.len());
+        assert_eq!(
+            at_guard.get(),
+            Some(base + cmd.len()),
+            "only the command line may precede authorization"
+        );
+        let mut want = cmd;
+        want.extend_from_slice(&body);
+        want.extend_from_slice(b"\r\n");
+        assert_eq!(log.borrow()[base..], want[..]);
+    }
+
+    #[test]
+    fn a_failing_guard_sends_no_spooled_byte() {
+        let dir = private_spool_dir();
+        let mut spooled = spool_of(b"PRIVATE_SPOOLED_BODY", dir.path());
+        let (mut session, log) = session_over(append_script("+ ready\r\n"), 64);
+        let flags: Vec<String> = FLAGS.iter().map(ToString::to_string).collect();
+        let out = append_from_spool(&mut session, "INBOX", &flags, &mut spooled, || {
+            Err(io::Error::other("journal failure"))
+        });
+        assert!(out.result.is_err());
+        assert_eq!(
+            (out.phase, out.body_bytes_sent),
+            (imap::AppendPhase::NotAuthorized, 0)
+        );
+        assert!(
+            !log.borrow()
+                .windows(20)
+                .any(|w| w == b"PRIVATE_SPOOLED_BODY")
+        );
+        assert!(session.is_desynced());
+    }
+
+    #[test]
+    fn a_spool_that_changed_after_sealing_cannot_complete_a_literal() {
+        let dir = private_spool_dir();
+        let body = pseudo(9, 500_000);
+        let mut spooled = spool_of(&body, dir.path());
+        {
+            use std::io::Seek;
+            let f = spooled.spool.file_for_test();
+            f.seek(io::SeekFrom::Start(body.len() as u64 - 1)).unwrap();
+            f.write_all(&[body[body.len() - 1] ^ 1]).unwrap();
+        }
+        let (mut session, log) = session_over(
+            append_script("+ ready\r\na2 OK [APPENDUID 5 9] done\r\n"),
+            64,
+        );
+        let base = log.borrow().len();
+        let flags: Vec<String> = FLAGS.iter().map(ToString::to_string).collect();
+        let out = append_from_spool(&mut session, "INBOX", &flags, &mut spooled, || Ok(()));
+        assert!(out.result.is_err());
+        assert_eq!(
+            out.phase,
+            imap::AppendPhase::BodyStarted,
+            "bytes were sent, so the outcome is uncertain"
+        );
+        let sent = log.borrow().len() - base - command_line(body.len()).len();
+        assert!(
+            sent < body.len(),
+            "the final chunk must be withheld ({sent} of {})",
+            body.len()
+        );
+        assert!(
+            !log.borrow().ends_with(b"\r\n") || sent < body.len(),
+            "never terminated"
+        );
+        assert!(session.is_desynced());
+    }
+
+    #[test]
+    fn spooled_append_rejections_keep_their_codes_for_the_existing_classification() {
+        let dir = private_spool_dir();
+        let flags: Vec<String> = FLAGS.iter().map(ToString::to_string).collect();
+        // Rejected after the literal (size-dependent) and before it (mailbox): same errors as the buffered path.
+        for (script, scope, phase) in [
+            (
+                "+ ready\r\na2 NO [TOOBIG] too big\r\n",
+                "message",
+                imap::AppendPhase::Responded,
+            ),
+            (
+                "a2 NO [NONEXISTENT] no such mailbox\r\n",
+                "mailbox",
+                imap::AppendPhase::NotAuthorized,
+            ),
+        ] {
+            let mut spooled = spool_of(b"hello world", dir.path());
+            let (mut session, _) = session_over(append_script(script), 64);
+            let out = append_from_spool(&mut session, "INBOX", &flags, &mut spooled, || Ok(()));
+            let error = out.result.err().unwrap();
+            assert_eq!(
+                append_rejection(&error).map(|r| r.scope().name()),
+                Some(scope),
+                "{script}"
+            );
+            assert_eq!(out.phase, phase);
+            assert!(
+                !session.is_desynced(),
+                "a consumed tagged rejection keeps the connection usable"
+            );
+        }
     }
 
     #[test]
