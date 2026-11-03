@@ -9,6 +9,7 @@ use imap::{Session, types::Flag};
 use imap_proto::{Capability, Response, UidSetMember};
 use native_tls::{TlsConnector, TlsStream};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
     collections::HashSet,
@@ -176,6 +177,26 @@ pub struct Message {
     pub body: Vec<u8>,
     pub date: DateTime<FixedOffset>,
     pub flags: Vec<String>,
+}
+
+/// What verification needs to know about a stored message without keeping its body.
+/// `sha256` is lowercase hex, identical to `journal::fingerprint` of the same bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageDigest {
+    pub sha256: String,
+    pub size: u64,
+    pub date: DateTime<FixedOffset>,
+    pub flags: Vec<String>,
+}
+impl Message {
+    pub fn digest(&self) -> MessageDigest {
+        MessageDigest {
+            sha256: crate::journal::fingerprint(&self.body),
+            size: self.body.len() as u64,
+            date: self.date,
+            flags: self.flags.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -380,6 +401,17 @@ fn rejection_code(code: Option<&imap_proto::ResponseCode<'_>>, information: &str
         None => code_from_text(information),
     }
 }
+fn stream_error_name(e: &imap::error::StreamError) -> &'static str {
+    use imap::error::StreamError::*;
+    match e {
+        LiteralLengthMismatch => "LITERAL_LENGTH_MISMATCH",
+        MalformedLiteralMarker => "MALFORMED_LITERAL_MARKER",
+        LineTooLong => "LINE_TOO_LONG",
+        ResponseTooLarge => "RESPONSE_TOO_LARGE",
+        MalformedResponse => "MALFORMED_RESPONSE",
+        _ => "STREAM",
+    }
+}
 trait SafeImap<T> {
     fn safe(self) -> Result<T>;
 }
@@ -388,7 +420,13 @@ impl<T> SafeImap<T> for imap::Result<T> {
         self.map_err(|e| {
             // Do not attach the original error: Parse/Unexpected can contain mail
             // literals, and server NO/BAD text can echo credentials or message data.
-            let permanent_message = matches!(&e, imap::Error::No(no) if matches!(no.code, Some(imap_proto::ResponseCode::TooBig)));
+            let permanent_message = matches!(&e, imap::Error::No(no) if matches!(no.code, Some(imap_proto::ResponseCode::TooBig)))
+                // A streamed literal whose announced length differs from RFC822.SIZE is the
+                // same permanent condition the buffered path reports as a size mismatch.
+                || matches!(
+                    &e,
+                    imap::Error::Stream(imap::error::StreamError::LiteralLengthMismatch)
+                );
             let rejection = match &e {
                 imap::Error::No(no) => Some(AppendRejection {
                     code: rejection_code(no.code.as_ref(), &no.information),
@@ -421,6 +459,12 @@ impl<T> SafeImap<T> for imap::Result<T> {
                     code: "-",
                     unlisted: None,
                 },
+                // Fixed names only; a streaming error never carries server data.
+                imap::Error::Stream(x) => Wire {
+                    outcome: "STREAM",
+                    code: stream_error_name(x),
+                    unlisted: None,
+                },
                 _ => Wire {
                     outcome: "INVALID",
                     code: "-",
@@ -447,6 +491,16 @@ impl<T> SafeImap<T> for imap::Result<T> {
                     "IMAP server rejected command (NO); check permissions, quota and server limits",
                 ),
                 imap::Error::Bad(_) => (false, "IMAP server rejected command syntax (BAD)"),
+                // The connection is desynchronized (it refuses further commands), so a
+                // streamed response that violated a bound or the protocol is not retried.
+                imap::Error::Stream(imap::error::StreamError::LiteralLengthMismatch) => (
+                    false,
+                    "streamed message size differs from RFC822.SIZE; session must be discarded",
+                ),
+                imap::Error::Stream(_) => (
+                    false,
+                    "invalid streamed IMAP response; session must be discarded",
+                ),
                 _ => (
                     false,
                     "invalid or unsupported IMAP response; session must be discarded",
@@ -749,7 +803,8 @@ impl Connection {
         }
         Ok(uids)
     }
-    fn message(&mut self, uid: u32) -> Result<Option<Message>> {
+    /// RFC822.SIZE of one message, checked against the configured cap. `None` if absent.
+    fn size_of(&mut self, uid: u32) -> Result<Option<usize>> {
         // Inspect size first, but also enforce a wire budget in case the server lies.
         self.reset(OVERHEAD);
         let size = self
@@ -771,7 +826,15 @@ impl Connection {
                 PermanentMessageError("message exceeds configured max_message_bytes").into(),
             );
         }
-        drop(size);
+        Ok(Some(expected))
+    }
+    fn message(&mut self, uid: u32) -> Result<Option<Message>> {
+        match self.size_of(uid)? {
+            None => Ok(None),
+            Some(expected) => self.fetch_buffered(uid, expected),
+        }
+    }
+    fn fetch_buffered(&mut self, uid: u32, expected: usize) -> Result<Option<Message>> {
         self.reset(expected.saturating_add(OVERHEAD));
         let (data, _) = self
             .session
@@ -781,6 +844,69 @@ impl Connection {
             .safe()?;
         decode_message(&data, uid, expected)
     }
+    /// Digest of one message. Above `stream_above` bytes the body is streamed through the
+    /// hasher and never held in memory; otherwise it is fetched whole, exactly as before,
+    /// and digested. The two paths must (and are tested to) give the same answer.
+    /// The returned flag says whether the streaming path ran.
+    fn digest(
+        &mut self,
+        uid: u32,
+        stream_above: Option<usize>,
+    ) -> Result<(Option<MessageDigest>, bool)> {
+        let Some(expected) = self.size_of(uid)? else {
+            return Ok((None, false));
+        };
+        if stream_above.is_some_and(|threshold| expected > threshold) {
+            self.reset(expected.saturating_add(OVERHEAD));
+            Ok((stream_digest(&mut self.session, uid, expected)?, true))
+        } else {
+            let message = self.fetch_buffered(uid, expected)?;
+            Ok((message.map(|m| m.digest()), false))
+        }
+    }
+}
+
+/// Stream one message body through SHA-256 and return its digest, validated by the same
+/// `parse_fetch` as the buffered path. Nothing is returned unless the whole literal was
+/// read, matched the expected size and was followed by a complete tagged OK, so a
+/// truncated, short or failed read can never yield a digest.
+fn stream_digest<T: Read + Write>(
+    session: &mut imap::Session<T>,
+    uid: u32,
+    expected: usize,
+) -> Result<Option<MessageDigest>> {
+    let mut hasher = Sha256::new();
+    let mut seen = 0u64;
+    let fetched = session
+        .uid_fetch_body_stream(uid, expected as u64, &mut |chunk| {
+            hasher.update(chunk);
+            seen += chunk.len() as u64;
+            Ok(())
+        })
+        .safe()?;
+    let streamed_len = fetched.body_len.map(|n| n as usize);
+    let Some(parsed) = parse_fetch(&fetched.skeleton, uid, expected, streamed_len)? else {
+        return Ok(None);
+    };
+    let (sha256, size) = match fetched.body_len {
+        Some(n) => {
+            if seen != n || !parsed.body.is_empty() {
+                bail!("streamed body does not match its FETCH response");
+            }
+            (format!("{:x}", hasher.finalize()), n)
+        }
+        // A short body sent as a quoted string, not a literal: it is already in the skeleton.
+        None => (
+            crate::journal::fingerprint(&parsed.body),
+            parsed.body.len() as u64,
+        ),
+    };
+    Ok(Some(MessageDigest {
+        sha256,
+        size,
+        date: parsed.date,
+        flags: parsed.flags,
+    }))
 }
 
 pub struct Source(Connection);
@@ -1000,6 +1126,35 @@ impl Destination {
             self.0.message(uid)
         })
     }
+    /// Digest of one destination message for verification and candidate scans. Above
+    /// `stream_above` bytes the body is streamed and never held in memory.
+    pub fn message_digest(
+        &mut self,
+        uid: u32,
+        stream_above: Option<usize>,
+    ) -> Result<Option<MessageDigest>> {
+        if !crate::diagnostics::enabled() {
+            return Ok(self.0.digest(uid, stream_above)?.0);
+        }
+        let started = Instant::now();
+        let result = self.0.digest(uid, stream_above);
+        let mut fields = diag_object([
+            ("role", "destination".into()),
+            ("op", "uid_fetch_digest".into()),
+            ("ms", (started.elapsed().as_millis() as u64).into()),
+        ]);
+        match &result {
+            Ok((digest, streamed)) => {
+                fields.insert("outcome".into(), "OK".into());
+                fields.insert("found".into(), digest.is_some().into());
+                fields.insert("bytes".into(), digest.as_ref().map(|d| d.size).into());
+                fields.insert("streamed".into(), (*streamed).into());
+            }
+            Err(e) => fields.extend(diag_failure(e)),
+        }
+        crate::diagnostics::event("command", fields);
+        Ok(result?.0)
+    }
     pub fn select(&mut self, folder: &str) -> Result<Selected> {
         observed("destination", "select", selected_detail, || {
             self.0.select_folder(folder, true)
@@ -1121,6 +1276,8 @@ fn parse_fetch(
     use imap_proto::AttributeValue as A;
     let mut rest = response;
     let mut message = None;
+    // Streaming only: some other message's response also carried a body section.
+    let mut foreign_body = false;
     while !rest.is_empty() {
         let (next, r) = Response::from_bytes(rest)
             .map_err(|_| anyhow::anyhow!("invalid message FETCH response"))?;
@@ -1129,6 +1286,21 @@ fn parse_fetch(
                 .iter()
                 .filter_map(|a| if let A::Uid(u) = a { Some(*u) } else { None })
                 .collect();
+            if streamed_len.is_some()
+                && !ids.contains(&uid)
+                && attributes.iter().any(|a| {
+                    matches!(
+                        a,
+                        A::BodySection {
+                            section: None,
+                            index: None,
+                            data: Some(_)
+                        }
+                    )
+                })
+            {
+                foreign_body = true;
+            }
             if ids.contains(&uid) {
                 let bodies: Vec<_> = attributes
                     .iter()
@@ -1166,7 +1338,11 @@ fn parse_fetch(
                     if dates.len() != 1 || flags.len() != 1 {
                         bail!("FETCH omitted or duplicated INTERNALDATE/FLAGS");
                     }
-                    if streamed_len.unwrap_or(bodies[0].len()) != expected {
+                    let actual = match streamed_len {
+                        Some(n) if bodies[0].is_empty() => n,
+                        _ => bodies[0].len(),
+                    };
+                    if actual != expected {
                         return Err(
                             PermanentMessageError("message size differs from RFC822.SIZE").into(),
                         );
@@ -1182,6 +1358,12 @@ fn parse_fetch(
             }
         }
         rest = next;
+    }
+    if foreign_body && message.is_some() {
+        // The streamed literal is the first BODY[] on the wire. With bodies for two
+        // messages present it cannot be attributed to this one, so fail closed; the
+        // buffered path would have ignored the other message's body.
+        bail!("streamed FETCH body may belong to a different UID");
     }
     Ok(message)
 }
@@ -1503,6 +1685,368 @@ mod tests {
         let other = format!("* 2 FETCH (UID 9 FLAGS () {D} BODY[] {{2}}\r\nzz)\r\n{ok}");
         assert_eq!(case(&other, 7, 3), good);
     }
+    // ------------------------------------------------------------ streaming digest (3b)
+    /// Duplex stream that replays a script with fragmented reads and discards writes.
+    struct Replay {
+        incoming: Vec<u8>,
+        pos: usize,
+        max_read: usize,
+        step: usize,
+    }
+    impl Read for Replay {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.incoming.len() {
+                return Ok(0);
+            }
+            self.step = self.step.wrapping_mul(1103515245).wrapping_add(12345);
+            let take = 1 + (self.step >> 8) % self.max_read;
+            let n = take.min(buf.len()).min(self.incoming.len() - self.pos);
+            buf[..n].copy_from_slice(&self.incoming[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+    impl Write for Replay {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        Absent,
+        Found {
+            sha256: String,
+            size: u64,
+            date: i64,
+            flags: Vec<String>,
+        },
+        Permanent,
+        Failed,
+    }
+    fn found(d: &MessageDigest) -> Outcome {
+        Outcome::Found {
+            sha256: d.sha256.clone(),
+            size: d.size,
+            date: d.date.timestamp(),
+            flags: d.flags.clone(),
+        }
+    }
+    fn classify(e: &anyhow::Error) -> Outcome {
+        if is_permanent_message(e) {
+            Outcome::Permanent
+        } else {
+            Outcome::Failed
+        }
+    }
+    fn buffered_outcome(response: &[u8], uid: u32, expected: usize) -> Outcome {
+        match decode_message(response, uid, expected) {
+            Ok(None) => Outcome::Absent,
+            Ok(Some(m)) => found(&m.digest()),
+            Err(e) => classify(&e),
+        }
+    }
+    /// Run the REAL streaming reader and digest over a script (greeting, login, `response`, tagged OK).
+    fn streaming_outcome(response: &[u8], uid: u32, expected: usize, max_read: usize) -> Outcome {
+        let mut script = b"* OK hello\r\na1 OK logged in\r\n".to_vec();
+        script.extend_from_slice(response);
+        script.extend_from_slice(b"a2 OK UID FETCH completed\r\n");
+        streaming_outcome_raw(script, uid, expected, max_read)
+    }
+    fn streaming_outcome_raw(
+        script: Vec<u8>,
+        uid: u32,
+        expected: usize,
+        max_read: usize,
+    ) -> Outcome {
+        let mut client = imap::Client::new(Replay {
+            incoming: script,
+            pos: 0,
+            max_read,
+            step: 7,
+        });
+        client.read_greeting().unwrap();
+        let mut session = client.login("u", "p").map_err(|e| e.0).unwrap();
+        match stream_digest(&mut session, uid, expected) {
+            Ok(None) => Outcome::Absent,
+            Ok(Some(d)) => found(&d),
+            Err(e) => classify(&e),
+        }
+    }
+    fn fetch(body: &[u8], body_first: bool) -> Vec<u8> {
+        let attrs = format!("UID 7 FLAGS (\\Seen \\Flagged) {D}");
+        let mut r = b"* 1 FETCH (".to_vec();
+        if body_first {
+            r.extend_from_slice(format!("BODY[] {{{}}}\r\n", body.len()).as_bytes());
+            r.extend_from_slice(body);
+            r.extend_from_slice(format!(" {attrs})\r\n").as_bytes());
+        } else {
+            r.extend_from_slice(format!("{attrs} BODY[] {{{}}}\r\n", body.len()).as_bytes());
+            r.extend_from_slice(body);
+            r.extend_from_slice(b")\r\n");
+        }
+        r
+    }
+    fn pseudo(seed: u64, n: usize) -> Vec<u8> {
+        let mut x = seed | 1;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_and_buffered_paths_agree_on_valid_and_malformed_responses() {
+        let ok = format!("* 1 FETCH (UID 7 FLAGS (\\Seen) {D} BODY[] {{3}}\r\nabc)\r\n");
+        let body_first = format!("* 1 FETCH (BODY[] {{3}}\r\nabc UID 7 FLAGS (\\Seen) {D})\r\n");
+        let quoted = format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] \"abc\")\r\n");
+        let empty = format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] {{0}}\r\n)\r\n");
+        let no_flags = format!("* 1 FETCH (UID 7 {D} BODY[] {{3}}\r\nabc)\r\n");
+        let no_date = "* 1 FETCH (UID 7 FLAGS () BODY[] {3}\r\nabc)\r\n".to_string();
+        let two_flags = format!("* 1 FETCH (UID 7 FLAGS () FLAGS () {D} BODY[] {{3}}\r\nabc)\r\n");
+        let two_dates = format!("* 1 FETCH (UID 7 FLAGS () {D} {D} BODY[] {{3}}\r\nabc)\r\n");
+        let two_uids = format!("* 1 FETCH (UID 7 UID 7 FLAGS () {D} BODY[] {{3}}\r\nabc)\r\n");
+        let two_bodies =
+            format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] {{3}}\r\nabc BODY[] {{3}}\r\nabc)\r\n");
+        let bad_date = "* 1 FETCH (UID 7 FLAGS () INTERNALDATE \"nonsense\" BODY[] {3}\r\nabc)\r\n"
+            .to_string();
+        let nil_body = format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] NIL)\r\n");
+        let no_body = format!("* 1 FETCH (UID 7 FLAGS () {D})\r\n");
+        let duplicate = format!("{ok}{ok}");
+        let cases: Vec<(&str, String, u32, usize)> = vec![
+            ("valid", ok.clone(), 7, 3),
+            ("body first", body_first, 7, 3),
+            ("quoted body", quoted, 7, 3),
+            ("empty literal", empty, 7, 0),
+            ("size larger than expected", ok.clone(), 7, 4),
+            ("size smaller than expected", ok.clone(), 7, 2),
+            ("other uid", ok.clone(), 8, 3),
+            ("nil body", nil_body, 7, 3),
+            ("no body", no_body, 7, 3),
+            ("no flags", no_flags, 7, 3),
+            ("no date", no_date, 7, 3),
+            ("two flags", two_flags, 7, 3),
+            ("two dates", two_dates, 7, 3),
+            ("two uids", two_uids, 7, 3),
+            ("two bodies", two_bodies, 7, 3),
+            ("bad date", bad_date, 7, 3),
+            ("duplicate response", duplicate.clone(), 7, 3),
+            ("duplicate with size mismatch", duplicate, 7, 4),
+        ];
+        for (name, response, uid, expected) in &cases {
+            let want = buffered_outcome(response.as_bytes(), *uid, *expected);
+            for max_read in [1, 3, 64, 1 << 20] {
+                assert_eq!(
+                    streaming_outcome(response.as_bytes(), *uid, *expected, max_read),
+                    want,
+                    "{name} (max_read {max_read})"
+                );
+            }
+        }
+        // Sanity that the table is not vacuous: both outcomes occur.
+        assert!(matches!(
+            buffered_outcome(ok.as_bytes(), 7, 3),
+            Outcome::Found { .. }
+        ));
+        assert_eq!(buffered_outcome(ok.as_bytes(), 7, 4), Outcome::Permanent);
+        assert_eq!(buffered_outcome(ok.as_bytes(), 8, 3), Outcome::Absent);
+        assert_eq!(buffered_outcome(b"junk\r\n", 7, 3), Outcome::Failed);
+    }
+
+    #[test]
+    fn streaming_is_deliberately_stricter_when_a_body_may_belong_to_another_uid() {
+        let ours = String::from_utf8(fetch(b"abc", false)).unwrap();
+        // The buffered path ignores another message's body and finds ours.
+        // Streaming can hash only the FIRST body on the wire, so it must never return a digest here.
+        for (name, other_len, want) in [
+            // Different length: the announced length cannot match, a permanent refusal.
+            ("foreign body of another length", 2usize, Outcome::Permanent),
+            // Same length: it WOULD be hashed, so attribution must be refused outright.
+            ("foreign body of the same length", 3, Outcome::Failed),
+        ] {
+            let foreign = format!(
+                "* 2 FETCH (UID 9 FLAGS () {D} BODY[] {{{other_len}}}\r\n{})\r\n",
+                "z".repeat(other_len)
+            );
+            let response = format!("{foreign}{ours}");
+            assert!(
+                matches!(
+                    buffered_outcome(response.as_bytes(), 7, 3),
+                    Outcome::Found { .. }
+                ),
+                "{name}"
+            );
+            for max_read in [1, 64, 1 << 20] {
+                assert_eq!(
+                    streaming_outcome(response.as_bytes(), 7, 3, max_read),
+                    want,
+                    "{name} ({max_read})"
+                );
+            }
+        }
+        // If the requested UID has no body, a foreign body is simply "not found", as when buffered.
+        let only_foreign = format!("* 2 FETCH (UID 9 FLAGS () {D} BODY[] {{3}}\r\nzzz)\r\n");
+        assert_eq!(
+            buffered_outcome(only_foreign.as_bytes(), 7, 3),
+            Outcome::Absent
+        );
+        assert_eq!(
+            streaming_outcome(only_foreign.as_bytes(), 7, 3, 5),
+            Outcome::Absent
+        );
+        // A body-less unrelated FETCH (flag updates) is harmless in both.
+        let noise = format!("* 3 FETCH (UID 11 FLAGS (\\Seen))\r\n{ours}");
+        assert_eq!(
+            streaming_outcome(noise.as_bytes(), 7, 3, 5),
+            buffered_outcome(noise.as_bytes(), 7, 3)
+        );
+    }
+
+    #[test]
+    fn streaming_digest_matches_the_journal_fingerprint_for_all_sizes_and_fragmentations() {
+        for (i, len) in [
+            0usize,
+            1,
+            2,
+            4095,
+            4096,
+            4097,
+            128 * 1024 - 1,
+            128 * 1024,
+            128 * 1024 + 1,
+            300_000,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let body = pseudo(i as u64 + 1, len);
+            for body_first in [false, true] {
+                let response = fetch(&body, body_first);
+                let want = buffered_outcome(&response, 7, len);
+                assert!(
+                    matches!(&want, Outcome::Found { sha256, .. } if *sha256 == crate::journal::fingerprint(&body))
+                );
+                for max_read in [1, 7, 1024, 1 << 20] {
+                    if len > 5000 && max_read < 100 {
+                        continue; // the byte-at-a-time cases are covered by the small sizes
+                    }
+                    assert_eq!(
+                        streaming_outcome(&response, 7, len, max_read),
+                        want,
+                        "len {len} first {body_first} read {max_read}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_large_message_that_differs_only_in_its_final_byte_has_a_different_digest() {
+        let mut body = pseudo(42, 400_000);
+        let original = streaming_outcome(&fetch(&body, false), 7, body.len(), 4096);
+        *body.last_mut().unwrap() ^= 0x01;
+        let altered = streaming_outcome(&fetch(&body, false), 7, body.len(), 4096);
+        let (
+            Outcome::Found {
+                sha256: a,
+                size: sa,
+                ..
+            },
+            Outcome::Found {
+                sha256: b,
+                size: sb,
+                ..
+            },
+        ) = (&original, &altered)
+        else {
+            panic!("both must be found: {original:?} {altered:?}");
+        };
+        assert_eq!(sa, sb);
+        assert_ne!(a, b, "a single flipped final byte must change the digest");
+        // And it still equals the buffered answer for that altered message.
+        assert_eq!(
+            altered,
+            buffered_outcome(&fetch(&body, false), 7, body.len())
+        );
+    }
+
+    #[test]
+    fn a_truncated_or_failed_streaming_read_never_yields_a_digest() {
+        let body = pseudo(5, 50_000);
+        let mut script = b"* OK hello\r\na1 OK logged in\r\n".to_vec();
+        let header = script.len();
+        script.extend_from_slice(&fetch(&body, false));
+        script.extend_from_slice(b"a2 OK UID FETCH completed\r\n");
+        // Cut the stream at many points: inside the header, mid-literal, before and inside the tagged OK.
+        let mut cuts: Vec<usize> = (0..60)
+            .map(|i| header + i * (script.len() - header) / 60)
+            .collect();
+        cuts.extend([script.len() - 1, script.len() - 10, script.len() - 28]);
+        for cut in cuts {
+            for max_read in [1usize, 97, 1 << 20] {
+                let o = streaming_outcome_raw(script[..cut].to_vec(), 7, body.len(), max_read);
+                assert_eq!(
+                    o,
+                    Outcome::Failed,
+                    "cut at {cut} of {} (max_read {max_read})",
+                    script.len()
+                );
+            }
+        }
+        // The complete script is accepted, so the loop above really exercises truncation.
+        assert!(matches!(
+            streaming_outcome_raw(script.clone(), 7, body.len(), 1 << 20),
+            Outcome::Found { .. }
+        ));
+        // A tagged NO instead of OK after the literal is a failure, never a digest.
+        let mut no = b"* OK hello\r\na1 OK logged in\r\n".to_vec();
+        no.extend_from_slice(&fetch(&body, false));
+        no.extend_from_slice(b"a2 NO [SERVERBUG] read failed\r\n");
+        assert_eq!(
+            streaming_outcome_raw(no, 7, body.len(), 4096),
+            Outcome::Failed
+        );
+    }
+
+    #[test]
+    fn stream_errors_are_classified_explicitly_and_carry_no_server_data() {
+        // Announced length differs from RFC822.SIZE: the same permanent condition as the buffered path.
+        let body = vec![b'x'; 100];
+        let mismatch = streaming_outcome(&fetch(&body, false), 7, 99, 64);
+        assert_eq!(mismatch, buffered_outcome(&fetch(&body, false), 7, 99));
+        assert_eq!(mismatch, Outcome::Permanent);
+        // Every other stream failure is a non-permanent, non-transient failure with a fixed name.
+        use imap::error::StreamError as E;
+        for (error, name) in [
+            (E::MalformedLiteralMarker, "MALFORMED_LITERAL_MARKER"),
+            (E::LineTooLong, "LINE_TOO_LONG"),
+            (E::ResponseTooLarge, "RESPONSE_TOO_LARGE"),
+            (E::MalformedResponse, "MALFORMED_RESPONSE"),
+        ] {
+            let e = Err::<(), _>(imap::Error::Stream(error)).safe().unwrap_err();
+            let p = e.downcast_ref::<ProtocolError>().unwrap();
+            assert!(!p.transient && !p.permanent_message, "{name}");
+            assert_eq!(
+                p.wire.as_ref().map(|w| (w.outcome, w.code)),
+                Some(("STREAM", name))
+            );
+            assert!(!format!("{e:#}").contains("PRIVATE"));
+        }
+        let e = Err::<(), _>(imap::Error::Stream(E::LiteralLengthMismatch))
+            .safe()
+            .unwrap_err();
+        assert!(is_permanent_message(&e));
+        // A stream failure produced by a real malformed response (bare-LF literal marker).
+        let bad = b"* 1 FETCH (UID 7 FLAGS () INTERNALDATE \"02-Jan-2020 03:04:05 +0000\" BODY[] {3}\nabc)\r\n";
+        assert_eq!(streaming_outcome(bad, 7, 3, 64), Outcome::Failed);
+    }
+
     #[test]
     fn xoauth_error_challenge_never_repeats_token() {
         use imap::Authenticator;
