@@ -53,7 +53,12 @@ with tempfile.TemporaryDirectory(prefix='imaplane-crash-matrix-') as temporary:
                 assert db.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
                 states=db.execute('select state from transfers order by uid').fetchall()
                 if expected_state=='none': assert not states
-                elif expected_state in ['planned','accepted','confirmed']: assert states[0][0]==expected_state
+                elif expected_state in ['planned','accepted','confirmed']:
+                    if states: assert states[0][0]==expected_state
+                    else:
+                        assert expected_state=='planned'
+                        assert not any(v=='APPEND' for v,_ in proxies[1].commands), 'no pre-send record is legal only before any APPEND'
+                        # Combined preparation rolled back before its FULL commit.
                 else:
                     assert states[0][0]=='uncertain'
                     phase=db.execute('select phase from append_attempts').fetchone()[0]

@@ -39,7 +39,11 @@ with tempfile.TemporaryDirectory(prefix='imaplane-h5-crashes-') as tmp:
                 with sqlite3.connect(root/name/'journal.sqlite3') as db:
                     assert db.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
                     assert db.execute("select count(*) from transfers where state='confirmed'").fetchone()[0]==(nth if point=='after_confirm' else nth-1)
-                    state=db.execute('select state from transfers where folder=? and uid=?',(folder,uid)).fetchone()[0]
+                    row=db.execute('select state from transfers where folder=? and uid=?',(folder,uid)).fetchone()
+                    state=row[0] if row else None
+                    if row is None:
+                        assert point in ['after_plan','after_metadata','after_baseline','begin_append_before_commit']
+                        assert sum(v=='APPEND' for v,_ in proxies[1].commands)==nth-1
                 if state=='uncertain': repair(cfg,lab,folder,uid)
                 else: assert run(cfg)['complete']
                 lab.check(dst)

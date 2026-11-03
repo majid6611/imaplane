@@ -36,6 +36,13 @@ pub struct Record {
     pub baseline: Option<(u32, u32)>,
 }
 
+pub(crate) struct AppendMetadata<'a> {
+    pub date: i64,
+    pub flags: &'a [String],
+    pub omitted: &'a [String],
+    pub baseline: (u32, u32),
+}
+
 pub struct Journal(Connection);
 
 impl Journal {
@@ -215,6 +222,67 @@ impl Journal {
         tx.commit()?;
         crate::fault::point("after_plan");
         Ok(())
+    }
+
+    /// One FULL preparation commit; no externally visible operation precedes it.
+    /// Legacy public transition helpers remain for compatibility and focused tests.
+    pub(crate) fn prepare_append(
+        &mut self,
+        key: &MessageKey,
+        body: &[u8],
+        metadata: AppendMetadata<'_>,
+    ) -> Result<Record> {
+        crate::fault::point("before_plan");
+        if key.uid == 0
+            || key.uid_validity == 0
+            || metadata.baseline.0 == 0
+            || metadata.baseline.1 == 0
+        {
+            bail!("invalid append identity or baseline");
+        }
+        let hash = fingerprint(body);
+        let tx = self.0.transaction()?;
+        let old: Option<(String, String, Option<i64>)> = tx.query_row("SELECT fingerprint,state,date FROM transfers WHERE folder=?1 AND uid_validity=?2 AND uid=?3", params![key.folder,key.uid_validity,key.uid], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if let Some((previous, state, date)) = &old {
+            if previous != &hash {
+                bail!("source content changed for an existing UID; refusing to replace evidence");
+            }
+            if state != "planned" {
+                bail!(
+                    "only a planned transfer can prepare an APPEND; uncertain transfers cannot be retried"
+                );
+            }
+            if date.is_some_and(|date| date != metadata.date) {
+                bail!("source INTERNALDATE changed since planning");
+            }
+        } else {
+            let changed: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM transfers WHERE folder=?1 AND uid_validity<>?2)",
+                params![key.folder, key.uid_validity],
+                |r| r.get(0),
+            )?;
+            if changed {
+                bail!("source UIDVALIDITY changed; re-planning required");
+            }
+            tx.execute("INSERT INTO transfers (folder,uid_validity,uid,fingerprint,state) VALUES (?1,?2,?3,?4,'planned')", params![key.folder,key.uid_validity,key.uid,hash])?;
+        }
+        crate::fault::point("after_plan");
+        crate::fault::point("before_metadata");
+        // Preserve frozen date/flags on a previously planned, definitely rejected attempt.
+        if old.as_ref().is_none_or(|(_, _, date)| date.is_none()) {
+            require_one(tx.execute("UPDATE transfers SET date=?4,flags=?5,omitted=?6 WHERE folder=?1 AND uid_validity=?2 AND uid=?3 AND state='planned' AND date IS NULL", params![key.folder,key.uid_validity,key.uid,metadata.date,serde_json::to_string(metadata.flags)?,serde_json::to_string(metadata.omitted)?])?)?;
+        }
+        crate::fault::point("after_metadata");
+        crate::fault::point("before_baseline");
+        require_one(tx.execute("UPDATE transfers SET baseline_validity=?4,baseline_next=?5 WHERE folder=?1 AND uid_validity=?2 AND uid=?3 AND state='planned'", params![key.folder,key.uid_validity,key.uid,metadata.baseline.0,metadata.baseline.1])?)?;
+        crate::fault::point("after_baseline");
+        crate::fault::point("before_begin_append");
+        require_one(tx.execute("UPDATE transfers SET state='uncertain' WHERE folder=?1 AND uid_validity=?2 AND uid=?3 AND state='planned'", params![key.folder,key.uid_validity,key.uid])?)?;
+        tx.execute("INSERT INTO append_attempts VALUES (?1,?2,?3,'prepared') ON CONFLICT(folder,validity,uid) DO UPDATE SET phase='prepared'", params![key.folder,key.uid_validity,key.uid])?;
+        crate::fault::point("begin_append_before_commit");
+        tx.commit()?;
+        crate::fault::point("after_begin_append");
+        self.record(key)?.context("prepared record missing")
     }
 
     /// Must commit successfully before any APPEND bytes may be sent.
@@ -714,6 +782,49 @@ mod upgrade_backup_tests {
                 .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
                 .unwrap(),
             "ok"
+        );
+    }
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    #[test]
+    fn combined_preparation_freezes_metadata_and_never_resets_uncertainty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = Journal::create(&dir.path().join("journal.sqlite3"), "binding").unwrap();
+        let key = MessageKey {
+            folder: "INBOX".into(),
+            uid_validity: 5,
+            uid: 1,
+        };
+        let metadata = || AppendMetadata {
+            date: 123,
+            flags: &[],
+            omitted: &[],
+            baseline: (8, 10),
+        };
+        let record = journal.prepare_append(&key, b"body", metadata()).unwrap();
+        assert_eq!(record.state, "uncertain");
+        assert_eq!(record.date, Some(123));
+        assert_eq!(record.baseline, Some((8, 10)));
+        assert_eq!(
+            journal
+                .0
+                .pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert!(journal.prepare_append(&key, b"body", metadata()).is_err());
+        journal.authorize_literal(&key).unwrap();
+        assert!(
+            journal
+                .prepare_append(&key, b"different", metadata())
+                .is_err()
+        );
+        assert_eq!(
+            journal.record(&key).unwrap().unwrap().hash,
+            fingerprint(b"body")
         );
     }
 }

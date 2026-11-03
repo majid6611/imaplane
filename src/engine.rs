@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     job::Job,
-    journal::{Journal, MessageKey, Record, fingerprint},
+    journal::{AppendMetadata, Journal, MessageKey, Record, fingerprint},
     transport::{Destination, Message, Selected, Source, valid_flag},
 };
 use anyhow::{Context, Result, bail};
@@ -462,11 +462,20 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     return Ok(report);
                 }
             };
-            job.journal.plan(&key, &message.body)?;
-            let mut r = job
-                .journal
-                .record(&key)?
-                .context("planned record missing")?;
+            let old = job.journal.record(&key)?;
+            if old
+                .as_ref()
+                .and_then(|r| r.date)
+                .is_some_and(|date| date != message.date.timestamp())
+            {
+                report.entries.push(entry(
+                    &key,
+                    old.as_ref(),
+                    "source_changed",
+                    "source INTERNALDATE changed since planning",
+                ));
+                continue;
+            }
             let current = dest.select(&mapping.destination, true)?;
             if current.validity != selected.validity {
                 bail!("destination UIDVALIDITY changed before APPEND");
@@ -477,26 +486,21 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     .next
                     .context("destination omitted UIDNEXT; cannot track append baseline")?,
             );
-            if r.date.is_none() {
-                let (flags, omitted) = transfer_flags(&message.flags, &current.flags);
-                job.journal
-                    .metadata(&key, message.date.timestamp(), &flags, &omitted, baseline)?;
-            } else if r.date != Some(message.date.timestamp()) {
-                report.entries.push(entry(
-                    &key,
-                    Some(&r),
-                    "source_changed",
-                    "source INTERNALDATE changed since planning",
-                ));
-                continue;
-            }
-            job.journal.refresh_baseline(&key, baseline)?;
-            r = job.journal.record(&key)?.unwrap();
+            let (flags, omitted) = transfer_flags(&message.flags, &current.flags);
             if stop.load(Ordering::Relaxed) {
                 report.interrupted = true;
                 break;
             }
-            job.journal.begin_append(&key)?;
+            let r = job.journal.prepare_append(
+                &key,
+                &message.body,
+                AppendMetadata {
+                    date: message.date.timestamp(),
+                    flags: &flags,
+                    omitted: &omitted,
+                    baseline,
+                },
+            )?;
             // Empty literals could be committed without any body bytes; authorize
             // those BEFORE sending even the APPEND command prefix.
             if message.body.is_empty() {
