@@ -227,6 +227,10 @@ and replaced if dead, then re-selected with the UIDVALIDITY check. A successful
 probe cannot promise the connection survives the APPEND itself; a failure during
 APPEND is still uncertain and never replayed.
 
+Planned Gmail and Microsoft 365 compatibility testing (not yet started; no live
+provider has been contacted) is described in
+[docs/PROVIDER_COMPATIBILITY_TESTING.md](docs/PROVIDER_COMPATIBILITY_TESTING.md).
+
 ## Preservation policy and limitations
 
 - `\Recent` is session-only and never copied. `\Deleted` is intentionally omitted
