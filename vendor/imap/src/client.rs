@@ -18,6 +18,9 @@ use super::utils::*;
 #[cfg(doc)]
 use imap_proto::NameAttribute;
 
+mod streaming;
+pub use streaming::{AppendPhase, StreamAppendCmd, StreamedAppend, StreamedFetch, STREAM_CHUNK};
+
 static TAG_PREFIX: &str = "a";
 const INITIAL_TAG: u32 = 0;
 const CR: u8 = 0x0d;
@@ -170,9 +173,19 @@ pub struct Connection<T: Read + Write> {
 
     /// Tracks if we have read a greeting.
     pub greeting_read: bool,
+
+    /// IMAPLANE patch: set when a streaming operation failed in a way that leaves the
+    /// protocol stream in an unknown position. Every later command is refused.
+    desynced: bool,
 }
 
 impl<T: Read + Write> Connection<T> {
+    /// IMAPLANE patch: true after a streaming failure that desynchronized the protocol
+    /// stream. The connection must then be dropped; further commands are refused.
+    pub fn is_desynced(&self) -> bool {
+        self.desynced
+    }
+
     /// Manually increment the current tag.
     ///
     /// If writing a command to the server fails, [`Client`] assumes that the command did not reach
@@ -363,6 +376,7 @@ impl<T: Read + Write> Client<T> {
                 tag: INITIAL_TAG,
                 debug: false,
                 greeting_read: false,
+                desynced: false,
             },
         }
     }
@@ -1673,6 +1687,10 @@ impl<T: Read + Write> Connection<T> {
     }
 
     pub(crate) fn write_line(&mut self, buf: &[u8]) -> Result<()> {
+        if self.desynced {
+            // Nothing is written: the stream position is unknown after a failed stream.
+            return Err(Error::ConnectionLost);
+        }
         self.stream.write_all(buf)?;
         self.stream.write_all(&[CR, LF])?;
         self.stream.flush()?;

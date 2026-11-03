@@ -115,7 +115,41 @@ pub enum Error {
     StartTlsNotAvailable,
     /// Returns when Tls is not configured
     TlsNotConfigured,
+    /// IMAPLANE patch: a streaming FETCH or APPEND violated a bound or the protocol. The
+    /// connection must be discarded. Carries no server data.
+    Stream(StreamError),
 }
+
+/// IMAPLANE patch: why a streaming operation was refused. Fixed variants only, so no
+/// server-controlled bytes can reach logs or error chains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StreamError {
+    /// The literal length the server announced differs from the length the caller expects.
+    LiteralLengthMismatch,
+    /// A line ending in a literal marker was not a well-formed `{digits}CRLF`.
+    MalformedLiteralMarker,
+    /// A non-literal response line exceeded the line bound.
+    LineTooLong,
+    /// The response outside the streamed literal exceeded the bound.
+    ResponseTooLarge,
+    /// A tagged line could not be parsed as a completion.
+    MalformedResponse,
+}
+
+impl fmt::Display for StreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            StreamError::LiteralLengthMismatch => "streamed literal length differs from the expected length",
+            StreamError::MalformedLiteralMarker => "malformed literal marker",
+            StreamError::LineTooLong => "response line exceeds the streaming line bound",
+            StreamError::ResponseTooLarge => "response outside the streamed literal exceeds its bound",
+            StreamError::MalformedResponse => "malformed tagged response",
+        })
+    }
+}
+
+impl StdError for StreamError {}
 
 impl From<IoError> for Error {
     fn from(err: IoError) -> Error {
@@ -183,6 +217,7 @@ impl fmt::Display for Error {
             Error::MissingStatusResponse => write!(f, "Missing STATUS Response"),
             Error::TagMismatch(ref data) => write!(f, "Mismatched Tag: {:?}", data),
             Error::StartTlsNotAvailable => write!(f, "StartTls is not available on the server"),
+            Error::Stream(ref e) => fmt::Display::fmt(e, f),
             Error::TlsNotConfigured => {
                 write!(f, "TLS was requested, but no TLS features are enabled")
             }
@@ -213,6 +248,7 @@ impl StdError for Error {
             Error::TagMismatch(ref e) => e.description(),
             Error::StartTlsNotAvailable => "StartTls is not available on the server",
             Error::TlsNotConfigured => "TLS was requested, but no TLS features are enabled",
+            Error::Stream(_) => "Streaming operation refused",
         }
     }
 
