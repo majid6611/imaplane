@@ -147,6 +147,87 @@ with tempfile.TemporaryDirectory(prefix='imaplane-stream-verify-') as tmp:
         r = run(c)
         assert r['complete'] and states(j) == ['confirmed'] and appends(s) == 1 and s.messages['destination'] == [LARGE]
 
+    # ---------------------------------------------------------------- candidate scanning (3d)
+    OTHER = b'Subject: unrelated\r\n\r\n' + os.urandom(1 << 20)
+    FOLDER_ARGS = ['--folder', FOLDER, '--uid', '1']
+
+    def uncertain_after_commit(threshold, body=LARGE):
+        """APPEND is stored but its reply is lost: the record is uncertain and the copy exists."""
+        s, c, j = fixture([body], threshold)
+        s.drop_reply_after_commit = True
+        r = run(c, code=2)
+        assert results(r) == ['uncertain'] and states(j) == ['uncertain'], (r, states(j))
+        s.drop_reply_after_commit = False
+        return s, c, j
+
+    @check('candidate scan: only the exact copy is a candidate among large look-alikes; no attribution, no replay')
+    def _():
+        seen = []
+        for threshold in THRESHOLDS:
+            s, c, j = uncertain_after_commit(threshold)
+            s.messages['destination'] += [OTHER, flip_last(LARGE)]       # unrelated, and a final-byte look-alike
+            diag = root / f'scan-{counter[0]}.jsonl'
+            r = run(c, code=2, diag=diag)
+            e = r['entries'][0]
+            seen.append((results(r), e['candidate_uids'], e['detail']))
+            assert e['result'] == 'uncertain' and e['candidate_uids'] == [1], e
+            assert states(j) == ['uncertain'], 'a candidate is evidence only, never attribution'
+            assert appends(s) == 1, 'no automatic replay'
+            streamed = [json.loads(l)['streamed'] for l in diag.read_text().splitlines() if '"uid_fetch_digest"' in l]
+            assert streamed and all(x == (threshold == 0) for x in streamed), (threshold, streamed)
+        assert seen[0] == seen[1], seen
+
+    @check('candidate scan: a truncated destination read aborts the run, leaves the record uncertain and is repeatable')
+    def _():
+        codes = []
+        for threshold in THRESHOLDS:
+            s, c, j = uncertain_after_commit(threshold)
+            s.truncate_dest_fetch_at = 300_000
+            run(c, code=1); codes.append(1)
+            intact(j); assert states(j) == ['uncertain']
+            s.truncate_dest_fetch_at = None
+            r = run(c, code=2)
+            assert r['entries'][0]['candidate_uids'] == [1] and states(j) == ['uncertain'] and appends(s) == 1
+        assert codes == [1, 1]
+
+    @check('SIGKILL mid-stream during a candidate scan leaves the uncertain record untouched')
+    def _():
+        s, c, j = uncertain_after_commit(0)
+        run(c, point='candidate_stream_chunk', nth=3)
+        intact(j); assert states(j) == ['uncertain']
+        r = run(c, code=2)
+        assert r['entries'][0]['candidate_uids'] == [1] and appends(s) == 1
+
+    @check('recover: large non-matching candidates allow the audited reset; a matching one refuses it')
+    def _():
+        for threshold in THRESHOLDS:
+            s, c, j = fixture([LARGE], threshold)
+            s.drop_on_append = True
+            assert results(run(c, code=2)) == ['uncertain']
+            s.drop_on_append = False
+            s.messages['destination'] += [OTHER, flip_last(LARGE)]
+            r = run(c, 'recover', code=2, extra=FOLDER_ARGS)
+            assert results(r) == ['retry_authorized'] and states(j) == ['planned'], (r, states(j))
+            assert run(c)['complete'] and s.messages['destination'][-1] == LARGE
+            s, c, j = fixture([LARGE], threshold)
+            s.drop_on_append = True
+            assert results(run(c, code=2)) == ['uncertain']
+            s.drop_on_append = False
+            s.messages['destination'] += [LARGE]
+            run(c, 'recover', code=1, extra=FOLDER_ARGS)
+            assert states(j) == ['uncertain'], 'a matching candidate must keep the record manual'
+
+    @check('resolve: an exact large copy is attributed and verified; a final-byte difference is refused')
+    def _():
+        for threshold in THRESHOLDS:
+            s, c, j = uncertain_after_commit(threshold)
+            r = run(c, 'resolve', code=2, extra=FOLDER_ARGS + ['--destination-uid', '1'])
+            assert results(r) == ['confirmed'] and states(j) == ['confirmed'] and appends(s) == 1, (r, states(j))
+            s, c, j = uncertain_after_commit(threshold)
+            s.messages['destination'][0] = flip_last(LARGE)
+            run(c, 'resolve', code=1, extra=FOLDER_ARGS + ['--destination-uid', '1'])
+            assert states(j) == ['uncertain']
+
     assert all(not s.errors for s in servers), [s.errors for s in servers]
     for server in servers: server.close()
 

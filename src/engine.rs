@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     job::Job,
     journal::{AppendMetadata, Journal, MessageKey, Record},
-    transport::{Destination, Message, Selected, Source, valid_flag},
+    transport::{Destination, Selected, Source, valid_flag},
 };
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -730,9 +730,6 @@ fn transfer_flags(flags: &[String], supported: &[String]) -> (Vec<String>, Vec<S
     }
     (kept.into_iter().collect(), omitted.into_iter().collect())
 }
-fn matches_record(r: &Record, m: &Message) -> Result<()> {
-    matches_digest(r, &m.digest())
-}
 /// The one comparison of journal evidence against a destination message: content hash,
 /// INTERNALDATE and supported persistent flags.
 fn matches_digest(r: &Record, m: &crate::transport::MessageDigest) -> Result<()> {
@@ -847,8 +844,8 @@ fn reconcile(r: &Record, d: &mut DestinationReader<'_>, validity: u32) -> Result
         return Ok(result);
     }
     for uid in candidates {
-        if let Some(m) = d.read(|d| d.message(uid))? {
-            if matches_record(r, &m).is_ok() {
+        if let Some(m) = d.digest(uid, "candidate_stream_chunk")? {
+            if matches_digest(r, &m).is_ok() {
                 result.candidate_uids.push(uid);
             }
         }
@@ -966,9 +963,9 @@ pub fn recover_not_sent(c: &Config, folder: &str, uid: u32) -> Result<Report> {
     }
     for candidate in post_baseline {
         let message = dest
-            .read(|d| d.message(candidate))?
+            .digest(candidate, "candidate_stream_chunk")?
             .context("destination changed during candidate inspection; retry review")?;
-        if matches_record(&record, &message).is_ok() {
+        if matches_digest(&record, &message).is_ok() {
             bail!("matching candidate exists; use manual attribution");
         }
     }
@@ -1057,9 +1054,9 @@ pub fn resolve(c: &Config, folder: &str, uid: u32, destination_uid: u32) -> Resu
         bail!("destination UID is outside the recorded append baseline");
     }
     let message = dest
-        .read(|d| d.message(destination_uid))?
+        .digest(destination_uid, "candidate_stream_chunk")?
         .context("destination UID does not exist")?;
-    matches_record(&record, &message).context("refusing attribution: candidate does not match")?;
+    matches_digest(&record, &message).context("refusing attribution: candidate does not match")?;
     job.journal
         .resolve_attribution(&record.key, validity, destination_uid)?;
     let r = job.journal.record(&record.key)?.unwrap();
