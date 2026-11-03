@@ -5,6 +5,7 @@ pub mod engine;
 pub mod folders;
 pub mod job;
 pub mod journal;
+pub mod spool;
 pub mod transport;
 
 static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
