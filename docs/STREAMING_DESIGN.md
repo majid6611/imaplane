@@ -354,3 +354,19 @@ profile:
   margin). Used by the dedicated CI job now so memory cannot silently get worse.
 - `streaming`: the section 6 targets (absolute RSS and slope). Expected to fail until
   the streaming path exists, and becomes the CI profile when streaming is enabled.
+
+### Phase 1 baseline (measured on the commit before any streaming change)
+
+Release binary, loopback TLS scripted server, one message per run, GNU time peak RSS of
+the IMAPLANE process only, exact destination bytes checked every run.
+
+| Message | Peak RSS | x message | Seconds |
+| ---: | ---: | ---: | ---: |
+| 1 MiB (baseline) | 16.4 MiB | | |
+| 16 MiB | 46.8 MiB | 2.92 | 1.4 |
+| 64 MiB | 142.5 MiB | 2.23 | 3.0 |
+| 256 MiB | 526.4 MiB | 2.06 | 5.7 |
+
+Slope between 64 and 256 MiB: 1.999 MiB of RSS per MiB of message. Run-to-run spread was
+about 0.2 MiB. The `streaming` profile fails on all sizes and on the slope today, as
+intended; the `current` profile passes and is the dedicated CI job's check.

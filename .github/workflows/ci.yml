@@ -37,3 +37,23 @@ jobs:
         run: python3 scripts/build-benchmark-binary.py
       - name: Instrumented baseline smoke test
         run: python3 tests/local/benchmark.py --binary target/release/imaplane --smoke --messages 10 --latency-ms 0 10 --repeats 1 --output target/benchmark-smoke.json
+  memory:
+    # Dedicated job: real peak-RSS measurement for large messages (see docs/STREAMING_DESIGN.md).
+    # The "current" profile is a regression ceiling for the in-memory path. When streaming
+    # is enabled by default, switch to --profile streaming. A roughly 1 GiB soak is manual.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install --yes libssl-dev pkg-config time
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - run: cargo +stable build --release --locked
+      - name: Peak RSS at 16, 64 and 256 MiB
+        run: python3 tests/local/memory.py target/release/imaplane --profile current --sizes 16 64 256 --json target/memory.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: memory-measurements
+          path: target/memory.json
