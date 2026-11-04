@@ -22,8 +22,11 @@ re-exports in `client.rs`.
   `UID FETCH <uid> (UID FLAGS INTERNALDATE BODY.PEEK[])` (PEEK is fixed, so it cannot set
   `\Seen`), copies the `BODY[]` literal through one 128 KiB buffer into `sink`, and returns
   a "skeleton" (the response with the body replaced by `{0}`, capped at 1 MiB) for the usual
-  parser. The announced length must equal `expected_len`, checked before any body byte is
-  read. Lines are bounded at 64 KiB. A bare-LF or overflowing literal marker, a second
+  parser. The announced length must equal `expected_len`: a literal of a different length is
+  consumed with its bytes discarded (never given to the sink) and reported as
+  `LiteralLengthMismatch` only once the whole response arrived, so a response cut off first is an
+  ordinary connection loss, as when read whole; a literal more than 1 MiB longer than expected is
+  refused without being read. Lines are bounded at 64 KiB. A bare-LF or overflowing literal marker, a second
   oversized literal, truncation, a sink error or a wrong tag all fail.
 - `Session::append_stream(mailbox)` -> `StreamAppendCmd::finish_streaming(len, reader,
   guard)`: same order as `finish_with_literal_guard` (command, `+` continuation, **guard**,

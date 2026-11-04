@@ -19,7 +19,7 @@ TOKEN = 'TEST-ONLY-ACCESS-TOKEN-0123456789'
 BODY_MARKER = b'SECRET-BODY-MARKER'
 ALLOWED_KEYS = {'event', 'seq', 't', 'version', 'pid', 'role', 'op', 'ms', 'outcome', 'code', 'unlisted_code', 'scope',
                 'transient', 'capabilities', 'other_capability_count', 'appendlimit', 'count', 'found', 'bytes',
-                'appenduid', 'writable', 'exists', 'has_uidnext', 'system_flags', 'custom_flag_count', 'streamed'}
+                'appenduid', 'writable', 'exists', 'has_uidnext', 'system_flags', 'custom_flag_count', 'streamed', 'spooled', 'phase'}
 ATOM = re.compile(r'^[A-Z0-9-]{1,32}$')
 FAILED = []
 

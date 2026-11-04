@@ -221,15 +221,22 @@ impl<T: Read + Write> Connection<T> {
         let mut line: Vec<u8> = Vec::new();
         let mut streamed: Option<u64> = None;
         let mut buf: Vec<u8> = Vec::new();
+        // The announced literal length differed from the expected one. The literal is still
+        // consumed (its bytes are discarded, never given to the sink), and the mismatch is
+        // reported only once the whole response arrived. A response that is cut off first is
+        // an ordinary connection loss, exactly as when the same response is read whole.
+        let mut length_mismatch = false;
         loop {
             line.clear();
             self.read_bounded_line(&mut line, MAX_LINE)?;
             if let Some((open, n)) = literal_marker(&line).map_err(Error::Stream)? {
                 if streamed.is_none() && ends_with_ignore_case(&line[..open], marker) {
-                    if n != expected {
-                        // Refuse before consuming any body byte.
+                    // A literal absurdly larger than expected is refused outright, without
+                    // reading it; a plausible mismatch is consumed and judged at the end.
+                    if n > expected.saturating_add(MAX_SKELETON as u64) {
                         return Err(Error::Stream(StreamError::LiteralLengthMismatch));
                     }
+                    length_mismatch = n != expected;
                     if skeleton.len() + open + 5 > MAX_SKELETON {
                         return Err(Error::Stream(StreamError::ResponseTooLarge));
                     }
@@ -238,7 +245,11 @@ impl<T: Read + Write> Connection<T> {
                     if buf.is_empty() {
                         buf.resize(STREAM_CHUNK, 0);
                     }
-                    self.copy_literal(n, sink, &mut buf)?;
+                    if length_mismatch {
+                        self.copy_literal(n, &mut |_| Ok(()), &mut buf)?;
+                    } else {
+                        self.copy_literal(n, sink, &mut buf)?;
+                    }
                     streamed = Some(n);
                 } else {
                     let room = (MAX_SKELETON - skeleton.len().min(MAX_SKELETON)) as u64;
@@ -277,6 +288,9 @@ impl<T: Read + Write> Connection<T> {
                             return Err(Error::TagMismatch(TagMismatch { expect, actual }));
                         }
                         completion(status, information, code)?;
+                        if length_mismatch {
+                            return Err(Error::Stream(StreamError::LiteralLengthMismatch));
+                        }
                         return Ok(StreamedFetch {
                             skeleton,
                             body_len: streamed,
@@ -300,9 +314,12 @@ impl<T: Read + Write> Session<T> {
     /// a plain `BODY[]` would set `\Seen`, so this method cannot modify the mailbox.
     ///
     /// `expected_len` is the message size the caller already established (for example from
-    /// `RFC822.SIZE`). The announced literal must equal it, or the call fails before any body
-    /// byte is read. `sink` receives the body in chunks of at most [`STREAM_CHUNK`] bytes; a
-    /// sink error aborts the call.
+    /// `RFC822.SIZE`). The announced literal must equal it. A literal of a different length is
+    /// consumed with its bytes discarded (the sink never sees them) and the call fails with
+    /// `StreamError::LiteralLengthMismatch` once the whole response arrived, so a response that
+    /// is cut off first is an ordinary connection loss, as when the response is read whole. A
+    /// literal more than 1 MiB longer than expected is refused without being read. `sink`
+    /// receives the body in chunks of at most [`STREAM_CHUNK`] bytes; a sink error aborts the call.
     ///
     /// On any error other than a tagged `No`/`Bad`, the connection is desynchronized and
     /// must be dropped (`is_desynced()` is true and further commands are refused).
@@ -694,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_length_mismatch_is_refused_before_any_body_byte_is_read() {
+    fn fetch_length_mismatch_is_reported_after_the_response_and_the_sink_never_sees_a_byte() {
         for (announced, expected) in [(11usize, 10u64), (10, 11), (0, 1)] {
             let wire = Wire::new(fetch_response(&vec![b'x'; announced], false), 6, 1 << 20);
             let (r, got, _, desynced) = stream_fetch(wire, expected);
@@ -705,6 +722,44 @@ mod tests {
             assert!(got.is_empty(), "no body byte may reach the sink");
             assert!(desynced);
         }
+    }
+
+    #[test]
+    fn fetch_length_mismatch_on_a_cut_off_response_is_an_ordinary_connection_loss() {
+        // The announced length is wrong AND the response ends early: the caller must see the
+        // transient condition (as when reading whole), not a permanent mismatch.
+        let full = fetch_response(&[b'x'; 40], false);
+        let header_end = full.windows(2).position(|w| w == b"}\r").unwrap();
+        for cut in [header_end + 4, header_end + 20, full.len() - 30] {
+            for eof_is_error in [false, true] {
+                let mut wire = Wire::new(full[..cut].to_vec(), 4, 7);
+                wire.eof_is_error = eof_is_error;
+                let (r, got, _, desynced) = stream_fetch(wire, 10); // expected 10, announced 40
+                assert!(
+                    matches!(&r, Err(Error::ConnectionLost | Error::Io(_))),
+                    "cut {cut}: {r:?}"
+                );
+                assert!(got.is_empty() && desynced, "cut {cut}");
+            }
+        }
+        // A tagged NO after a mismatching literal is the server's answer, as when read whole.
+        let mut resp = b"* 1 FETCH (UID 7 FLAGS () INTERNALDATE \"02-Jan-2020 03:04:05 +0000\" BODY[] {4}\r\nabcd)\r\n".to_vec();
+        resp.extend_from_slice(b"a1 NO [SERVERBUG] oops\r\n");
+        let (r, got, _, desynced) = stream_fetch(Wire::new(resp, 5, 9), 3);
+        assert!(matches!(r, Err(Error::No(_))) && got.is_empty() && !desynced);
+    }
+
+    #[test]
+    fn fetch_refuses_an_absurdly_long_literal_without_reading_it() {
+        let mut huge = b"* 1 FETCH (UID 7 FLAGS () BODY[] {".to_vec();
+        huge.extend_from_slice((10u64 + MAX_SKELETON as u64 + 1).to_string().as_bytes());
+        huge.extend_from_slice(b"}\r\nnever read");
+        let (r, got, _, desynced) = stream_fetch(Wire::new(huge, 1, 1 << 20), 10);
+        assert!(matches!(
+            r,
+            Err(Error::Stream(StreamError::LiteralLengthMismatch))
+        ));
+        assert!(got.is_empty() && desynced);
     }
 
     #[test]

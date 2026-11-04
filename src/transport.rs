@@ -2549,6 +2549,31 @@ mod tests {
         assert!(is_permanent_message(&err));
     }
 
+    #[test]
+    fn a_cut_off_response_with_a_wrong_announced_length_is_transient_on_both_paths() {
+        // A server that dies mid-FETCH after announcing a length that does not match RFC822.SIZE:
+        // read whole, the truncation is noticed first (a connection loss, retried); the streaming
+        // path must classify it the same way, not as a permanent size mismatch.
+        let cut = format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] {{999}}\r\npartial").into_bytes();
+        let mut script = b"* OK hello\r\na1 OK logged in\r\n".to_vec();
+        script.extend_from_slice(&cut);
+        let (mut buffered, _) = session_over(script.clone(), 64);
+        let buffered_error = buffered
+            .run("UID FETCH 7 (UID FLAGS INTERNALDATE BODY.PEEK[])")
+            .safe()
+            .expect_err("a cut-off response cannot succeed");
+        let (mut streaming, _) = session_over(script, 64);
+        let streaming_error = stream_digest(&mut streaming, 7, 10, "").err().unwrap();
+        assert!(is_transient(&buffered_error) && is_transient(&streaming_error));
+        assert!(!is_permanent_message(&buffered_error) && !is_permanent_message(&streaming_error));
+        // Once the whole response arrives, the mismatch is permanent on both paths.
+        let mut whole = cut.clone();
+        whole.extend(std::iter::repeat_n(b'x', 999 - b"partial".len()));
+        whole.extend_from_slice(b")\r\n");
+        assert_eq!(streaming_outcome(&whole, 7, 10, 64), Outcome::Permanent);
+        assert_eq!(buffered_outcome(&whole, 7, 10), Outcome::Permanent);
+    }
+
     fn append_script(response: &str) -> Vec<u8> {
         let mut script = b"* OK hello\r\na1 OK logged in\r\n".to_vec();
         script.extend_from_slice(response.as_bytes());
