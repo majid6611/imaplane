@@ -14,8 +14,10 @@ Usage: python3 tests/local/stream_perf.py BINARY [--large 64 256] [--small 300] 
 GNU time and strace are required. Loopback only; no Docker, real credentials or mail.
 """
 import argparse
+import hashlib
 import json
 import os
+import platform
 import re
 import statistics
 import subprocess
@@ -81,22 +83,38 @@ def median(runs, key):
     return statistics.median(r[key] for r in runs)
 
 
+def provenance(binary, workdir):
+    """Everything needed to reproduce and audit a result."""
+    def sh(*a):
+        return subprocess.run(a, capture_output=True, text=True).stdout.strip()
+    root = Path(__file__).resolve().parents[2]
+    cpu = next((l.split(':', 1)[1].strip() for l in open('/proc/cpuinfo') if l.startswith('model name')), 'unknown')
+    return {'git_commit': sh('git', '-C', str(root), 'rev-parse', 'HEAD'), 'git_dirty': bool(sh('git', '-C', str(root), 'status', '--porcelain')),
+            'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest(), 'kernel': platform.release(), 'machine': platform.machine(),
+            'cpu': cpu, 'cpus': os.cpu_count(), 'python': platform.python_version(), 'filesystem': sh('findmnt', '-no', 'FSTYPE', '-T', str(workdir)),
+            'mem_total_mib': int(next(l.split()[1] for l in open('/proc/meminfo') if l.startswith('MemTotal')) ) // 1024,
+            'date_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'argv': _argv,
+            'method': 'interleaved A/B rounds, median of repeats, loopback Python TLS fixture; relative cost only'}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('binary')
     ap.add_argument('--large', type=int, nargs='*', default=[64, 256], help='single-message sizes in MiB')
-    ap.add_argument('--small', type=int, default=300, help='number of 2 KiB messages')
+    ap.add_argument('--small', type=int, default=300, help='number of 2 KiB messages (0 to skip)')
+    ap.add_argument('--sweep', type=int, nargs='*', default=[], help='single-message sizes in MiB around the threshold: buffered vs spooled')
     ap.add_argument('--repeats', type=int, default=3)
     ap.add_argument('--json')
     args = ap.parse_args()
     binary = Path(args.binary).resolve()
     require_fresh(binary)
-    out = {'note': 'loopback Python server: relative cost only', 'large': {}, 'small': {}}
+    out = {'note': 'loopback Python server: relative cost only', 'large': {}, 'small': {}, 'sweep': {}}
     with tempfile.TemporaryDirectory(prefix='imaplane-perf-') as tmp:
         work = Path(tmp); os.chmod(work, 0o700)
         cert, key = work / 'tls.crt', work / 'tls.key'
         command('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost')
         password = work / 'password'; password.write_text(PASSWORD); password.chmod(0o600)
+        out['provenance'] = provenance(binary, work)
         header = f'{"mode":>9} {"wall s":>8} {"CPU s":>7} {"MiB/s":>8} {"peak RSS":>9} {"disk wr MiB":>12} {"disk rd MiB":>12} {"commands":>9}'
         for mib in args.large:
             body = b'Subject: big\r\n\r\n' + os.urandom(mib << 20)
@@ -112,13 +130,26 @@ def main():
                 out['large'][mib][name] = row
                 cpu = row['user_s'] + row['sys_s']
                 print(f'{name:>9} {row["wall_s"]:8.2f} {cpu:7.2f} {mib / row["wall_s"]:8.1f} {row["rss_mib"]:8.1f}M {row["fs_out_blocks"] * 512 / 2**20:12.1f} {row["fs_in_blocks"] * 512 / 2**20:12.1f} {row["commands"]:9.0f}')
+        if args.sweep:
+            print(f'\n== single-message size sweep, buffered vs spooled (median of {args.repeats})')
+            print(f'{"MiB":>6} {"buffered s":>11} {"spooled s":>10} {"buf CPU s":>10} {"spool CPU s":>12} {"buf RSS":>9} {"spool RSS":>10}  faster')
+            for mib in args.sweep:
+                body = b'Subject: sweep\r\n\r\n' + os.urandom(max(1, int(mib * (1 << 20))) - 16)
+                runs = {'buffered': [], 'spooled': []}
+                for _ in range(args.repeats):
+                    for name, threshold in (('buffered', None), ('spooled', 0)):
+                        runs[name].append(run_once(binary, work, cert, key, password, [body], threshold, f'sweep-{name}{mib}'))
+                row = {n: {k: median(runs[n], k) for k in ('wall_s', 'user_s', 'sys_s', 'rss_mib')} for n in runs}
+                out['sweep'][mib] = row
+                b, sp = row['buffered'], row['spooled']
+                print(f'{mib:6d} {b["wall_s"]:11.3f} {sp["wall_s"]:10.3f} {b["user_s"] + b["sys_s"]:10.3f} {sp["user_s"] + sp["sys_s"]:12.3f} {b["rss_mib"]:8.1f}M {sp["rss_mib"]:9.1f}M  {"spooled" if sp["wall_s"] < b["wall_s"] else "buffered"}')
         bodies = [b'Subject: m%d\r\n\r\n' % i + os.urandom(2048) for i in range(args.small)]
         print(f'\n== {args.small} messages of 2 KiB (median of {args.repeats})'); print(header + f' {"msgs/s":>8} {"fsyncs":>7}')
         runs = {name: [] for name, _ in MODES}
-        for _ in range(args.repeats):             # interleaved A/B/C rounds
+        for _ in range(args.repeats if args.small else 0):             # interleaved A/B/C rounds
             for name, threshold in MODES:
                 runs[name].append(run_once(binary, work, cert, key, password, bodies, threshold, f'small-{name}'))
-        for name, threshold in MODES:
+        for name, threshold in (MODES if args.small else []):
             sync_run = run_once(binary, work, cert, key, password, bodies[:100], threshold, f'sync-{name}', syncs=True)
             row = {k: median(runs[name], k) for k in ('wall_s', 'user_s', 'sys_s', 'rss_mib', 'fs_in_blocks', 'fs_out_blocks', 'commands', 'appends')}
             row['spread_wall_s'] = [round(r['wall_s'], 2) for r in runs[name]]

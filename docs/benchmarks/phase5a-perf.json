@@ -1,0 +1,247 @@
+{
+ "note": "loopback Python server: relative cost only",
+ "large": {
+  "16": {
+   "buffered": {
+    "wall_s": 0.9327801690014894,
+    "user_s": 0.25,
+    "sys_s": 0.07,
+    "rss_mib": 46.67578125,
+    "fs_in_blocks": 0,
+    "fs_out_blocks": 520,
+    "commands": 19,
+    "appends": 1
+   },
+   "spooled": {
+    "wall_s": 0.8346494590005022,
+    "user_s": 0.16,
+    "sys_s": 0.06,
+    "rss_mib": 14.765625,
+    "fs_in_blocks": 0,
+    "fs_out_blocks": 33296,
+    "commands": 19,
+    "appends": 1
+   }
+  },
+  "64": {
+   "buffered": {
+    "wall_s": 1.8374827950028703,
+    "user_s": 0.73,
+    "sys_s": 0.27,
+    "rss_mib": 142.72265625,
+    "fs_in_blocks": 0,
+    "fs_out_blocks": 520,
+    "commands": 19,
+    "appends": 1
+   },
+   "spooled": {
+    "wall_s": 1.3732539210031973,
+    "user_s": 0.36,
+    "sys_s": 0.19,
+    "rss_mib": 14.80859375,
+    "fs_in_blocks": 0,
+    "fs_out_blocks": 131600,
+    "commands": 19,
+    "appends": 1
+   }
+  },
+  "256": {
+   "buffered": {
+    "wall_s": 5.401250133996655,
+    "user_s": 2.65,
+    "sys_s": 1.03,
+    "rss_mib": 526.7265625,
+    "fs_in_blocks": 0,
+    "fs_out_blocks": 520,
+    "commands": 19,
+    "appends": 1
+   },
+   "spooled": {
+    "wall_s": 3.3410133099969244,
+    "user_s": 1.15,
+    "sys_s": 0.7,
+    "rss_mib": 14.67578125,
+    "fs_in_blocks": 0,
+    "fs_out_blocks": 524816,
+    "commands": 19,
+    "appends": 1
+   }
+  }
+ },
+ "small": {
+  "buffered": {
+   "wall_s": 26.00531589899765,
+   "user_s": 0.32,
+   "sys_s": 0.39,
+   "rss_mib": 14.59765625,
+   "fs_in_blocks": 0,
+   "fs_out_blocks": 41152,
+   "commands": 764,
+   "appends": 150,
+   "spread_wall_s": [
+    20.58,
+    20.57,
+    26.04,
+    26.02,
+    26.01
+   ],
+   "sync_calls_per_100_messages": 1617
+  },
+  "hybrid": {
+   "wall_s": 25.95169254999928,
+   "user_s": 0.32,
+   "sys_s": 0.37,
+   "rss_mib": 14.6171875,
+   "fs_in_blocks": 0,
+   "fs_out_blocks": 41152,
+   "commands": 764,
+   "appends": 150,
+   "spread_wall_s": [
+    20.58,
+    20.54,
+    25.99,
+    26.01,
+    25.95
+   ],
+   "sync_calls_per_100_messages": 1617
+  },
+  "spooled": {
+   "wall_s": 25.95065461899503,
+   "user_s": 0.31,
+   "sys_s": 0.4,
+   "rss_mib": 14.71875,
+   "fs_in_blocks": 0,
+   "fs_out_blocks": 42352,
+   "commands": 764,
+   "appends": 150,
+   "spread_wall_s": [
+    20.6,
+    22.74,
+    25.95,
+    26.02,
+    25.99
+   ],
+   "sync_calls_per_100_messages": 1617
+  }
+ },
+ "sweep": {
+  "1": {
+   "buffered": {
+    "wall_s": 0.6918628779967548,
+    "user_s": 0.1,
+    "sys_s": 0.01,
+    "rss_mib": 16.71875
+   },
+   "spooled": {
+    "wall_s": 0.6741250380000565,
+    "user_s": 0.1,
+    "sys_s": 0.01,
+    "rss_mib": 14.7265625
+   }
+  },
+  "2": {
+   "buffered": {
+    "wall_s": 0.6916772840049816,
+    "user_s": 0.1,
+    "sys_s": 0.01,
+    "rss_mib": 18.6953125
+   },
+   "spooled": {
+    "wall_s": 0.7140825829992536,
+    "user_s": 0.1,
+    "sys_s": 0.02,
+    "rss_mib": 14.76953125
+   }
+  },
+  "4": {
+   "buffered": {
+    "wall_s": 0.7160848330022418,
+    "user_s": 0.12,
+    "sys_s": 0.02,
+    "rss_mib": 22.68359375
+   },
+   "spooled": {
+    "wall_s": 0.6893213090006611,
+    "user_s": 0.1,
+    "sys_s": 0.02,
+    "rss_mib": 14.76953125
+   }
+  },
+  "8": {
+   "buffered": {
+    "wall_s": 0.7492098779985099,
+    "user_s": 0.16,
+    "sys_s": 0.04,
+    "rss_mib": 30.6953125
+   },
+   "spooled": {
+    "wall_s": 0.7275871480014757,
+    "user_s": 0.12,
+    "sys_s": 0.03,
+    "rss_mib": 14.75390625
+   }
+  },
+  "16": {
+   "buffered": {
+    "wall_s": 0.9014085129965679,
+    "user_s": 0.24,
+    "sys_s": 0.07,
+    "rss_mib": 46.69140625
+   },
+   "spooled": {
+    "wall_s": 0.8179750639974372,
+    "user_s": 0.15,
+    "sys_s": 0.05,
+    "rss_mib": 14.83984375
+   }
+  },
+  "32": {
+   "buffered": {
+    "wall_s": 1.2050899599998957,
+    "user_s": 0.4,
+    "sys_s": 0.12,
+    "rss_mib": 78.7578125
+   },
+   "spooled": {
+    "wall_s": 0.9882379600021522,
+    "user_s": 0.22,
+    "sys_s": 0.09,
+    "rss_mib": 14.69140625
+   }
+  }
+ },
+ "provenance": {
+  "git_commit": "2d3e3477f2db6f1c7e13348463f65d10e66175aa",
+  "git_dirty": true,
+  "binary_sha256": "f9862d726d5ed01ee01eafefb21cd56bb89b4fca44cf3a3fe5edfeaf8538ab40",
+  "kernel": "6.14.0-37-generic",
+  "machine": "x86_64",
+  "cpu": "AMD Ryzen 3 5300U with Radeon Graphics",
+  "cpus": 8,
+  "python": "3.12.3",
+  "filesystem": "ext4",
+  "mem_total_mib": 7258,
+  "date_utc": "2026-11-04T22:49:20Z",
+  "argv": [
+   "/tmp/claude-1000/-home-majid-Desktop-imaplane/7cf405e2-bd5d-4301-a605-fe5d60682523/scratchpad/cargo-target/release/imaplane",
+   "--large",
+   "16",
+   "64",
+   "256",
+   "--small",
+   "150",
+   "--sweep",
+   "1",
+   "2",
+   "4",
+   "8",
+   "16",
+   "32",
+   "--repeats",
+   "5",
+   "--json",
+   "docs/benchmarks/phase5a-perf.json"
+  ],
+  "method": "interleaved A/B rounds, median of repeats, loopback Python TLS fixture; relative cost only"
+ }
+}

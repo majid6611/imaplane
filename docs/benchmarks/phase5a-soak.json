@@ -1,0 +1,66 @@
+{
+ "target_rss_mib": 40.0,
+ "results": {
+  "256": {
+   "migrate": {
+    "wall_s": 4.08,
+    "rss_mib": 14.5,
+    "cpu_s": 3.52,
+    "disk_written_mib": 256.3
+   },
+   "verify": {
+    "wall_s": 0.85,
+    "rss_mib": 13.8,
+    "cpu_s": 0.63,
+    "disk_written_mib": 0.0
+   },
+   "resume": {
+    "wall_s": 1.01,
+    "rss_mib": 14.6,
+    "cpu_s": 0.55,
+    "disk_written_mib": 0.0
+   }
+  },
+  "512": {
+   "migrate": {
+    "wall_s": 4.3,
+    "rss_mib": 14.6,
+    "cpu_s": 3.78,
+    "disk_written_mib": 512.3
+   },
+   "verify": {
+    "wall_s": 1.0,
+    "rss_mib": 13.8,
+    "cpu_s": 0.78,
+    "disk_written_mib": 0.0
+   },
+   "resume": {
+    "wall_s": 1.3,
+    "rss_mib": 14.7,
+    "cpu_s": 0.83,
+    "disk_written_mib": 0.0
+   }
+  },
+  "1000": {
+   "migrate": {
+    "wall_s": 7.88,
+    "rss_mib": 14.8,
+    "cpu_s": 7.28,
+    "disk_written_mib": 1000.3
+   },
+   "verify": {
+    "wall_s": 1.74,
+    "rss_mib": 13.9,
+    "cpu_s": 1.52,
+    "disk_written_mib": 0.0
+   },
+   "resume": {
+    "wall_s": 2.09,
+    "rss_mib": 14.7,
+    "cpu_s": 1.62,
+    "disk_written_mib": 0.0
+   }
+  }
+ },
+ "failures": []
+}
