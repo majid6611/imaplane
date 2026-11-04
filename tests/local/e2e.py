@@ -218,6 +218,11 @@ class ProtocolServer:
         self.pause_source_fetch_at = None  # source body FETCH: send this many bytes, wait for resume_source_fetch, then the rest
         self.source_paused = threading.Event()
         self.resume_source_fetch = threading.Event()
+        # Pause hooks (tests): each sets <name>_paused when reached and waits for <name>_resume.
+        self.pause_dest_noop = False         # the destination's liveness NOOP (runs right after a long source read)
+        self.pause_continuation = False      # APPEND: before sending the + continuation
+        self.pause_append_reply = False      # APPEND: after storing the message, before the tagged reply
+        self.hooks = {n: (threading.Event(), threading.Event()) for n in ('dest_noop', 'continuation', 'append_reply')}
         self.idle_drop = None  # seconds; destination connection silently closes when idle this long
         self.drop_on_append = False  # destination closes without a reply when APPEND arrives
         self.throttle_code = b'THROTTLED'
@@ -268,7 +273,9 @@ class ProtocolServer:
                         if mode.endswith('bad-auth'):
                             client.sendall(tag+b' NO rejected credential: '+PASSWORD.encode()+b'\r\n')
                             continue
-                    elif verb == b'NOOP': pass
+                    elif verb == b'NOOP':
+                        if user == 'destination' and self.pause_dest_noop:
+                            self.hook('dest_noop')
                     elif verb == b'ENABLE':
                         if not mode.endswith('noack'):
                             enabled = True
@@ -350,6 +357,7 @@ class ProtocolServer:
                         match = re.search(rb'\{(\d+)\}$',line.strip()); assert match
                         n = int(match.group(1))
                         if self.drop_on_append: return
+                        if self.pause_continuation: self.hook('continuation')
                         if self.rejection_script:
                             rejection=self.rejection_script.pop(0)
                             if rejection == b'-':  # code-less NO
@@ -380,6 +388,7 @@ class ProtocolServer:
                             for _ in range(20):
                                 client.sendall(b'* OK progress\r\n'); time.sleep(.1)
                         self.messages[user].append(data[:-2])
+                        if self.pause_append_reply: self.hook('append_reply')
                         if self.drop_reply_after_commit: return
                         client.sendall(tag+b' OK [APPENDUID '+str(self.append_validity).encode()+b' '+str(self.append_uid_override if self.append_uid_override is not None else len(self.messages[user])).encode()+b'] appended\r\n')
                         continue
@@ -388,8 +397,14 @@ class ProtocolServer:
                     client.sendall(tag+b' OK complete\r\n')
         except (OSError,ssl.SSLError): pass
         except Exception as exc: self.errors.append(repr(exc))
+    def hook(self, name):
+        reached, resume = self.hooks[name]
+        reached.set()
+        assert resume.wait(120), f'test never resumed the {name} hook'
+        reached.clear(); resume.clear()
     def close(self):
         self.stopped = True; self.listener.close()
+        for reached, resume in self.hooks.values(): resume.set()
 
 
 def connect(port, cert, user):
