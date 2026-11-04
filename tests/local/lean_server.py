@@ -62,6 +62,10 @@ class LeanServer:
         self.errors = []
         self.append_bytes = 0
         self.throttle = throttle_mib_s
+        self.append_throttle = None          # MiB/s cap on reading an APPEND literal
+        self.fetch_started = threading.Event()    # a source body FETCH began
+        self.append_started = threading.Event()   # an APPEND literal began (continuation sent)
+        self.verify_started = threading.Event()   # a destination body FETCH began
         self.pause_source_at = None          # stream this many body bytes of a source FETCH, then wait
         self.source_paused = threading.Event()
         self.resume_source = threading.Event()
@@ -155,16 +159,20 @@ class LeanServer:
                                 else:
                                     assert request == b'(UID FLAGS INTERNALDATE BODY.PEEK[])', request
                                     client.sendall(b'* %d FETCH (UID %d FLAGS (\\Seen) INTERNALDATE "' % (uid, uid) + DATE + b'" BODY[] {%d}\r\n' % size)
+                                    (self.fetch_started if user == 'source' else self.verify_started).set()
                                     self.send_body(client, index, size, user)
                                     client.sendall(b')\r\n')
                     elif verb == b'APPEND':
                         assert user == 'destination'
                         n = int(re.search(rb'\{(\d+)\}$', line.strip()).group(1))
                         client.sendall(b'+ ready\r\n')
+                        self.append_started.set()
                         h, left = hashlib.sha256(), n
                         while left:
                             chunk = reader.read(min(left, 1 << 18)); assert chunk
                             h.update(chunk); left -= len(chunk); self.append_bytes += len(chunk)
+                            if self.append_throttle:
+                                time.sleep(len(chunk) / (self.append_throttle * (1 << 20)))
                         assert reader.read(2) == b'\r\n'
                         sha = h.hexdigest()
                         index = next((i for i, e in enumerate(self.expected) if e == sha and self.sizes[i] == n), None)

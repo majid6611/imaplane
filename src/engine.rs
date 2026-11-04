@@ -569,6 +569,12 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     ));
                     continue;
                 }
+                // A stop request arrived while the message was still being downloaded into the
+                // spool. Nothing durable exists yet, so the run simply stops here.
+                Err(e) if e.is::<crate::transport::StopRequested>() => {
+                    report.interrupted = true;
+                    break;
+                }
                 // The spool could not be created, filled or verified. This happens before any
                 // journal write or destination byte, so nothing is uncertain: the run stops and
                 // the operator fixes the spool directory (space, filesystem, permissions).

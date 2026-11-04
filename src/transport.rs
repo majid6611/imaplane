@@ -863,8 +863,14 @@ impl Connection {
                     .map_err(anyhow::Error::new)?;
             self.reset(expected.saturating_add(OVERHEAD));
             Ok((
-                spool_message_into(&mut self.session, uid, expected, target)?
-                    .map(Transfer::Spooled),
+                spool_message_into(
+                    &mut self.session,
+                    uid,
+                    expected,
+                    target,
+                    &crate::interrupted,
+                )?
+                .map(Transfer::Spooled),
                 true,
             ))
         } else {
@@ -979,6 +985,18 @@ fn stream_digest<T: Read + Write>(
     )
 }
 
+/// A stop request (SIGTERM, SIGINT, SIGHUP) arrived while a source message was being streamed into
+/// the spool. Nothing durable exists at that point (no journal row, nothing sent), so abandoning the
+/// download is safe; it is deliberately NOT done once a literal is authorized.
+#[derive(Debug)]
+pub struct StopRequested;
+impl std::fmt::Display for StopRequested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stop requested during the source download")
+    }
+}
+impl std::error::Error for StopRequested {}
+
 /// Where and how large source messages are spooled.
 #[derive(Clone, Debug)]
 pub struct SpoolConfig {
@@ -1016,14 +1034,21 @@ fn spool_message_into<T: Read + Write>(
     uid: u32,
     expected: usize,
     mut spool: crate::spool::Spool,
+    should_stop: &dyn Fn() -> bool,
 ) -> Result<Option<SpooledMessage>> {
     let mut sink_error: Option<crate::spool::SpoolError> = None;
+    let mut stopped = false;
     let streamed = stream_message(
         session,
         uid,
         expected,
         "source_stream_chunk",
         &mut |chunk| {
+            // Safe to abandon: nothing durable exists yet. Checked once per chunk.
+            if should_stop() {
+                stopped = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
             spool.write_chunk(chunk).inspect_err(|e| {
                 sink_error = Some(crate::spool::classify(e));
             })
@@ -1032,9 +1057,13 @@ fn spool_message_into<T: Read + Write>(
     let meta = match streamed {
         Ok(meta) => meta,
         Err(e) => {
-            return Err(match sink_error {
-                Some(spool_error) => anyhow::Error::new(spool_error),
-                None => e,
+            return Err(if stopped {
+                anyhow::Error::new(StopRequested)
+            } else {
+                match sink_error {
+                    Some(spool_error) => anyhow::Error::new(spool_error),
+                    None => e,
+                }
             });
         }
     };
@@ -2424,7 +2453,7 @@ mod tests {
                 for max_read in [3, 1000, 1 << 20] {
                     let (mut session, _) = session_over(fetch_script(&response), max_read);
                     let target = crate::spool::Spool::create(dir.path(), len as u64, true).unwrap();
-                    let mut got = spool_message_into(&mut session, 7, len, target)
+                    let mut got = spool_message_into(&mut session, 7, len, target, &|| false)
                         .unwrap()
                         .unwrap();
                     assert_eq!(
@@ -2458,14 +2487,14 @@ mod tests {
         let (mut session, _) = session_over(fetch_script(none.as_bytes()), 64);
         let target = crate::spool::Spool::create(dir.path(), 3, true).unwrap();
         assert!(
-            spool_message_into(&mut session, 7, 3, target)
+            spool_message_into(&mut session, 7, 3, target, &|| false)
                 .unwrap()
                 .is_none()
         );
         let quoted = format!("* 1 FETCH (UID 7 FLAGS () {D} BODY[] \"abc\")\r\n");
         let (mut session, _) = session_over(fetch_script(quoted.as_bytes()), 64);
         let target = crate::spool::Spool::create(dir.path(), 3, true).unwrap();
-        let mut got = spool_message_into(&mut session, 7, 3, target)
+        let mut got = spool_message_into(&mut session, 7, 3, target, &|| false)
             .unwrap()
             .unwrap();
         assert_eq!(read_all(&mut got), b"abc");
@@ -2487,7 +2516,7 @@ mod tests {
                 let (mut session, _) = session_over(script[..cut].to_vec(), max_read);
                 let target =
                     crate::spool::Spool::create(dir.path(), body.len() as u64, true).unwrap();
-                let err = spool_message_into(&mut session, 7, body.len(), target)
+                let err = spool_message_into(&mut session, 7, body.len(), target, &|| false)
                     .err()
                     .unwrap_or_else(|| panic!("cut {cut} must fail"));
                 assert!(
@@ -2499,7 +2528,7 @@ mod tests {
         let (mut session, _) = session_over(script, 4096);
         let target = crate::spool::Spool::create(dir.path(), body.len() as u64, true).unwrap();
         assert!(
-            spool_message_into(&mut session, 7, body.len(), target)
+            spool_message_into(&mut session, 7, body.len(), target, &|| false)
                 .unwrap()
                 .is_some()
         );
@@ -2512,7 +2541,7 @@ mod tests {
         let (mut session, _) = session_over(fetch_script(&fetch(&body, false)), 4096);
         let mut target = crate::spool::Spool::create(dir.path(), body.len() as u64, true).unwrap();
         target.fail_after = Some(100_000);
-        let err = spool_message_into(&mut session, 7, body.len(), target)
+        let err = spool_message_into(&mut session, 7, body.len(), target, &|| false)
             .err()
             .unwrap();
         assert!(matches!(
@@ -2538,12 +2567,55 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_request_abandons_the_source_download_with_nothing_kept() {
+        let dir = private_spool_dir();
+        let body = pseudo(4, 600_000);
+        let (mut session, _) = session_over(fetch_script(&fetch(&body, false)), 4096);
+        let target = crate::spool::Spool::create(dir.path(), body.len() as u64, true).unwrap();
+        // The request arrives after a few chunks have already been spooled.
+        let checks = std::cell::Cell::new(0);
+        let err = spool_message_into(&mut session, 7, body.len(), target, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 3
+        })
+        .err()
+        .expect("a stop request must abandon the download");
+        assert!(err.is::<StopRequested>(), "{err:#}");
+        assert!(
+            !is_transient(&err) && !is_permanent_message(&err),
+            "neither a retry nor a message verdict"
+        );
+        assert!(err.downcast_ref::<crate::spool::SpoolError>().is_none());
+        assert!(
+            session.is_desynced(),
+            "the unread rest of the response poisons the connection"
+        );
+        assert!(
+            checks.get() <= 4,
+            "it must stop at the next chunk, not read on"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "the spool is anonymous and gone with it"
+        );
+        // Without a request the same download completes.
+        let (mut session, _) = session_over(fetch_script(&fetch(&body, false)), 4096);
+        let target = crate::spool::Spool::create(dir.path(), body.len() as u64, true).unwrap();
+        assert!(
+            spool_message_into(&mut session, 7, body.len(), target, &|| false)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn a_wrong_announced_length_is_refused_before_anything_is_spooled() {
         let dir = private_spool_dir();
         let body = vec![b'x'; 100];
         let (mut session, _) = session_over(fetch_script(&fetch(&body, false)), 64);
         let target = crate::spool::Spool::create(dir.path(), 99, true).unwrap();
-        let err = spool_message_into(&mut session, 7, 99, target)
+        let err = spool_message_into(&mut session, 7, 99, target, &|| false)
             .err()
             .unwrap();
         assert!(is_permanent_message(&err));
