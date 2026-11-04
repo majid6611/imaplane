@@ -402,3 +402,52 @@ response also carries a body and the requested UID has one too), the streaming p
 closed where the buffered path would ignore the foreign body. Without a body for the
 requested UID both report "absent".
 
+### Phase 4 results: hybrid disk-spooled transfer
+
+Streaming remains **off by default**; it is enabled by `stream_threshold_bytes` and will not become
+the default before phase 5 validation.
+
+Measured peak RSS of the IMAPLANE process for a complete fresh transfer (GNU time, exact
+destination bytes checked, loopback TLS scripted server):
+
+| Message | Buffered (default) | Spool on (`stream_threshold_bytes = 0`) |
+| ---: | ---: | ---: |
+| 16 MiB | 46.5 MiB | 14.5 MiB |
+| 64 MiB | 142.6 MiB | 14.6 MiB |
+| 256 MiB | 526.6 MiB | **14.8 MiB** |
+
+Slope of RSS against message size: 2.0 MiB per MiB buffered, 0.001 with the spool. The dedicated
+CI memory job enforces the streaming targets for both a full transfer and destination verification.
+
+Order of a spooled transfer (the journal and authorization sequence is unchanged): size query and cap
+check; spool directory, filesystem and free-space checks; stream the `BODY.PEEK[]` literal into the
+spool while hashing and counting; seal (full re-read against the hash); destination liveness and
+writable selection; the single FULL prepare commit with the streamed fingerprint; the `+`
+continuation; the durable literal authorization inside the guard; the literal streamed from the spool
+and re-hashed on the way out (the final chunk is withheld if any byte changed); acknowledge; digest
+read-back. Everything before the prepare commit can fail without leaving any state, and a
+truncated or failed read can never reach the journal or the destination.
+
+Decisions and deviations from the original design:
+
+* **No named-file fallback.** The design allowed an opt-in fallback when `O_TMPFILE` is unavailable. It
+  was rejected: a crash between creating and unlinking a named file leaves plaintext on disk until the
+  next run, which is not an equivalent cleanup guarantee, and the owner's rule was to implement a
+  fallback only if it was equivalent. An unsupported filesystem fails closed and `spool_dir` is the
+  remedy.
+* **New `spool_allow_memory_backed` (default false).** Not in the original design: a tmpfs or ramfs
+  spool directory would silently put the spool back in RAM, so it is refused unless explicitly allowed.
+* **One threshold governs both directions.** `stream_threshold_bytes` selects the spooled source path
+  and the digest read-back; there is no separate source knob.
+* **Length-mismatch verdict deferred.** Running the existing suites in forced-spool mode showed that a
+  literal whose announced length differs from RFC822.SIZE was permanent when streamed but transient
+  when the response was cut off and read whole. The streamer now discards a mismatching literal and
+  reports the mismatch only once the whole response arrived, so both paths agree (phase 4.3b).
+* **APPEND phase is information only.** The streamed APPEND's phase appears in an uncertain entry's
+  text for the operator; no recovery rule changed and nothing is reset automatically.
+
+Limitations: the spool is plaintext on disk (`O_TMPFILE` does not encrypt); a graceful stop waits for
+the message in progress, which can take a long time for a very large message on a slow link; the
+source is read once and then sent, so a large message costs download time plus upload time; real
+Gmail and Exchange behaviour with streamed literals is unconfirmed.
+

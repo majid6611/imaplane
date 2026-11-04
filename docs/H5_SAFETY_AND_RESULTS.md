@@ -93,6 +93,8 @@ python3 tests/local/diagnostics.py target/release/imaplane
 python3 tests/local/memory.py target/release/imaplane --profile current --sizes 16 64 256   # dedicated CI job
 python3 tests/local/memory.py target/release/imaplane --profile streaming --scenario verify --threshold-bytes 0 --sizes 16 64 256   # dedicated CI job
 python3 tests/local/stream_verify.py target/fault-tests/debug/imaplane
+python3 tests/local/stream_transfer.py target/fault-tests/debug/imaplane
+IMAPLANE_TEST_IMAGE=<image that can run the binary> python3 tests/local/stream_enospc.py target/release/imaplane   # Docker; skips if unavailable
 # Every suite refuses a binary older than the Rust sources or Cargo manifests (tests/local/freshness.py);
 # rebuild first, or set IMAPLANE_ALLOW_STALE_BINARY=1 to bypass deliberately.
 # Forced-streaming mode: every generated config sets stream_threshold_bytes = 0. Run these

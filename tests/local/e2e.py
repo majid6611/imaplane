@@ -215,6 +215,9 @@ class ProtocolServer:
         self.truncate_source_fetch_at = None  # source body FETCH: send this many bytes, then close
         self.stall_source_fetch_at = None  # source body FETCH: send this many bytes, then go silent
         self.stall_append_after = None  # APPEND: read this many literal bytes, then stop reading and go silent
+        self.pause_source_fetch_at = None  # source body FETCH: send this many bytes, wait for resume_source_fetch, then the rest
+        self.source_paused = threading.Event()
+        self.resume_source_fetch = threading.Event()
         self.idle_drop = None  # seconds; destination connection silently closes when idle this long
         self.drop_on_append = False  # destination closes without a reply when APPEND arrives
         self.throttle_code = b'THROTTLED'
@@ -334,7 +337,11 @@ class ProtocolServer:
                                         client.sendall(payload[:self.truncate_source_fetch_at]); return
                                     if user == 'destination' and self.truncate_dest_fetch_at is not None and len(payload) > self.truncate_dest_fetch_at:
                                         client.sendall(payload[:self.truncate_dest_fetch_at]); return
-                                    if self.slow:
+                                    if user == 'source' and self.pause_source_fetch_at is not None and len(payload) > self.pause_source_fetch_at:
+                                        client.sendall(payload[:self.pause_source_fetch_at]); self.source_paused.set()
+                                        assert self.resume_source_fetch.wait(120), 'test never resumed the source'
+                                        client.sendall(payload[self.pause_source_fetch_at:])
+                                    elif self.slow:
                                         for offset in range(0, len(payload), 4096):
                                             client.sendall(payload[offset:offset+4096]); time.sleep(.08)
                                     else: client.sendall(payload)
