@@ -257,15 +257,32 @@ and cannot alter a run.
   proportional to the number of messages. `max_message_bytes` is configurable up to 1 GiB. LIST and
   UID-inventory responses are capped at 16 MiB; other metadata at 1 MiB. Very
   large inventories or messages fail clearly rather than bypass limits.
-- **Optional streaming destination reads (`stream_threshold_bytes`, off by default).**
-  When set, destination messages larger than that many bytes (`0` = all) are read back by
-  streaming the body through SHA-256 instead of holding it in memory, for verification,
-  `verify`, resume, candidate scans, `recover` and `resolve`. The comparison is identical
-  (content hash, INTERNALDATE, supported flags) and a truncated or failed read can never
-  confirm a message. Measured peak RSS of `imaplane verify` for a 256 MiB message fell
-  from 526 MiB to 14 MiB. The **source** read and the APPEND still hold a whole message
-  (about twice its size at peak); streaming those with a disk spool is planned work
-  ([design](docs/STREAMING_DESIGN.md)). The key is not part of the job binding.
+- **Optional bounded-memory transfer of large messages (`stream_threshold_bytes`, off by default).**
+  When set, messages larger than that many bytes (`0` = every non-empty message) are never held
+  whole in memory. A **source** message is streamed into a temporary **spool** while it is
+  hashed and counted, then fully verified; only then does the normal sequence begin (journal
+  preparation, durable literal authorization, APPEND) and the literal is streamed from the
+  spool. **Destination** reads (read-back verification, `verify`, resume, candidate scans,
+  `recover`, `resolve`) stream through SHA-256 and keep nothing. Messages up to the threshold
+  take the unchanged buffered path. The comparison is identical (content hash, INTERNALDATE,
+  supported flags), a truncated or failed read can never confirm a message, and an unsettled
+  APPEND stays uncertain and manual exactly as before. Measured peak RSS for a 256 MiB message:
+  a full transfer fell from 527 MiB to 15 MiB, and `imaplane verify` from 526 MiB to 14 MiB
+  ([design and measurements](docs/STREAMING_DESIGN.md)).
+  - **The spool is plaintext.** It is an anonymous `O_TMPFILE` (no directory entry, mode 0600,
+    never linkable, reclaimed by the kernel when closed or if the process is killed), but
+    `O_TMPFILE` does **not encrypt**: spooled mail is plaintext on the underlying storage until
+    it is reclaimed. Use disk or volume encryption where that matters, and a private directory.
+  - `spool_dir` (default `state_dir`) must be a real directory you own with mode 0700 on a local
+    filesystem that supports `O_TMPFILE`. There is deliberately **no named-file fallback**: it
+    could not give the same cleanup guarantee after a crash, so an unsupported filesystem fails
+    closed with a clear message and you choose another `spool_dir`.
+  - Free space (the message plus 1 MiB) is checked before any download. A full disk, quota or
+    file-size limit is a clean failure: it happens before any journal write or destination
+    byte, nothing becomes uncertain, and the run stops for you to fix the space.
+  - A tmpfs or ramfs `spool_dir` is refused unless you set `spool_allow_memory_backed = true`,
+    because it would put the "disk" spool back in RAM.
+  - Neither key is part of the job binding, so they can be changed between runs.
 - No built-in OAuth browser/device authorization or token-refresh grant client,
   Gmail label deduplication, provider-specific transformations,
   batch accounts, subscriptions, quota preflight, ongoing synchronization or

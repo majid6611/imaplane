@@ -7,6 +7,14 @@ read_attempts = 6
 # Stop this run after repeated identical APPEND rejection status/code pairs.
 append_rejection_limit = 3
 
+# Optional, off by default: never hold a large message whole in memory. Messages larger than
+# this many bytes (0 = every non-empty message) are streamed through a temporary spool on disk
+# and verified before anything is sent. The spool is anonymous (O_TMPFILE, mode 0600) but NOT
+# encrypted: spooled mail is plaintext on that storage until the kernel reclaims it.
+# stream_threshold_bytes = 8388608
+# spool_dir = "./spool"                  # private (0700) local directory; default: state_dir
+# spool_allow_memory_backed = false      # true accepts a tmpfs/ramfs spool, which uses RAM
+
 [source]
 host = "imap.old.example"
 port = 993

@@ -40,8 +40,8 @@ jobs:
   memory:
     # Dedicated job: real peak-RSS measurement for large messages (see docs/STREAMING_DESIGN.md).
     # The "current" profile is a regression ceiling for the in-memory path; the streaming
-    # profile enforces the design targets for destination verification (phase 3). The fresh
-    # transfer moves to the streaming profile once source streaming lands (phase 4).
+    # profile enforces the design targets for destination verification (phase 3) and for a
+    # full transfer through the disk spool (phase 4). The streaming path is opt-in until phase 5.
     # A roughly 1 GiB soak is manual.
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -52,10 +52,12 @@ jobs:
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
       - run: cargo +stable build --release --locked
-      - name: Peak RSS at 16, 64 and 256 MiB (fresh transfer; source read still buffered)
+      - name: Peak RSS of a full transfer, default buffered path (rollback ceiling)
         run: python3 tests/local/memory.py target/release/imaplane --profile current --sizes 16 64 256 --json target/memory.json
       - name: Peak RSS of destination verification, buffered path (rollback ceiling)
         run: python3 tests/local/memory.py target/release/imaplane --profile current --scenario verify --sizes 16 64 256 --json target/memory-verify-buffered.json
+      - name: Peak RSS of a full transfer with the disk spool on (streaming targets enforced)
+        run: python3 tests/local/memory.py target/release/imaplane --profile streaming --threshold-bytes 0 --sizes 16 64 256 --json target/memory-migrate-streaming.json
       - name: Peak RSS of destination verification, streaming path (targets enforced)
         run: python3 tests/local/memory.py target/release/imaplane --profile streaming --scenario verify --threshold-bytes 0 --sizes 16 64 256 --json target/memory-verify-streaming.json
       - uses: actions/upload-artifact@v4
@@ -66,3 +68,4 @@ jobs:
             target/memory.json
             target/memory-verify-buffered.json
             target/memory-verify-streaming.json
+            target/memory-migrate-streaming.json
