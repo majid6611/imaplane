@@ -451,3 +451,29 @@ the message in progress, which can take a long time for a very large message on 
 source is read once and then sent, so a large message costs download time plus upload time; real
 Gmail and Exchange behaviour with streamed literals is unconfirmed.
 
+### Phase 4 performance (relative cost, loopback scripted server)
+
+`tests/local/stream_perf.py`, modes interleaved (A/B/A/B...) so machine drift affects each equally,
+median of 3, GNU time and strace. The server is a Python TLS fixture on this machine, so these numbers
+show **relative** cost between the paths, not real-network throughput.
+
+| Work | Buffered | Spooled | Note |
+| --- | ---: | ---: | --- |
+| one 64 MiB message, wall | 2.05 s | 1.53 s | |
+| one 64 MiB message, CPU | 1.12 s | 0.62 s | |
+| one 256 MiB message, wall | 5.70 s | 3.60 s | |
+| one 256 MiB message, CPU | 3.93 s | 2.04 s | |
+| 256 MiB peak RSS | 526.6 MiB | 14.7 MiB | |
+| disk written (256 MiB) | 0.3 MiB | 256.3 MiB | the spool writes the message once |
+| 150 x 2 KiB messages, wall | 26.41 s | 26.49 s | hybrid 26.51 s; run-to-run band 0.2 s |
+| 150 x 2 KiB, commands | 764 | 764 | identical |
+| fsync calls per 100 small messages | 1617 | 1617 | identical; the spool does not fsync |
+
+The spooled path is faster and uses about half the CPU for large messages here, plausibly because it
+avoids growing, copying and page-faulting a vector of the whole message; that cause is an inference
+that was not profiled. Small messages cost the same whether buffered, hybrid or always spooled: wall
+time is dominated by the journal's FULL-durability fsyncs (about 16 per message), which streaming does
+not change. A single extra `NOOP` appeared in one buffered 256 MiB run: it is the existing idle-destination
+probe, which fires when a slow source read leaves the destination idle for 2 seconds; the command
+verbs are otherwise identical between the two paths.
+
