@@ -33,6 +33,11 @@ jobs:
         run: python3 tests/local/crash_matrix.py
       - name: Later-message, multi-folder, reconnect and upgrade crash matrix
         run: python3 tests/local/h5_crash_matrix.py
+      - name: Schema 5 upgrade crash test and end-to-end compatibility
+        run: |
+          cargo +stable test --locked --features fault-injection --target-dir target/fault-tests --test schema5
+          cargo +stable build --locked --features fault-injection --target-dir target/fault-tests --example upgrade_v5
+          python3 tests/local/schema5_e2e.py target/fault-tests/debug/imaplane target/fault-tests/debug/examples/upgrade_v5
       - name: Commit-bound release benchmark snapshot
         run: python3 scripts/build-benchmark-binary.py
       - name: Instrumented baseline smoke test

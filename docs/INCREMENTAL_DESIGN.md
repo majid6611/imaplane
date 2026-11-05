@@ -239,3 +239,14 @@ Every phase: small commits, new tests first and shown to fail without the change
 - **D1.** Should ordinary `verify` and `migrate` also treat flag-only differences on already-confirmed records as drift? Recommended yes, in Phase I2, with a CHANGELOG entry, so one record is never judged two ways. Default if you do not decide: ordinary commands unchanged.
 - **D2.** Approve `blocked_by_uncertain` for incremental runs (recommended).
 - **D3.** Approve the full UID listing per folder per run (about 1.5 MB per 100,000 messages) instead of a ranged fast path for v0.1 (recommended).
+
+## 11. Phase I0 status (implemented, awaiting approval to start I1)
+
+Implemented: `Journal::upgrade_to_v5` (explicit, one transaction, backup first, seeds `job_folders` from
+the binding, refuses unsound bindings and foreign evidence before touching anything), the four schema-5
+tables with append-only/immutable triggers, `work_list()` (snapshot plus scans, used by `migrate` and
+`verify`), schema 5 accepted by every ordinary open, and the schema-5 mapping check in `check_binding`.
+Ordinary opens never upgrade to schema 5, and nothing in the CLI calls the upgrade yet (I1 will, on the
+first `--incremental` run); `tests/support/upgrade_v5.rs` is a test-only helper. Obligation carried into
+I1/I3: `Journal::snapshot` must not create a generation-0 snapshot for a folder that exists only as scans.
+`docs/benchmarks/phase-i0-stress-raw.txt` is the unedited stress output of the final I0 regression.

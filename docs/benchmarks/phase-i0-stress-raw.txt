@@ -1,0 +1,5 @@
+seed 5001  trials per mode 15
+ buffered: 15 trials, 51 runs (13 hook kills, 14 timed kills, 11 unkilled), 45 invariant checks, 3 audited recovers, 3 resolves, 90/90 messages confirmed, 0 left manual, 0 violations
+   hybrid: 15 trials, 118 runs (28 hook kills, 17 timed kills, 13 unkilled), 92 invariant checks, 5 audited recovers, 4 resolves, 84/90 messages confirmed, 6 left manual, 0 violations
+  spooled: 15 trials, 74 runs (24 hook kills, 12 timed kills, 14 unkilled), 65 invariant checks, 6 audited recovers, 2 resolves, 88/90 messages confirmed, 2 left manual, 0 violations
+PASS: no invariant violation

@@ -34,6 +34,10 @@ tempfile = "3"
 
 [dev-dependencies]
 
+[[example]]
+name = "upgrade_v5"
+path = "tests/support/upgrade_v5.rs"
+
 [patch.crates-io]
 imap-proto = { path = "vendor/imap-proto" }
 imap = { path = "vendor/imap" }

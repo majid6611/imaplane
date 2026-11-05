@@ -470,7 +470,7 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
         allow_memory_backed: c.spool_allow_memory_backed,
     };
     let mut known = dest.read(|d| d.folders())?;
-    for (folder, validity, uids) in job.journal.snapshots()? {
+    for (folder, validity, uids) in job.journal.work_list()? {
         let mapping = c
             .folders
             .iter()
@@ -949,7 +949,7 @@ pub fn verify(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
     let mut report = Report::new(
         "live destination content, INTERNALDATE and supported flags against the durable source UID snapshot; source not contacted",
     );
-    let snapshots = job.journal.snapshots()?;
+    let snapshots = job.journal.work_list()?;
     if snapshots.len() != c.folders.len() {
         bail!("job snapshot is incomplete; resume migrate first");
     }

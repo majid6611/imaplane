@@ -5,8 +5,57 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+/// Schema every ordinary open upgrades to. Schema 5 (incremental migration) is never entered
+/// implicitly: only `Journal::upgrade_to_v5` creates it, so jobs that never use incremental
+/// migration keep a schema-4 file.
 const SCHEMA_VERSION: i64 = 4;
-const SUPPORTED_SCHEMAS: [i64; 4] = [1, 2, 3, SCHEMA_VERSION];
+const SCHEMA_V5: i64 = 5;
+const SUPPORTED_SCHEMAS: [i64; 5] = [1, 2, 3, SCHEMA_VERSION, SCHEMA_V5];
+
+const V5_SCHEMA: &str = "
+CREATE TABLE scans (
+    folder TEXT NOT NULL,
+    validity INTEGER NOT NULL CHECK(validity BETWEEN 1 AND 4294967295),
+    generation INTEGER NOT NULL CHECK(generation >= 1),
+    observed_uidnext INTEGER NOT NULL CHECK(observed_uidnext >= 1),
+    uids TEXT NOT NULL,
+    scanned_at TEXT NOT NULL,
+    PRIMARY KEY(folder, validity, generation)
+);
+CREATE TABLE job_folders (
+    source TEXT PRIMARY KEY,
+    destination TEXT NOT NULL UNIQUE,
+    origin TEXT NOT NULL CHECK(origin IN ('binding','added')),
+    added_at TEXT NOT NULL
+);
+CREATE TABLE verification_events (
+    folder TEXT NOT NULL,
+    validity INTEGER NOT NULL,
+    uid INTEGER NOT NULL,
+    level TEXT NOT NULL CHECK(level IN ('full')),
+    result TEXT NOT NULL,
+    size INTEGER,
+    observed_at TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+CREATE TABLE verification_runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    level TEXT NOT NULL CHECK(level IN ('existence','metadata','full')),
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    checked INTEGER NOT NULL,
+    drift INTEGER NOT NULL,
+    problems INTEGER NOT NULL
+);
+CREATE TRIGGER scans_no_update BEFORE UPDATE ON scans BEGIN SELECT RAISE(ABORT, 'scans are append-only'); END;
+CREATE TRIGGER scans_no_delete BEFORE DELETE ON scans BEGIN SELECT RAISE(ABORT, 'scans are append-only'); END;
+CREATE TRIGGER job_folders_no_update BEFORE UPDATE ON job_folders BEGIN SELECT RAISE(ABORT, 'folder mappings are immutable'); END;
+CREATE TRIGGER job_folders_no_delete BEFORE DELETE ON job_folders BEGIN SELECT RAISE(ABORT, 'folder mappings are immutable'); END;
+CREATE TRIGGER verification_events_no_update BEFORE UPDATE ON verification_events BEGIN SELECT RAISE(ABORT, 'verification events are append-only'); END;
+CREATE TRIGGER verification_events_no_delete BEFORE DELETE ON verification_events BEGIN SELECT RAISE(ABORT, 'verification events are append-only'); END;
+CREATE TRIGGER verification_runs_no_update BEFORE UPDATE ON verification_runs BEGIN SELECT RAISE(ABORT, 'verification runs are append-only'); END;
+CREATE TRIGGER verification_runs_no_delete BEFORE DELETE ON verification_runs BEGIN SELECT RAISE(ABORT, 'verification runs are append-only'); END;
+";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageKey {
@@ -135,8 +184,8 @@ impl Journal {
             tx.pragma_update(None, "user_version", 2)?;
             crate::fault::point("v1_upgrade_before_commit");
             tx.commit()?;
-        } else if !(2..=SCHEMA_VERSION).contains(&version) {
-            bail!("unsupported journal schema {version}; expected {SCHEMA_VERSION}");
+        } else if !(2..=SCHEMA_V5).contains(&version) {
+            bail!("unsupported journal schema {version}; expected {SCHEMA_VERSION} or {SCHEMA_V5}");
         }
         conn.pragma_update(None, "synchronous", "FULL")?;
         if version < 3 {
@@ -194,12 +243,197 @@ impl Journal {
         Ok(())
     }
 
+    /// Explicit, additive, crash-safe upgrade from schema 4 to schema 5 (incremental migration).
+    /// Returns false when the journal is already at schema 5.
+    ///
+    /// Safety properties: a consistent backup is written first (never overwriting an earlier one);
+    /// everything happens in ONE transaction, so a crash leaves schema 4 untouched; only new tables
+    /// and triggers are created, no existing row or table changes; `job_folders` is seeded from the
+    /// stored binding, and the upgrade is refused (nothing changed) if the journal's evidence names
+    /// a folder the binding does not.
+    pub fn upgrade_to_v5(&mut self, path: &Path) -> Result<bool> {
+        let version: i64 = self
+            .0
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version == SCHEMA_V5 {
+            return Ok(false);
+        }
+        if version != SCHEMA_VERSION {
+            bail!(
+                "only a schema {SCHEMA_VERSION} journal can be upgraded to schema {SCHEMA_V5} (found {version})"
+            );
+        }
+        let folders = self.binding_folders()?;
+        self.check_folders_declared(&folders)?;
+        crate::fault::point("before_v5_backup");
+        backup_before_upgrade(&self.0, path, version)?;
+        crate::fault::point("after_v5_backup");
+        crate::fault::point("before_v5_upgrade");
+        let now = chrono::Utc::now().to_rfc3339();
+        let tx = self.0.transaction()?;
+        tx.execute_batch(V5_SCHEMA)?;
+        for (source, destination) in &folders {
+            tx.execute(
+                "INSERT INTO job_folders (source,destination,origin,added_at) VALUES (?1,?2,'binding',?3)",
+                params![source, destination, now],
+            )?;
+        }
+        tx.pragma_update(None, "user_version", SCHEMA_V5)?;
+        crate::fault::point("v5_upgrade_before_commit");
+        tx.commit()?;
+        crate::fault::point("after_v5_upgrade");
+        Ok(true)
+    }
+
+    /// The folder mappings recorded in the (never rewritten) job binding.
+    fn binding_folders(&self) -> Result<Vec<(String, String)>> {
+        let binding: String = self
+            .0
+            .query_row("SELECT binding FROM job WHERE id=1", [], |r| r.get(0))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&binding).context("job binding is not valid JSON")?;
+        let list = value
+            .get("folders")
+            .and_then(|f| f.as_array())
+            .context("job binding has no folder list")?;
+        let mut seen_source = std::collections::BTreeSet::new();
+        let mut seen_destination = std::collections::BTreeSet::new();
+        let mut result = Vec::new();
+        for item in list {
+            let field = |name: &str| {
+                item.get(name)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .with_context(|| format!("job binding folder lacks {name}"))
+            };
+            let (source, destination) = (field("source")?, field("destination")?);
+            if !seen_source.insert(source.clone()) || !seen_destination.insert(destination.clone())
+            {
+                bail!("job binding folder mappings are not one-to-one");
+            }
+            result.push((source, destination));
+        }
+        if result.is_empty() {
+            bail!("job binding has no folders");
+        }
+        Ok(result)
+    }
+
+    /// Every folder that has journal evidence must be one the binding declares.
+    fn check_folders_declared(&self, declared: &[(String, String)]) -> Result<()> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT folder FROM transfers UNION SELECT folder FROM snapshots")?;
+        for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            let folder = row?;
+            if !declared.iter().any(|(source, _)| *source == folder) {
+                bail!(
+                    "journal has evidence for a folder the job binding does not declare; refusing to upgrade"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn has_table(&self, name: &str) -> Result<bool> {
+        Ok(self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [name],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Folder mappings recorded by a schema-5 journal (empty before schema 5).
+    pub fn job_folders(&self) -> Result<Vec<(String, String, String)>> {
+        if !self.has_table("job_folders")? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .0
+            .prepare("SELECT source,destination,origin FROM job_folders ORDER BY rowid")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self
+            .0
+            .pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
+    /// The durable plan: for each folder the immutable generation-0 snapshot followed by every
+    /// later discovery scan, in recorded order. On a schema-4 journal this is exactly `snapshots()`.
+    /// Inconsistent evidence (a scan with another UIDVALIDITY, or a UID listed twice) is an error,
+    /// never silently merged.
+    pub fn work_list(&self) -> Result<Vec<(String, u32, Vec<u32>)>> {
+        let mut plan: std::collections::BTreeMap<String, (u32, Vec<u32>)> = self
+            .snapshots()?
+            .into_iter()
+            .map(|(folder, validity, uids)| (folder, (validity, uids)))
+            .collect();
+        if self.has_table("scans")? {
+            let mut stmt = self.0.prepare(
+                "SELECT folder,validity,uids FROM scans ORDER BY folder,validity,generation",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, u32>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (folder, validity, json) = row?;
+                let uids: Vec<u32> = serde_json::from_str(&json)?;
+                let entry = plan.entry(folder.clone()).or_insert((validity, Vec::new()));
+                if entry.0 != validity {
+                    bail!("scan UIDVALIDITY differs from the recorded plan for {folder:?}");
+                }
+                entry.1.extend(uids);
+            }
+        }
+        let mut result = Vec::new();
+        for (folder, (validity, uids)) in plan {
+            let distinct: std::collections::BTreeSet<_> = uids.iter().collect();
+            if distinct.len() != uids.len() {
+                bail!("a UID appears twice in the durable plan for {folder:?}");
+            }
+            result.push((folder, validity, uids));
+        }
+        Ok(result)
+    }
+
     pub fn check_binding(&self, expected: &str) -> Result<()> {
         let actual: String = self
             .0
             .query_row("SELECT binding FROM job WHERE id=1", [], |r| r.get(0))?;
         if actual != expected {
             bail!("journal belongs to a different migration");
+        }
+        // Schema 5: the recorded folder mappings are the authority and must equal the config's.
+        let recorded = self.job_folders()?;
+        if !recorded.is_empty() {
+            let wanted: serde_json::Value = serde_json::from_str(expected)?;
+            let configured: Vec<(String, String)> = wanted["folders"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|f| {
+                            (
+                                f["source"].as_str().unwrap_or_default().to_owned(),
+                                f["destination"].as_str().unwrap_or_default().to_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let recorded: Vec<(String, String)> =
+                recorded.into_iter().map(|(s, d, _)| (s, d)).collect();
+            if recorded != configured {
+                bail!(
+                    "configured folder mappings differ from the mappings recorded in the journal"
+                );
+            }
         }
         Ok(())
     }
