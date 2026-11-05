@@ -1,0 +1,10 @@
+{
+  "source": "docs/benchmarks/phase5a-stress-raw.txt (unedited output of tests/local/stream_stress.py, seed 5001, 15 trials per mode)",
+  "per_mode": {
+    "buffered": {"trials": 15, "runs": 56, "hook_kills": 14, "timed_kills": 18, "unkilled_migrate_runs": 11, "operator_procedure_runs": 13, "invariant_checks": 50, "audited_recovers": 3, "resolves": 3, "confirmed": 90, "messages": 90, "left_manual": 0, "violations": 0},
+    "hybrid":   {"trials": 15, "runs": 100, "hook_kills": 27, "timed_kills": 16, "unkilled_migrate_runs": 8, "operator_procedure_runs": 49, "invariant_checks": 76, "audited_recovers": 6, "resolves": 8, "confirmed": 87, "messages": 90, "left_manual": 3, "violations": 0},
+    "spooled":  {"trials": 15, "runs": 68, "hook_kills": 26, "timed_kills": 15, "unkilled_migrate_runs": 13, "operator_procedure_runs": 14, "invariant_checks": 65, "audited_recovers": 8, "resolves": 1, "confirmed": 89, "messages": 90, "left_manual": 1, "violations": 0}
+  },
+  "totals": {"runs": 224, "sigkills": 116, "hook_kills": 67, "timed_kills": 49, "unkilled_migrate_runs": 32, "operator_procedure_runs": 76, "invariant_checks": 191, "confirmed": 266, "messages": 270, "left_manual": 4, "violations": 0},
+  "note": "operator_procedure_runs = runs - hook_kills - timed_kills - unkilled_migrate_runs (recover / reconcile / resolve invocations; derived, not printed by the tool)."
+}
