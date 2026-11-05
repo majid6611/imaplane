@@ -36,6 +36,10 @@ enum Command {
         config: PathBuf,
         #[arg(long)]
         dry_run: bool,
+        /// Also discover and transfer messages that arrived after the job was planned. Upgrades
+        /// the journal to schema 5 (after a verified backup) on the first real run.
+        #[arg(long)]
+        incremental: bool,
         #[arg(long)]
         json: bool,
     },
@@ -161,12 +165,21 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Migrate {
             config,
             dry_run,
+            incremental,
             json,
         } => {
             let c = Config::load(&config)?;
             if dry_run {
-                println!("{}", serde_json::to_string_pretty(&engine::dry_run(&c)?)?);
+                let plan = if incremental {
+                    engine::dry_run_incremental(&c)?
+                } else {
+                    engine::dry_run(&c)?
+                };
+                println!("{}", serde_json::to_string_pretty(&plan)?);
                 return Ok(ExitCode::SUCCESS);
+            }
+            if incremental {
+                return print_report(&engine::migrate_incremental(&c, stop)?, json);
             }
             print_report(&engine::migrate(&c, stop)?, json)
         }

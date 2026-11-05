@@ -33,6 +33,12 @@ jobs:
         run: python3 tests/local/crash_matrix.py
       - name: Later-message, multi-folder, reconnect and upgrade crash matrix
         run: python3 tests/local/h5_crash_matrix.py
+      - name: Incremental migration (scripted fixture, plain and forced spool)
+        run: |
+          python3 tests/local/incremental.py target/fault-tests/debug/imaplane
+          IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/incremental.py target/fault-tests/debug/imaplane
+      - name: Incremental migration with two folders on disposable Dovecot
+        run: python3 tests/local/incremental_dovecot.py target/fault-tests/debug/imaplane
       - name: Schema 5 upgrade crash test and end-to-end compatibility
         run: |
           cargo +stable test --locked --features fault-injection --target-dir target/fault-tests --test schema5

@@ -250,3 +250,17 @@ Ordinary opens never upgrade to schema 5, and nothing in the CLI calls the upgra
 first `--incremental` run); `tests/support/upgrade_v5.rs` is a test-only helper. Obligation carried into
 I1/I3: `Journal::snapshot` must not create a generation-0 snapshot for a folder that exists only as scans.
 `docs/benchmarks/phase-i0-stress-raw.txt` is the unedited stress output of the final I0 regression.
+
+## 12. Phase I1 status (implemented, awaiting approval to start I2)
+
+Implemented: `migrate --incremental` (and `--incremental --dry-run`). Order of a real run: open the
+existing job (never creates one, binding/mappings checked) then a read-only plan for every folder (complete,
+inventory-checked UID listing; source UIDVALIDITY compared with the recorded plan; `UIDNEXT` sanity;
+destination UIDVALIDITY compared with every recorded transfer epoch), then upgrade to schema 5 if needed,
+then one atomic scan per folder with new UIDs, then the unchanged transfer sequence over the extended
+plan. A refusal at any earlier step has written nothing. Folders with an unresolved `uncertain` transfer get
+`blocked_by_uncertain` entries and no APPEND; other folders continue. `Journal::snapshot` refuses to create
+an original snapshot for a folder that has scans. Fault points: `scan_listed`, `scan_before_commit`,
+`scan_after_commit` (plus the I0 upgrade points). History is still verified exactly as before (I2 changes that).
+Known limits carried forward: adding folders (I3); verification tiers and flag drift (I2); the
+UID-reuse case for already-confirmed UIDs (C11).

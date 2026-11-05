@@ -403,6 +403,110 @@ impl Journal {
         Ok(result)
     }
 
+    /// Every UID the journal already knows for a folder and UIDVALIDITY, whatever its transfer
+    /// state (planned, skipped, rejected, uncertain, accepted, confirmed): the original snapshot,
+    /// every recorded scan and every transfer row. Discovery treats only UIDs outside this set as new.
+    pub fn known_uids(
+        &self,
+        folder: &str,
+        validity: u32,
+    ) -> Result<std::collections::BTreeSet<u32>> {
+        known_in(&self.0, folder, validity)
+    }
+
+    /// Highest `UIDNEXT` observed by a recorded scan of this folder, if any.
+    pub fn last_scan_uidnext(&self, folder: &str, validity: u32) -> Result<Option<u32>> {
+        if !self.has_table("scans")? {
+            return Ok(None);
+        }
+        Ok(self.0.query_row(
+            "SELECT MAX(observed_uidnext) FROM scans WHERE folder=?1 AND validity=?2",
+            params![folder, validity],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Record one discovery scan atomically: the new UIDs and the `UIDNEXT` they were found under
+    /// become durable together or not at all. Only schema 5 can record a scan. The scan is refused
+    /// if the folder has no plan, another UIDVALIDITY, a UID the journal already knows, a UID at or
+    /// above `observed_uidnext`, or a `UIDNEXT` lower than an earlier observation. Returns the
+    /// scan's generation.
+    pub fn record_scan(
+        &mut self,
+        folder: &str,
+        validity: u32,
+        observed_uidnext: u32,
+        uids: &[u32],
+    ) -> Result<u32> {
+        if self.schema_version()? != SCHEMA_V5 {
+            bail!("recording a scan requires a schema 5 journal");
+        }
+        if uids.is_empty() || uids.windows(2).any(|w| w[0] >= w[1]) {
+            bail!("a scan must list at least one UID, ascending and without repeats");
+        }
+        if uids.iter().any(|u| *u == 0 || *u >= observed_uidnext) {
+            bail!("a scan UID lies outside the observed UIDNEXT horizon");
+        }
+        let tx = self.0.transaction()?;
+        let planned: Option<u32> = tx
+            .query_row(
+                "SELECT validity FROM snapshots WHERE folder=?1",
+                [folder],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if planned != Some(validity) {
+            bail!("scan UIDVALIDITY differs from the folder's recorded plan");
+        }
+        let known = known_in(&tx, folder, validity)?;
+        if uids.iter().any(|u| known.contains(u)) {
+            bail!("a scan UID is already known to the journal");
+        }
+        let (previous_next, generation): (Option<u32>, u32) = tx.query_row(
+            "SELECT MAX(observed_uidnext), COALESCE(MAX(generation),0)+1 FROM scans WHERE folder=?1 AND validity=?2",
+            params![folder, validity],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if previous_next.is_some_and(|p| observed_uidnext < p)
+            || known.last().is_some_and(|k| *k >= observed_uidnext)
+        {
+            bail!("source UIDNEXT is lower than earlier evidence; refusing to record the scan");
+        }
+        tx.execute(
+            "INSERT INTO scans (folder,validity,generation,observed_uidnext,uids,scanned_at) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                folder,
+                validity,
+                generation,
+                observed_uidnext,
+                serde_json::to_string(uids)?,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        crate::fault::point("scan_before_commit");
+        tx.commit()?;
+        crate::fault::point("scan_after_commit");
+        Ok(generation)
+    }
+
+    /// UIDs of unresolved `uncertain` transfers in a folder (any UIDVALIDITY).
+    pub fn uncertain_uids(&self, folder: &str) -> Result<Vec<u32>> {
+        let mut stmt = self.0.prepare(
+            "SELECT uid FROM transfers WHERE folder=?1 AND state='uncertain' ORDER BY uid",
+        )?;
+        let rows = stmt.query_map([folder], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Destination UIDVALIDITY values recorded by transfers of a folder.
+    pub fn destination_validities(&self, folder: &str) -> Result<std::collections::BTreeSet<u32>> {
+        let mut stmt = self.0.prepare(
+            "SELECT DISTINCT destination_validity FROM transfers WHERE folder=?1 AND destination_validity IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([folder], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn check_binding(&self, expected: &str) -> Result<()> {
         let actual: String = self
             .0
@@ -666,6 +770,20 @@ impl Journal {
                 bail!("source UIDVALIDITY changed for {folder:?}; refusing to reuse the snapshot");
             }
             return Ok(serde_json::from_str(&json)?);
+        }
+        // A folder that exists only as discovery scans has no original snapshot, and one must never
+        // be invented for it: that would re-plan every message the scans already cover.
+        if self.has_table("scans")? {
+            let scanned: bool = self.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM scans WHERE folder=?1)",
+                [folder],
+                |r| r.get(0),
+            )?;
+            if scanned {
+                bail!(
+                    "folder {folder:?} has discovery scans but no original snapshot; refusing to create one"
+                );
+            }
         }
         self.0.execute(
             "INSERT INTO snapshots VALUES (?1,?2,?3)",
@@ -970,6 +1088,48 @@ fn backup_before_upgrade(conn: &Connection, path: &Path, version: i64) -> Result
         }
     }
     bail!("too many pre-upgrade backups; refusing upgrade")
+}
+
+/// Union of the plan (snapshot and scans) and every transfer row for one folder and validity.
+fn known_in(
+    conn: &Connection,
+    folder: &str,
+    validity: u32,
+) -> Result<std::collections::BTreeSet<u32>> {
+    let mut known = std::collections::BTreeSet::new();
+    let mut lists: Vec<String> = Vec::new();
+    let snapshot: Option<(u32, String)> = conn
+        .query_row(
+            "SELECT validity,uids FROM snapshots WHERE folder=?1",
+            [folder],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((v, json)) = snapshot {
+        if v != validity {
+            bail!("source UIDVALIDITY differs from the recorded plan");
+        }
+        lists.push(json);
+    }
+    let has_scans: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='scans')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_scans {
+        let mut stmt = conn.prepare("SELECT uids FROM scans WHERE folder=?1 AND validity=?2")?;
+        for row in stmt.query_map(params![folder, validity], |r| r.get::<_, String>(0))? {
+            lists.push(row?);
+        }
+    }
+    for json in lists {
+        known.extend(serde_json::from_str::<Vec<u32>>(&json)?);
+    }
+    let mut stmt = conn.prepare("SELECT uid FROM transfers WHERE folder=?1 AND uid_validity=?2")?;
+    for row in stmt.query_map(params![folder, validity], |r| r.get::<_, u32>(0))? {
+        known.insert(row?);
+    }
+    Ok(known)
 }
 
 pub fn fingerprint(body: &[u8]) -> String {
@@ -1370,5 +1530,162 @@ mod skip_tests {
             upgraded.record(&key).unwrap().unwrap().hash,
             fingerprint(b"body")
         );
+    }
+
+    const JSON_BINDING: &str = r#"{"source":["h","993","u"],"destination":["h","993","u"],"folders":[{"source":"INBOX","destination":"INBOX"}]}"#;
+
+    fn key_for(uid: u32) -> MessageKey {
+        MessageKey {
+            folder: "INBOX".into(),
+            uid_validity: 7,
+            uid,
+        }
+    }
+
+    /// A schema-5 journal whose folder holds a message in every historical state.
+    fn every_state() -> (tempfile::TempDir, std::path::PathBuf, Journal) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        drop(Journal::create(&path, JSON_BINDING).unwrap());
+        let mut j = Journal::open(&path).unwrap();
+        j.snapshot("INBOX", 7, &[1, 2, 3, 4, 5, 6, 8]).unwrap();
+        // 1: planned, never attempted
+        j.plan(&key_for(1), b"body").unwrap();
+        // 2: rejected and operator-skipped (still 'planned')
+        j.plan(&key_for(2), b"body").unwrap();
+        reject(&mut j, &key_for(2));
+        j.skip_rejected(&key_for(2), "ticket").unwrap();
+        // 3: rejected, not skipped (still 'planned')
+        j.plan(&key_for(3), b"body").unwrap();
+        reject(&mut j, &key_for(3));
+        // 4: uncertain
+        j.plan(&key_for(4), b"body").unwrap();
+        prepare(&mut j, &key_for(4));
+        // 5: accepted
+        j.plan(&key_for(5), b"body").unwrap();
+        prepare(&mut j, &key_for(5));
+        j.acknowledge(&key_for(5), 9, 105).unwrap();
+        // 6: confirmed
+        j.plan(&key_for(6), b"body").unwrap();
+        prepare(&mut j, &key_for(6));
+        j.acknowledge(&key_for(6), 9, 106).unwrap();
+        j.confirm_content(&key_for(6), 9, 106, b"body").unwrap();
+        // 8 is only in the snapshot (no transfer row). UID 7 was never in anything.
+        assert!(j.upgrade_to_v5(&path).unwrap());
+        (dir, path, j)
+    }
+
+    #[test]
+    fn known_uids_covers_every_state_so_nothing_is_rediscovered() {
+        let (_dir, _path, mut j) = every_state();
+        let states: Vec<String> = [1, 2, 3, 4, 5, 6]
+            .iter()
+            .map(|u| j.record(&key_for(*u)).unwrap().unwrap().state)
+            .collect();
+        assert_eq!(
+            states,
+            [
+                "planned",
+                "planned",
+                "planned",
+                "uncertain",
+                "accepted",
+                "confirmed"
+            ]
+        );
+        assert!(j.active_skip(&key_for(2)).unwrap().is_some());
+        let expected: std::collections::BTreeSet<u32> = [1, 2, 3, 4, 5, 6, 8].into();
+        assert_eq!(j.known_uids("INBOX", 7).unwrap(), expected);
+        // 7 is genuinely new; every known UID, in every state, is refused as a "new" UID.
+        for known in [1, 2, 3, 4, 5, 6, 8] {
+            assert!(
+                j.record_scan("INBOX", 7, 20, &[known]).is_err(),
+                "UID {known}"
+            );
+        }
+        assert_eq!(j.record_scan("INBOX", 7, 20, &[7, 10]).unwrap(), 1);
+        assert_eq!(j.record_scan("INBOX", 7, 25, &[21]).unwrap(), 2);
+        let all: std::collections::BTreeSet<u32> = [1, 2, 3, 4, 5, 6, 7, 8, 10, 21].into();
+        assert_eq!(j.known_uids("INBOX", 7).unwrap(), all);
+        // The original snapshot is untouched and the plan is snapshot first, then scans in order.
+        assert_eq!(j.snapshots().unwrap()[0].2, vec![1, 2, 3, 4, 5, 6, 8]);
+        assert_eq!(
+            j.work_list().unwrap()[0].2,
+            vec![1, 2, 3, 4, 5, 6, 8, 7, 10, 21]
+        );
+    }
+
+    #[test]
+    fn a_scan_is_validated_and_all_or_nothing() {
+        let (_dir, _path, mut j) = every_state();
+        let before = j.work_list().unwrap();
+        for (validity, next, uids) in [
+            (7, 20, vec![]),       // nothing to record
+            (7, 20, vec![12, 11]), // not ascending
+            (7, 20, vec![11, 11]), // repeated
+            (7, 20, vec![0]),      // UID zero
+            (7, 20, vec![20]),     // at the horizon
+            (7, 20, vec![9, 25]),  // one inside, one beyond: all-or-nothing
+            (8, 20, vec![9]),      // another UIDVALIDITY
+        ] {
+            assert!(
+                j.record_scan("INBOX", validity, next, &uids).is_err(),
+                "{validity} {next} {uids:?}"
+            );
+        }
+        assert!(
+            j.record_scan("OTHER", 7, 20, &[9]).is_err(),
+            "no recorded plan for the folder"
+        );
+        // UIDNEXT below a known UID, and below an earlier observation, is refused.
+        assert!(j.record_scan("INBOX", 7, 8, &[7]).is_err());
+        j.record_scan("INBOX", 7, 30, &[11]).unwrap();
+        assert!(j.record_scan("INBOX", 7, 29, &[12]).is_err());
+        assert_eq!(j.last_scan_uidnext("INBOX", 7).unwrap(), Some(30));
+        let mut expected = before;
+        expected[0].2.push(11);
+        assert_eq!(
+            j.work_list().unwrap(),
+            expected,
+            "only the one valid scan exists"
+        );
+        // A schema-4 journal cannot record scans.
+        let dir = tempfile::tempdir().unwrap();
+        let p4 = dir.path().join("journal.sqlite3");
+        drop(Journal::create(&p4, JSON_BINDING).unwrap());
+        let mut v4 = Journal::open(&p4).unwrap();
+        v4.snapshot("INBOX", 7, &[1]).unwrap();
+        assert!(v4.record_scan("INBOX", 7, 9, &[2]).is_err());
+        assert_eq!(v4.last_scan_uidnext("INBOX", 7).unwrap(), None);
+    }
+
+    #[test]
+    fn a_scan_only_folder_never_gets_an_original_snapshot() {
+        let (_dir, path, mut j) = every_state();
+        // Simulate what a later phase will create: a folder known only through scans.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("INSERT INTO scans VALUES ('ADDED',3,1,5,'[1,2]','t')", [])
+            .unwrap();
+        assert!(j.snapshot("ADDED", 3, &[1, 2, 3]).is_err());
+        assert!(j.snapshot("ADDED", 4, &[9]).is_err());
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM snapshots WHERE folder='ADDED'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "no snapshot may have been created");
+        // An ordinary folder is unaffected.
+        assert_eq!(j.snapshot("INBOX", 7, &[99]).unwrap()[0], 1);
+    }
+
+    #[test]
+    fn uncertain_uids_and_destination_epochs_are_reported_per_folder() {
+        let (_dir, _path, j) = every_state();
+        assert_eq!(j.uncertain_uids("INBOX").unwrap(), vec![4]);
+        assert!(j.uncertain_uids("OTHER").unwrap().is_empty());
+        assert_eq!(j.destination_validities("INBOX").unwrap(), [9].into());
+        assert!(j.destination_validities("OTHER").unwrap().is_empty());
     }
 }

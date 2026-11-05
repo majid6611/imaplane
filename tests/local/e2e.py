@@ -226,6 +226,8 @@ class ProtocolServer:
         self.idle_drop = None  # seconds; destination connection silently closes when idle this long
         self.drop_on_append = False  # destination closes without a reply when APPEND arrives
         self.throttle_code = b'THROTTLED'
+        self.list_hook = None  # callable(n): runs on the source when the full UID list is requested (mutate messages)
+        self.list_count = 0
         self.source_validity = 77
         self.destination_validity = 77
         self.append_validity = 77
@@ -291,9 +293,9 @@ class ProtocolServer:
                         name = '台北/📬'
                         expected = name.encode() if enabled else utf7(name).encode()
                         assert args[0] == b'"'+expected+b'"', (mode,args)
-                        count = len(self.messages[user])
+                        count = sum(m is not None for m in self.messages[user])  # None marks an expunged message
                         validity = self.source_validity if user == 'source' else self.destination_validity
-                        client.sendall(b'* FLAGS (\\Seen)\r\n* '+str(count).encode()+b' EXISTS\r\n* OK [PERMANENTFLAGS (\\Seen)] flags\r\n* OK [UIDVALIDITY '+str(validity).encode()+b'] validity\r\n* OK [UIDNEXT '+str(count+1).encode()+b'] next\r\n')
+                        client.sendall(b'* FLAGS (\\Seen)\r\n* '+str(count).encode()+b' EXISTS\r\n* OK [PERMANENTFLAGS (\\Seen)] flags\r\n* OK [UIDVALIDITY '+str(validity).encode()+b'] validity\r\n* OK [UIDNEXT '+str(len(self.messages[user])+1).encode()+b'] next\r\n')
                         client.sendall(tag+b' OK '+(b'[READ-ONLY]' if verb == b'EXAMINE' else b'[READ-WRITE]')+b' selected\r\n')
                         if self.concurrent and user == 'source':
                             self.concurrent = False
@@ -301,15 +303,19 @@ class ProtocolServer:
                         continue
                     elif verb == b'UID':
                         if re.fullmatch(rb'FETCH 1:(?:\d+|\*) \(UID\)', args[0]):
+                            if user == 'source':
+                                self.list_count += 1
+                                if self.list_hook: self.list_hook(self.list_count)
                             horizon = args[0].split()[1].split(b':')[1]
                             upper = len(self.messages[user]) if horizon == b'*' else min(int(horizon), len(self.messages[user]))
-                            for i in range(upper - (1 if self.missing_inventory and user == 'source' else 0)):
-                                client.sendall(b'* '+str(i+1).encode()+b' FETCH (UID '+str(i+1).encode()+b')\r\n')
+                            uids = [i+1 for i in range(upper) if self.messages[user][i] is not None]
+                            for uid in (uids[:-1] if self.missing_inventory and user == 'source' else uids):
+                                client.sendall(b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()+b')\r\n')
                         else:
                             match = re.fullmatch(rb'FETCH (\d+) (.*)',args[0])
                             assert match, args
                             uid = int(match.group(1)); request = match.group(2)
-                            if uid <= len(self.messages[user]):
+                            if uid <= len(self.messages[user]) and self.messages[user][uid-1] is not None:
                                 body = self.messages[user][uid-1]
                                 prefix = b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()
                                 if self.source_fetch_no and user=='source':

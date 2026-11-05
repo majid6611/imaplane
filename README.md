@@ -115,7 +115,35 @@ Argument parsing/help use Clap's standard exit conventions. Fatal operational
 errors can prevent a final JSON report; journal evidence still survives.
 
 The first run saves each configured folder's UID set. New arrivals are outside
-that job's snapshot, even after resume. This is not continuous synchronization.
+that job's snapshot, even after resume, unless you ask for them explicitly. This
+is not continuous synchronization.
+
+### Catching up on newly arrived mail (`--incremental`)
+
+```sh
+imaplane migrate --config /path/to/migration.toml --incremental --dry-run   # read-only preview
+imaplane migrate --config /path/to/migration.toml --incremental
+```
+
+`--incremental` extends an existing job (it never creates one). It lists every
+UID in each configured source folder, compares the list with every UID the
+journal already knows (whatever its state), and records the new ones as an
+append-only discovery scan in one atomic journal commit before transferring them
+with the unchanged copy-and-verify sequence. The original snapshot and all older
+evidence are never rewritten. Without the flag, `migrate` behaves exactly as before.
+
+- The first real incremental run upgrades a schema-4 journal to schema 5 after a
+  verified backup (`journal.sqlite3.v4.bak`). The upgrade is additive; `--dry-run`
+  never upgrades or writes anything. An older IMAPLANE cannot open a schema-5 journal.
+- A run with nothing new writes nothing to the journal. A crash during discovery
+  cannot lose or duplicate a message: the scan is either fully recorded or absent.
+- It refuses, before any transfer, if a source or destination UIDVALIDITY changed
+  or if the configured folder mappings differ from the job's. Use a new job then.
+- A folder that still has an unresolved `uncertain` transfer receives no new APPEND
+  (reported as `blocked_by_uncertain`); other folders continue. Resolve, recover or
+  skip the uncertain message, then rerun.
+- This phase still reads back every previously transferred message on each run.
+  Messages deleted from the source after transfer are left alone.
 A new state directory starts an independent copy and can duplicate mail already
 copied by another job. Do not discard state to resolve an uncertain transfer.
 

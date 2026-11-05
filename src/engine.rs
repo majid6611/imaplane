@@ -35,7 +35,23 @@ pub struct Report {
     pub complete: bool,
     pub interrupted: bool,
     pub halt_reason: Option<String>,
+    /// Present only for `migrate --incremental`: what each folder's discovery scan found.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub discovery: Vec<Discovery>,
     pub entries: Vec<Entry>,
+}
+/// Outcome of discovery for one folder in an incremental run.
+#[derive(Debug, Serialize, Clone)]
+pub struct Discovery {
+    pub folder: String,
+    pub uid_validity: u32,
+    /// UIDs the source listed, UIDs the journal already knew, and UIDs found new.
+    pub listed: usize,
+    pub known: usize,
+    pub new_uids: Vec<u32>,
+    /// Generation of the scan recorded for the new UIDs; absent when nothing was new.
+    pub scan_generation: Option<u32>,
+    pub observed_uidnext: u32,
 }
 impl Report {
     fn new(scope: &str) -> Self {
@@ -46,6 +62,7 @@ impl Report {
             complete: false,
             interrupted: false,
             halt_reason: None,
+            discovery: Vec::new(),
             entries: Vec::new(),
         }
     }
@@ -360,6 +377,179 @@ pub fn inspect(c: &Config) -> Result<serde_json::Value> {
     )
 }
 
+/// One folder's read-only discovery result, before anything is recorded.
+struct Listing {
+    folder: String,
+    validity: u32,
+    next: u32,
+    listed: usize,
+    known: usize,
+    new: Vec<u32>,
+}
+
+/// Read-only half of incremental discovery, shared by real runs and `--dry-run`: a consistent
+/// complete UID listing per folder compared with every UID the journal knows, plus the source and
+/// destination UIDVALIDITY refusals. Writes nothing anywhere.
+fn plan_discovery(
+    c: &Config,
+    journal: &Journal,
+    source: &mut SourceReader<'_>,
+    dest: &mut DestinationReader<'_>,
+) -> Result<Vec<Listing>> {
+    let plan = journal.work_list()?;
+    let mut listings = Vec::new();
+    for f in &c.folders {
+        let Some((_, recorded, _)) = plan.iter().find(|(name, _, _)| *name == f.source) else {
+            bail!(
+                "job has no recorded plan for folder {:?}; run an ordinary migrate first",
+                f.source
+            );
+        };
+        // The inventory check inside snapshot() makes this listing consistent: a message that
+        // arrived or was expunged while it was read is retried, never recorded half-seen.
+        let (selected, listed) = source.snapshot(&f.source)?;
+        if selected.validity != *recorded {
+            bail!(
+                "source UIDVALIDITY of folder {:?} changed ({} recorded, {} now); incremental migration refuses and nothing was transferred",
+                f.source,
+                recorded,
+                selected.validity
+            );
+        }
+        let next = selected
+            .next
+            .context("source omitted UIDNEXT; cannot bound discovery")?;
+        let known = journal.known_uids(&f.source, *recorded)?;
+        if known.last().is_some_and(|k| *k >= next)
+            || journal
+                .last_scan_uidnext(&f.source, *recorded)?
+                .is_some_and(|p| next < p)
+        {
+            bail!(
+                "source UIDNEXT of folder {:?} is lower than earlier evidence; refusing to discover",
+                f.source
+            );
+        }
+        let mut new: Vec<u32> = listed
+            .iter()
+            .copied()
+            .filter(|u| !known.contains(u))
+            .collect();
+        new.sort_unstable();
+        new.dedup();
+        listings.push(Listing {
+            folder: f.source.clone(),
+            validity: *recorded,
+            next,
+            listed: listed.len(),
+            known: known.len(),
+            new,
+        });
+    }
+    // Destination: a folder that holds our transfers must still be the same UIDVALIDITY epoch.
+    let existing = dest.read(|d| d.folders())?;
+    for f in &c.folders {
+        let recorded = journal.destination_validities(&f.source)?;
+        if recorded.is_empty() {
+            continue;
+        }
+        if !existing
+            .iter()
+            .any(|d| same_folder(&d.name, &f.destination) && d.selectable)
+        {
+            bail!(
+                "destination folder {:?} no longer exists but the journal holds transfers into it; refusing",
+                f.destination
+            );
+        }
+        let now = dest.select(&f.destination, false)?.validity;
+        if recorded.len() != 1 || !recorded.contains(&now) {
+            bail!(
+                "destination UIDVALIDITY of folder {:?} changed ({recorded:?} recorded, {now} now); incremental migration refuses and nothing was transferred",
+                f.destination
+            );
+        }
+    }
+    Ok(listings)
+}
+
+/// Real incremental discovery: plan read-only, then upgrade to schema 5 if needed, then record
+/// one atomic scan per folder that has new messages. Every scan is durable before any transfer.
+fn discover(
+    c: &Config,
+    job: &mut Job,
+    source: &mut SourceReader<'_>,
+    dest: &mut DestinationReader<'_>,
+) -> Result<Vec<Discovery>> {
+    let listings = plan_discovery(c, &job.journal, source, dest)?;
+    crate::fault::point("scan_listed");
+    if job.journal.schema_version()? < 5 {
+        job.journal
+            .upgrade_to_v5(&c.state_dir.join("journal.sqlite3"))?;
+    }
+    let mut found = Vec::new();
+    for l in listings {
+        let generation = if l.new.is_empty() {
+            None
+        } else {
+            Some(
+                job.journal
+                    .record_scan(&l.folder, l.validity, l.next, &l.new)?,
+            )
+        };
+        eprintln!(
+            "Folder {:?}: {} listed, {} already known, {} new",
+            l.folder,
+            l.listed,
+            l.known,
+            l.new.len()
+        );
+        found.push(Discovery {
+            folder: l.folder,
+            uid_validity: l.validity,
+            listed: l.listed,
+            known: l.known,
+            new_uids: l.new,
+            scan_generation: generation,
+            observed_uidnext: l.next,
+        });
+    }
+    Ok(found)
+}
+
+/// `migrate --incremental --dry-run`: reports what discovery would find. The journal is opened
+/// read-only (no lock file, no upgrade, no scan, no backup) and nothing is sent to the destination.
+pub fn dry_run_incremental(c: &Config) -> Result<serde_json::Value> {
+    require_mappings(c)?;
+    let path = c.state_dir.join("journal.sqlite3");
+    let journal =
+        Journal::open_read_only(&path).context("incremental dry run needs an existing job")?;
+    let version = journal.schema_version()?;
+    if version < 4 {
+        bail!(
+            "journal schema {version} predates incremental migration; run an ordinary migrate once to bring it to schema 4"
+        );
+    }
+    journal.check_binding(&c.binding()?)?;
+    let sp = c.source.password("Source")?;
+    let dp = c.destination.password("Destination")?;
+    let mut source = SourceReader::new(c, &sp)?;
+    let mut dest = DestinationReader::new(c, &dp)?;
+    let listings = plan_discovery(c, &journal, &mut source, &mut dest)?;
+    let folders: Vec<_> = listings
+        .iter()
+        .map(|l| serde_json::json!({"source":l.folder,"uid_validity":l.validity,"listed":l.listed,"known":l.known,"new_uids":l.new,"observed_uidnext":l.next}))
+        .collect();
+    Ok(serde_json::json!({
+        "dry_run":true,
+        "incremental":true,
+        "scope":"read-only discovery; the journal was not upgraded or written and nothing was sent to the destination",
+        "journal_schema":version,
+        "would_upgrade_to_schema_5":version < 5,
+        "folders":folders
+    }))
+}
+
 pub fn dry_run(c: &Config) -> Result<serde_json::Value> {
     require_mappings(c)?;
     let sp = c.source.password("Source")?;
@@ -449,21 +639,36 @@ impl Payload {
 }
 
 pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
+    migrate_with(c, stop, false)
+}
+
+/// `migrate --incremental`: discover messages that arrived after the job was planned, record the
+/// discovery durably, then run the ordinary transfer sequence over the extended plan.
+pub fn migrate_incremental(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
+    migrate_with(c, stop, true)
+}
+
+fn migrate_with(c: &Config, stop: Arc<AtomicBool>, incremental: bool) -> Result<Report> {
     require_mappings(c)?;
-    let mut job = Job::open(c, true)?;
+    // An incremental run extends an existing job; it never creates one.
+    let mut job = Job::open(c, !incremental)?;
     let sp = c.source.password("Source")?;
     let dp = c.destination.password("Destination")?;
     let mut source = SourceReader::new(c, &sp)?;
     let mut dest = DestinationReader::new(c, &dp)?;
     preflight(c, &mut source, &mut dest)?;
-    // Snapshot ALL configured source folders before any destination writes.
-    for f in &c.folders {
-        let (s, uids) = source.snapshot(&f.source)?;
-        job.journal.snapshot(&f.source, s.validity, &uids)?;
-    }
     let mut report = Report::new(
         "live destination content, INTERNALDATE and supported flags against the durable source UID snapshot",
     );
+    if incremental {
+        report.discovery = discover(c, &mut job, &mut source, &mut dest)?;
+    } else {
+        // Snapshot ALL configured source folders before any destination writes.
+        for f in &c.folders {
+            let (s, uids) = source.snapshot(&f.source)?;
+            job.journal.snapshot(&f.source, s.validity, &uids)?;
+        }
+    }
     let mut circuit = RejectionCircuit::default();
     let spool_config = SpoolConfig {
         dir: c.spool_dir.clone().unwrap_or_else(|| c.state_dir.clone()),
@@ -500,6 +705,21 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
         let selected = dest.select(&mapping.destination, true)?;
         if !selected.writable {
             bail!("destination folder is read-only");
+        }
+        // Incremental runs add no APPEND to a folder that has an unresolved uncertain transfer:
+        // every further append would add reconciliation candidates for it. Other folders go on.
+        let blocked = if incremental {
+            job.journal.uncertain_uids(&folder)?
+        } else {
+            Vec::new()
+        };
+        if !blocked.is_empty() {
+            eprintln!(
+                "Folder {:?}: {} unresolved uncertain transfer(s) (UIDs {:?}); no new APPEND will be made in this folder",
+                folder,
+                blocked.len(),
+                blocked
+            );
         }
         for (index, uid) in uids.iter().enumerate() {
             let key = MessageKey {
@@ -544,6 +764,17 @@ pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
                     report.entries.push(skipped_entry(&key, &r, &reason));
                     continue;
                 }
+            }
+            if !blocked.is_empty() {
+                report.entries.push(entry(
+                    &key,
+                    job.journal.record(&key)?.as_ref(),
+                    "blocked_by_uncertain",
+                    format!(
+                        "NOT transferred: folder has unresolved uncertain transfer(s) at source UID(s) {blocked:?}; resolve, recover or skip them (see the operator guide), then rerun. Other folders are not affected"
+                    ),
+                ));
+                continue;
             }
             let threshold = c.stream_threshold_bytes;
             let mut payload = match source
