@@ -31,7 +31,7 @@ This is a plan, not work done; nothing here has been implemented. Items are tagg
    Users will expect "run again to catch up". Either document the supported procedure clearly
    (new job, or a re-plan command) or implement the minimal safe re-plan. This is the next priority
    you named; it needs a design that preserves duplicate prevention across jobs.
-   Proposal awaiting approval: `docs/INCREMENTAL_DESIGN.md`. Plans for blockers 2, 5, 6, 7: `docs/V0_1_ROADMAP.md`.
+   Approach approved with conditions; revised design and phases awaiting approval: `docs/INCREMENTAL_DESIGN.md`. Plans for blockers 2, 5, 6, 7: `docs/V0_1_ROADMAP.md`.
 4. **Streaming default and Phase 5 sign-off.** Decide and document the default and the explicit
    buffered fallback after Phase 5A risks are reviewed (see the Phase 5A report).
 5. **Release hygiene files are missing:** `SECURITY.md` (how to report), `CONTRIBUTING.md`,
