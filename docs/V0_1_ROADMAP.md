@@ -1,6 +1,6 @@
 # v0.1 roadmap for the offline blockers
 
-Status: **plan only; nothing here is implemented.** Complements `docs/V0_1_GAP_LIST.md`
+Status: **plan only; nothing here is implemented.** Decisions recorded: ship the existing Python OAuth helper after a security review; `SECURITY.md` points to GitHub Private Vulnerability Reporting (no personal email); `CODE_OF_CONDUCT.md` optional; release dry runs happen locally first and no test branch is pushed without separate approval; streaming stays off by default pending live-provider validation. Complements `docs/V0_1_GAP_LIST.md`
 (blockers 2, 5, 6, 7). Incremental migration is in `docs/INCREMENTAL_DESIGN.md`. Phase 5B (live
 providers) stays on hold, and streaming stays off by default. Nothing is pushed or published.
 
@@ -11,7 +11,7 @@ C (release dry run) should come last so it exercises the final package contents.
 
 | File | Content | Notes |
 |---|---|---|
-| `SECURITY.md` | Supported versions (0.x: latest only); how to report privately (GitHub private vulnerability reporting, or an address you choose); what is in scope (journal integrity, source mutation, credential handling, spool exposure); response targets stated as intentions, not promises; the plaintext-spool and secret-file caveats. | **Needs from you:** a reporting address or confirmation that GitHub private advisories are enabled. No address is invented. |
+| `SECURITY.md` | Supported versions (0.x: latest only); how to report privately (GitHub private vulnerability reporting, or an address you choose); what is in scope (journal integrity, source mutation, credential handling, spool exposure); response targets stated as intentions, not promises; the plaintext-spool and secret-file caveats. | Uses GitHub Private Vulnerability Reporting (decided). **Needs from you later:** enabling it in the repository settings; it cannot be checked offline. No email address is published. |
 | `CONTRIBUTING.md` | Build and test commands exactly as CI runs them (Docker-based, nothing installed on the host); the 12 safety invariants as a review checklist; rule that a safety-relevant change needs a test that fails without it; the fault-injection and stale-binary guard; commit style; how to run offline suites. | Mostly assembled from `docs/H5_SAFETY_AND_RESULTS.md` and CI. |
 | `CHANGELOG.md` | Keep a Changelog format; an `[Unreleased]` section and a `0.1.0` draft built from the commit history: streaming transfer (off by default), skip and unskip, diagnostics, schema 4. States compatibility (journal schema, report version). | One entry per user-visible change; checked in review. |
 
@@ -26,8 +26,7 @@ Today `scripts/oauth_token.py` (278 lines, standard library only) is not in the 
 tool has no built-in OAuth client (README), so Gmail and Microsoft 365 users cannot authenticate
 from an installed package.
 
-**Decision for you:** (1) ship the existing helper as an installed script, or (2) add an
-`imaplane auth` subcommand in Rust. I recommend (1) for v0.1: smallest change, no new dependency in
+**Decided:** (1) ship the existing helper as an installed script (not an `imaplane auth` subcommand): smallest change, no new dependency in
 the migration binary, and the migration process never handles refresh tokens.
 
 Plan for option (1):
