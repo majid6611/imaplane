@@ -55,34 +55,42 @@ with tempfile.TemporaryDirectory(prefix='imaplane-h5-crashes-') as tmp:
                 assert all(not p.errors for p in proxies)
                 print('PASS',point,'nth',nth,'earlier confirmations, folders, exact copies',flush=True)
         for point in ['before_invalidate','after_invalidate','before_verification_fetch','after_verification_fetch','before_confirm','after_confirm']:
-            cfg,dst,_=lab.config('verify'+point.replace('_',''))
+            cfg,dst,proxies_v=lab.config('verify'+point.replace('_',''))
             run(cfg)
             if 'invalidate' in point:
+                # A flag-only change is drift and demotes nothing, so a real problem is needed to reach the
+                # demotion: expunge destination UID 1 of each folder (the message is then missing).
                 for folder in lab.folders:
-                    dst.select(folder); assert dst.uid('STORE','1','+FLAGS.SILENT','(\\Flagged)')[0]=='OK'
+                    dst.select(folder); assert dst.uid('STORE','1','+FLAGS.SILENT','(\\Deleted)')[0]=='OK'; dst.expunge()
             fault_nth=2 if 'invalidate' in point else 4
             run(cfg,'verify',point=point,nth=fault_nth)
             if 'invalidate' in point:
                 with sqlite3.connect(root/('verify'+point.replace('_',''))/'journal.sqlite3') as db:
                     expected=1 if point=='before_invalidate' else 2
                     assert db.execute("select count(*) from transfers where state='accepted'").fetchone()[0]==expected
-                for folder in lab.folders:
-                    dst.select(folder); assert dst.uid('STORE','1','-FLAGS.SILENT','(\\Flagged)')[0]=='OK'
-            assert run(cfg,'verify')['complete']; lab.check(dst)
+                appends=sum(v=='APPEND' for v,_ in proxies_v[1].commands)
+                again=run(cfg,'verify',code=2)      # still reported missing; never re-uploaded, never confirmed
+                assert sum(1 for e in again['entries'] if e['result']=='missing')==2
+                assert sum(v=='APPEND' for v,_ in proxies_v[1].commands)==appends
+                with sqlite3.connect(root/('verify'+point.replace('_',''))/'journal.sqlite3') as db:
+                    assert db.execute("select count(*) from transfers where state='accepted'").fetchone()[0]==2
+            else:
+                assert run(cfg,'verify')['complete']; lab.check(dst)
             print('PASS verify',point,'nth',fault_nth,flush=True)
         cfg,dst,proxies=lab.config('observedmismatch')
         run(cfg)
         appends=sum(v=='APPEND' for v,_ in proxies[1].commands)
-        dst.select('INBOX'); assert dst.uid('STORE','1','+FLAGS.SILENT','(\\Flagged)')[0]=='OK'
+        dst.select('INBOX'); assert dst.uid('STORE','1','+FLAGS.SILENT','(\\Deleted)')[0]=='OK'; dst.expunge()
         mismatch=run(cfg,'verify',code=2)
-        assert any(e['result']=='mismatch' for e in mismatch['entries'])
+        assert any(e['result']=='missing' for e in mismatch['entries'])
         with sqlite3.connect(root/'observedmismatch'/'journal.sqlite3') as db:
             assert db.execute("select count(*) from transfers where state='accepted'").fetchone()[0]==1
             assert db.execute("select count(*) from transfers where state='confirmed'").fetchone()[0]==5
-        assert dst.uid('STORE','1','-FLAGS.SILENT','(\\Flagged)')[0]=='OK'
-        assert run(cfg,'verify')['complete']; lab.check(dst)
+        run(cfg,'verify',code=2)               # still missing: a repeat reports it again and never re-uploads
+        with sqlite3.connect(root/'observedmismatch'/'journal.sqlite3') as db:
+            assert db.execute("select count(*) from transfers where state='accepted'").fetchone()[0]==1
         assert sum(v=='APPEND' for v,_ in proxies[1].commands)==appends
-        print('PASS observed mismatch durably downgrades history; restoration re-verifies without APPEND',flush=True)
+        print('PASS observed problem durably downgrades history; a repeat never re-uploads',flush=True)
         for role,point in [(0,'after_source_reconnect'),(1,'after_destination_reconnect')]:
             cfg,dst,proxies=lab.config('reconnect'+str(role)); proxies[role].drop_body_nth=2
             run(cfg,point=point)

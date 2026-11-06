@@ -251,7 +251,7 @@ first `--incremental` run); `tests/support/upgrade_v5.rs` is a test-only helper.
 I1/I3: `Journal::snapshot` must not create a generation-0 snapshot for a folder that exists only as scans.
 `docs/benchmarks/phase-i0-stress-raw.txt` is the unedited stress output of the final I0 regression.
 
-## 12. Phase I1 status (implemented, awaiting approval to start I2)
+## 12. Phase I1 status (implemented and approved)
 
 Implemented: `migrate --incremental` (and `--incremental --dry-run`). Order of a real run: open the
 existing job (never creates one, binding/mappings checked) then a read-only plan for every folder (complete,
@@ -264,3 +264,69 @@ an original snapshot for a folder that has scans. Fault points: `scan_listed`, `
 `scan_after_commit` (plus the I0 upgrade points). History is still verified exactly as before (I2 changes that).
 Known limits carried forward: adding folders (I3); verification tiers and flag drift (I2); the
 UID-reuse case for already-confirmed UIDs (C11).
+
+
+## 13. Phase I2 status (implemented, awaiting approval to start I3)
+
+Implemented as designed in sections 5.1-5.4, with these precise choices.
+
+**Levels and defaults.** `migrate --incremental [--verify-history existence|metadata|full]`, default
+`metadata`; the flag is refused without `--incremental`. `verify` and ordinary `migrate` stay full (L2)
+over everything and have no lighter mode, so an explicit full request is never substituted. In an
+incremental run: new messages use the unchanged transfer sequence ending in L2; records that are not
+`confirmed` (accepted, or demoted earlier) get L2; `uncertain` uses the unchanged `reconcile`; `confirmed`
+records get L0 or L1 in a pre-pass per folder, then the transfer loop skips them. `full` sends them through
+the same L2 path as `verify`.
+
+**What L0 and L1 read.** L0: one UID listing of the destination folder. L1: `UID FETCH <set> (UID FLAGS
+INTERNALDATE RFC822.SIZE)` in batches of 500 UIDs; no body is read. An unreturned UID is absent (missing); a
+UID returned only partially (for example an unsolicited flag update) is an error, never "missing".
+
+**Evidence (append-only, schema 5).**
+- `verification_events` rows: every successful confirmation (`full`/`ok`, with the observed size, written in the
+  same transaction as the state change), every renewal by a full check of an already-confirmed record
+  (`full`/`ok`, buffered and written in batches of 256 and on exit; losing them in a crash loses evidence only),
+  and every problem at any level (written in the same transaction as the demotion). The table's level CHECK
+  now allows `existence`, `metadata`, `full` (the I0 DDL allowed only `full`; schema 5 is unreleased, and a
+  journal made by a pre-release build is refused with a clear message rather than treated as evidence-free).
+- `verification_runs`: one row per folder per lightweight pass (level, times, checked, drift, problems).
+- Drift writes no per-message row. A metadata or existence pass never writes a `full` event, never writes
+  `confirmed`, and only ever demotes. `Journal::confirm_verified` is the single place that sets `confirmed`.
+- Size is known only from a prior full check. L1 compares it only when known and otherwise reports
+  `size_unknown` in the summary. Times: a message with no recorded full verification reports
+  `last_full_verification: "unknown (no recorded full verification before schema 5)"`.
+
+**Outcomes (table 5.4 as built).** Flag-only difference on a `confirmed` record: `drift` entry, no state
+change (L1 and L2, and now also ordinary `verify` and `migrate`: decision D1 applied everywhere). Flag
+difference on a record that is not yet confirmed: `mismatch`, no confirmation. Hash, INTERNALDATE or known-size
+mismatch, or missing destination UID: record demoted to `accepted`, event, exit 2, never re-uploaded; the next
+run re-judges it with a full check (so a lightweight false alarm heals itself, a real problem repeats).
+Destination UIDVALIDITY change: incremental runs refuse before any write (I1); `verify` and ordinary
+`migrate` keep their existing `destination_changed` demotion. `drift` does not make a run `complete=false`;
+every other non-`confirmed` entry does.
+
+**Behavioural differences to know about.**
+1. `verify`/`migrate` used to demote a confirmed record on a flag change and exit 2; they now report drift and
+   exit 0. This is the D1 decision.
+2. A repeat incremental run is no longer byte-identical in the journal: it appends one `verification_runs` row
+   per folder. Transfers, scans, snapshots, mappings and events are unchanged.
+3. Incremental reports no longer list one `confirmed` entry per historical message; they carry a
+   `history_check` summary. Reports of ordinary commands are unchanged except for the `drift` result.
+4. `existence` and `metadata` cannot detect same-length content corruption; only `full` and `verify` can.
+
+**Ordinary migrate versus incremental with an uncertain folder (item 12; no recovery rule changed).**
+
+| | ordinary `migrate` | `migrate --incremental` |
+|---|---|---|
+| the uncertain record | `reconcile` reports candidates; never replayed | identical |
+| other planned messages in the same folder | still appended | `blocked_by_uncertain`, no APPEND (D2) |
+| other folders | continue | continue |
+| a new uncertain transfer mid-run | run ends | run ends |
+
+Ordinary `migrate` is deliberately unchanged because changing it would change recovery behaviour that this
+phase was told not to touch; the asymmetry is documented in the README. Whether ordinary `migrate` should also
+block is a separate decision for you.
+
+Fault points added: `before_history_fetch`, `before_history_demote`, `history_run_before_commit`,
+`history_run_after_commit`, `evidence_before_commit`, `evidence_after_commit` (and the existing
+`before_invalidate`/`after_invalidate`, now around the atomic demotion).

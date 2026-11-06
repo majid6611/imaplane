@@ -199,6 +199,15 @@ impl Message {
     }
 }
 
+/// What a metadata-only FETCH established about one stored message: no body was read, so it says
+/// nothing about content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageMeta {
+    pub size: u64,
+    pub date: DateTime<FixedOffset>,
+    pub flags: Vec<String>,
+}
+
 #[derive(Debug)]
 struct PermanentMessageError(&'static str);
 impl std::fmt::Display for PermanentMessageError {
@@ -802,6 +811,28 @@ impl Connection {
             bail!("server returned invalid UID zero");
         }
         Ok(uids)
+    }
+    /// Size, INTERNALDATE and FLAGS of many messages without reading any body. A UID the server
+    /// does not return is absent from the map; a UID it returns only partially is an error, so
+    /// that an unsolicited flag update can never be mistaken for a missing message.
+    fn metadata(&mut self, uids: &[u32]) -> Result<std::collections::HashMap<u32, MessageMeta>> {
+        let mut all = std::collections::HashMap::new();
+        for chunk in uids.chunks(METADATA_BATCH) {
+            self.reset(OVERHEAD * 16);
+            let (data, _) = self
+                .session
+                .run(format!(
+                    "UID FETCH {} (UID FLAGS INTERNALDATE RFC822.SIZE)",
+                    uid_set(chunk)
+                ))
+                .safe()?;
+            for (uid, meta) in parse_metadata(&data, chunk)? {
+                if all.insert(uid, meta).is_some() {
+                    bail!("duplicate metadata for one UID");
+                }
+            }
+        }
+        Ok(all)
     }
     /// RFC822.SIZE of one message, checked against the configured cap. `None` if absent.
     fn size_of(&mut self, uid: u32) -> Result<Option<usize>> {
@@ -1430,6 +1461,18 @@ impl Destination {
             self.0.message(uid)
         })
     }
+    /// Size, INTERNALDATE and flags of many destination messages. No body is read.
+    pub fn message_metadata(
+        &mut self,
+        uids: &[u32],
+    ) -> Result<std::collections::HashMap<u32, MessageMeta>> {
+        observed(
+            "destination",
+            "uid_fetch_metadata",
+            |m: &std::collections::HashMap<u32, MessageMeta>| vec![("count", m.len().into())],
+            || self.0.metadata(uids),
+        )
+    }
     /// Digest of one destination message for verification and candidate scans. Above
     /// `stream_above` bytes the body is streamed and never held in memory.
     pub fn message_digest(
@@ -1707,6 +1750,103 @@ fn parse_fetch(
     Ok(message)
 }
 
+const METADATA_BATCH: usize = 500;
+
+/// Compact IMAP UID set ("1:3,7,9:12") for ascending or unsorted unique UIDs.
+fn uid_set(uids: &[u32]) -> String {
+    let mut sorted = uids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let start = sorted[i];
+        let mut end = start;
+        while i + 1 < sorted.len() && sorted[i + 1] == end + 1 {
+            i += 1;
+            end = sorted[i];
+        }
+        parts.push(if start == end {
+            start.to_string()
+        } else {
+            format!("{start}:{end}")
+        });
+        i += 1;
+    }
+    parts.join(",")
+}
+
+/// Parse a metadata-only FETCH. Only UIDs in `requested` are accepted; a response lacking size,
+/// date or flags for a requested UID, or repeating one, is an error rather than a guess.
+fn parse_metadata(
+    response: &[u8],
+    requested: &[u32],
+) -> Result<std::collections::HashMap<u32, MessageMeta>> {
+    use imap_proto::AttributeValue as A;
+    let mut found = std::collections::HashMap::new();
+    let mut partial = HashSet::new();
+    let mut rest = response;
+    while !rest.is_empty() {
+        let (next, r) = Response::from_bytes(rest)
+            .map_err(|_| anyhow::anyhow!("invalid metadata FETCH response"))?;
+        if let Response::Fetch(_, attributes) = r {
+            let uids: Vec<_> = attributes
+                .iter()
+                .filter_map(|a| if let A::Uid(u) = a { Some(*u) } else { None })
+                .collect();
+            // Unsolicited updates for other messages (or without a UID) are not ours.
+            if uids.len() == 1 && requested.contains(&uids[0]) {
+                let uid = uids[0];
+                let sizes: Vec<_> = attributes
+                    .iter()
+                    .filter_map(|a| {
+                        if let A::Rfc822Size(n) = a {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let dates: Vec<_> = attributes
+                    .iter()
+                    .filter_map(|a| {
+                        if let A::InternalDate(d) = a {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let flags: Vec<_> = attributes
+                    .iter()
+                    .filter_map(|a| if let A::Flags(f) = a { Some(f) } else { None })
+                    .collect();
+                if sizes.len() == 1 && dates.len() == 1 && flags.len() == 1 {
+                    let date = DateTime::parse_from_str(dates[0], "%d-%b-%Y %H:%M:%S %z")
+                        .context("invalid INTERNALDATE")?;
+                    let meta = MessageMeta {
+                        size: u64::from(sizes[0]),
+                        date,
+                        flags: flags[0].iter().map(ToString::to_string).collect(),
+                    };
+                    if found.insert(uid, meta).is_some() {
+                        bail!("duplicate metadata FETCH for one UID");
+                    }
+                } else if sizes.len() > 1 || dates.len() > 1 || flags.len() > 1 {
+                    bail!("FETCH duplicated size, INTERNALDATE or FLAGS");
+                } else {
+                    partial.insert(uid);
+                }
+            }
+        }
+        rest = next;
+    }
+    if let Some(uid) = partial.iter().find(|u| !found.contains_key(u)) {
+        bail!("incomplete metadata FETCH for UID {uid}; not treated as missing");
+    }
+    Ok(found)
+}
+
 fn decode_message(response: &[u8], uid: u32, expected: usize) -> Result<Option<Message>> {
     Ok(
         parse_fetch(response, uid, expected, None)?.map(|parsed| Message {
@@ -1953,6 +2093,53 @@ mod tests {
         }
     }
     const D: &str = "INTERNALDATE \"02-Jan-2020 03:04:05 +0000\"";
+    #[test]
+    fn uid_sets_are_compact_sorted_and_unique() {
+        assert_eq!(uid_set(&[1, 2, 3, 7, 9, 10, 11]), "1:3,7,9:11");
+        assert_eq!(uid_set(&[5, 3, 4, 4]), "3:5");
+        assert_eq!(uid_set(&[8]), "8");
+        assert_eq!(uid_set(&[]), "");
+    }
+    #[test]
+    fn metadata_parse_is_strict_and_never_turns_partial_data_into_absence() {
+        let full = |uid: u32, size: u32, flags: &str| {
+            format!("* {uid} FETCH (UID {uid} FLAGS ({flags}) {D} RFC822.SIZE {size})\r\n")
+        };
+        let ok = parse_metadata(
+            format!("{}{}", full(7, 30, "\\Seen"), full(9, 4, "")).as_bytes(),
+            &[7, 8, 9],
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 2);
+        assert_eq!(ok[&7].size, 30);
+        assert_eq!(ok[&7].flags, ["\\Seen"]);
+        assert!(ok[&9].flags.is_empty());
+        assert!(!ok.contains_key(&8), "an unreturned UID is absent");
+        // Attribute order does not matter.
+        let reordered = format!("* 1 FETCH (RFC822.SIZE 4 {D} FLAGS () UID 7)\r\n");
+        assert_eq!(
+            parse_metadata(reordered.as_bytes(), &[7]).unwrap()[&7].size,
+            4
+        );
+        // A bare unsolicited flag update for a requested UID is incomplete data, not "missing".
+        let update = "* 1 FETCH (UID 7 FLAGS (\\Seen))\r\n";
+        assert!(parse_metadata(update.as_bytes(), &[7]).is_err());
+        // ... but one for a UID we did not ask about, or without a UID, is ignored.
+        assert!(parse_metadata(update.as_bytes(), &[8]).unwrap().is_empty());
+        assert!(
+            parse_metadata(b"* 1 FETCH (FLAGS (\\Seen))\r\n", &[7])
+                .unwrap()
+                .is_empty()
+        );
+        // The same message twice, or a repeated attribute, is ambiguous.
+        let twice = format!("{}{}", full(7, 1, ""), full(7, 1, ""));
+        assert!(parse_metadata(twice.as_bytes(), &[7]).is_err());
+        let doubled = format!("* 1 FETCH (UID 7 FLAGS () {D} RFC822.SIZE 1 RFC822.SIZE 2)\r\n");
+        assert!(parse_metadata(doubled.as_bytes(), &[7]).is_err());
+        // An invalid date is an error.
+        let bad = "* 1 FETCH (UID 7 FLAGS () INTERNALDATE \"nonsense\" RFC822.SIZE 1)\r\n";
+        assert!(parse_metadata(bad.as_bytes(), &[7]).is_err());
+    }
     #[test]
     fn decode_message_behavior_is_pinned_for_valid_and_malformed_responses() {
         let ok = format!("* 1 FETCH (UID 7 FLAGS (\\Seen) {D} BODY[] {{3}}\r\nabc)\r\n");

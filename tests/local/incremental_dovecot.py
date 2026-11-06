@@ -45,6 +45,17 @@ def digest(state):
     return h.hexdigest()
 
 
+def core(journal):
+    """Every journal table except the append-only run summaries (each lightweight history check adds one)."""
+    h = hashlib.sha256(); c = sqlite3.connect(journal)
+    try:
+        for (name,) in c.execute("select name from sqlite_master where type='table' and name not like 'sqlite_%' and name<>'verification_runs' order by name").fetchall():
+            h.update(name.encode()); h.update(repr(c.execute(f'select * from "{name}" order by rowid').fetchall()).encode())
+    finally:
+        c.close()
+    return h.hexdigest()
+
+
 def appends(proxy):
     return sum(v == 'APPEND' for v, _ in proxy.commands)
 
@@ -79,10 +90,10 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-dovecot-') as tmp:
         assert [got[('Travail', u)]['result'] for u in (4, 5)] == ['confirmed', 'confirmed']
         assert appends(proxies[1]) == sent + 2, 'only the independent folder may receive APPENDs'
         assert 'no new APPEND' in err
-        stable = digest(state)
+        stable = core(journal)
         # A repeat changes nothing in the journal and sends nothing (nothing to replay, nothing new).
         _, rep2, _ = run(cfg, extra=['--incremental'], code=2)
-        assert appends(proxies[1]) == sent + 2 and digest(state) == stable
+        assert appends(proxies[1]) == sent + 2 and core(journal) == stable
         print('PASS uncertain INBOX is blocked, independent Travail continues, repeat is idempotent', flush=True)
 
         candidates = got[('INBOX', 4)]['candidate_uids']
@@ -91,9 +102,33 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-dovecot-') as tmp:
         _, rep, err = run(cfg, extra=['--incremental'], code=0)
         assert rep['complete'] and appends(proxies[1]) == sent + 3, (rep['complete'], appends(proxies[1]), sent)
         lab.check(dst)                                              # exact copies, source unchanged
-        done = digest(state)
+        done = core(journal)
         _, rep, _ = run(cfg, extra=['--incremental'], code=0)
-        assert all(d['new_uids'] == [] for d in rep['discovery']) and digest(state) == done and appends(proxies[1]) == sent + 3
+        assert all(d['new_uids'] == [] for d in rep['discovery']) and core(journal) == done and appends(proxies[1]) == sent + 3
+        assert rep['history_check']['level'] == 'metadata' and rep['history_check']['problems'] == 0 and rep['history_check']['drift'] == 0, rep['history_check']
         assert all(not p.errors for p in proxies)
         print('PASS after resolve the blocked folder completes; exact copies; source unchanged; idempotent', flush=True)
+
+        # Tiered history checks against a real server: metadata sees a flag change as drift (no
+        # demotion), a full check agrees, and an expunged message is reported missing and never re-sent.
+        db = sqlite3.connect(journal)
+        du = lambda folder, uid: db.execute('select destination_uid from transfers where folder=? and uid=?', (folder, uid)).fetchone()[0]
+        total = appends(proxies[1]); stored = db.execute('select count(*) from verification_events').fetchone()[0]
+        dst.select('INBOX'); assert dst.uid('STORE', str(du('INBOX', 1)), '+FLAGS.SILENT', '(\\Flagged)')[0] == 'OK'
+        _, rep, _ = run(cfg, extra=['--incremental'], code=0)
+        drift = [(e['source_folder'], e['source_uid'], e['level']) for e in rep['entries'] if e['result'] == 'drift']
+        assert drift == [('INBOX', 1, 'metadata')] and rep['complete'] and rep['history_check']['drift'] == 1, rep
+        assert db.execute("select count(*) from verification_events").fetchone()[0] == stored, 'a metadata check wrote full evidence'
+        _, rep, _ = run(cfg, extra=['--incremental', '--verify-history', 'full'], code=0)
+        assert [(e['source_folder'], e['source_uid'], e['level']) for e in rep['entries'] if e['result'] == 'drift'] == [('INBOX', 1, 'full')]
+        assert db.execute("select count(*) from transfers where state='confirmed'").fetchone()[0] == 10
+        dst.select('INBOX'); victim = du('INBOX', 2)
+        dst.uid('STORE', str(victim), '+FLAGS.SILENT', '(\\Deleted)'); dst.expunge()
+        _, rep, _ = run(cfg, extra=['--incremental'], code=2)
+        assert [(e['source_folder'], e['source_uid'], e['result'], e['level']) for e in rep['entries'] if e['result'] != 'drift'] == [('INBOX', 2, 'missing', 'metadata')], rep['entries']
+        assert db.execute("select state from transfers where folder='INBOX' and uid=2").fetchone()[0] == 'accepted'
+        assert db.execute("select level,result from verification_events where uid=2 order by rowid desc limit 1").fetchone() == ('metadata', 'missing')
+        assert appends(proxies[1]) == total, 'a missing destination message must never be re-uploaded'
+        assert all(not p.errors for p in proxies)
+        print('PASS real Dovecot: metadata drift without demotion, full agreement, missing message demoted and never re-sent', flush=True)
 print('all incremental Dovecot checks passed')

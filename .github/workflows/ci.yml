@@ -37,11 +37,16 @@ jobs:
         run: |
           python3 tests/local/incremental.py target/fault-tests/debug/imaplane
           IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/incremental.py target/fault-tests/debug/imaplane
+      - name: Tiered verification and flag drift (scripted fixture, plain and forced spool)
+        run: |
+          python3 tests/local/tiered.py target/fault-tests/debug/imaplane
+          IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/tiered.py target/fault-tests/debug/imaplane
       - name: Incremental migration with two folders on disposable Dovecot
         run: python3 tests/local/incremental_dovecot.py target/fault-tests/debug/imaplane
       - name: Schema 5 upgrade crash test and end-to-end compatibility
         run: |
           cargo +stable test --locked --features fault-injection --target-dir target/fault-tests --test schema5
+          cargo +stable test --locked --features fault-injection --target-dir target/fault-tests --test evidence
           cargo +stable build --locked --features fault-injection --target-dir target/fault-tests --example upgrade_v5
           python3 tests/local/schema5_e2e.py target/fault-tests/debug/imaplane target/fault-tests/debug/examples/upgrade_v5
       - name: Commit-bound release benchmark snapshot

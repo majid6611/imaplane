@@ -278,7 +278,7 @@ fn new_tables_are_append_only_and_mappings_immutable() {
     );
     assert!(
         conn.execute(
-            "INSERT INTO verification_events VALUES ('INBOX',10,2,'metadata','ok',4,'t','')",
+            "INSERT INTO verification_events VALUES ('INBOX',10,2,'bogus','ok',4,'t','')",
             []
         )
         .is_err()

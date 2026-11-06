@@ -40,6 +40,11 @@ enum Command {
         /// the journal to schema 5 (after a verified backup) on the first real run.
         #[arg(long)]
         incremental: bool,
+        /// With --incremental: how much of the already-confirmed history to re-check. `metadata`
+        /// (default) and `existence` read no message bodies and never create or renew a content
+        /// confirmation; `full` re-reads every body like `verify`.
+        #[arg(long, value_enum, default_value = "metadata", requires = "incremental")]
+        verify_history: engine::HistoryLevel,
         #[arg(long)]
         json: bool,
     },
@@ -119,11 +124,22 @@ fn print_report(report: &engine::Report, json: bool) -> anyhow::Result<ExitCode>
             .iter()
             .filter(|e| e.result == "confirmed")
             .count();
+        let drift = report
+            .entries
+            .iter()
+            .filter(|e| e.result == "drift")
+            .count();
         println!(
-            "Confirmed: {confirmed}; unresolved: {}; interrupted: {}",
-            report.entries.len() - confirmed,
+            "Confirmed: {confirmed}; flag drift: {drift}; unresolved: {}; interrupted: {}",
+            report.entries.len() - confirmed - drift,
             report.interrupted
         );
+        if let Some(h) = &report.history_check {
+            println!(
+                "History re-checked at the {} level only (content NOT re-read): {} checked, {} passed, {} drift, {} problems",
+                h.level, h.checked, h.passed, h.drift, h.problems
+            );
+        }
         for e in &report.entries {
             if e.result != "confirmed" || !e.omitted_flags.is_empty() {
                 println!(
@@ -166,12 +182,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             config,
             dry_run,
             incremental,
+            verify_history,
             json,
         } => {
             let c = Config::load(&config)?;
             if dry_run {
                 let plan = if incremental {
-                    engine::dry_run_incremental(&c)?
+                    engine::dry_run_incremental(&c, verify_history)?
                 } else {
                     engine::dry_run(&c)?
                 };
@@ -179,7 +196,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             if incremental {
-                return print_report(&engine::migrate_incremental(&c, stop)?, json);
+                return print_report(
+                    &engine::migrate_incremental(&c, stop, verify_history)?,
+                    json,
+                );
             }
             print_report(&engine::migrate(&c, stop)?, json)
         }

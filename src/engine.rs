@@ -26,6 +26,51 @@ pub struct Entry {
     pub detail: String,
     pub omitted_flags: Vec<String>,
     pub candidate_uids: Vec<u32>,
+    /// Which verification level produced this result (`existence`, `metadata` or `full`). Set only
+    /// for results of the tiered history check and for drift, so ordinary output is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<&'static str>,
+    /// When the content of this message was last proven by a full SHA-256 read-back, or the text
+    /// `unknown` when the journal holds no such record (anything confirmed before schema 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_full_verification: Option<String>,
+}
+
+/// How much of the already-confirmed history an incremental run re-checks. Only `full` reads
+/// message bodies, and only a full check can create or renew a content confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum HistoryLevel {
+    /// The destination UID still exists (one UID listing per folder).
+    Existence,
+    /// UID, size (when a full check recorded it), INTERNALDATE and flags, without bodies.
+    Metadata,
+    /// Re-read every message body and compare SHA-256, as `verify` does.
+    Full,
+}
+impl HistoryLevel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Existence => "existence",
+            Self::Metadata => "metadata",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Summary of the lightweight history check of one incremental run (absent for other commands and
+/// for `--verify-history full`).
+#[derive(Debug, Serialize, Default)]
+pub struct HistoryCheck {
+    pub level: &'static str,
+    pub checked: u64,
+    pub passed: u64,
+    /// Flag-only differences on confirmed messages: reported, never demoted.
+    pub drift: u64,
+    /// Missing destination message, INTERNALDATE or known-size mismatch: demoted to `accepted`.
+    pub problems: u64,
+    /// Messages whose size could not be compared because no full check ever recorded it.
+    pub size_unknown: u64,
+    pub scope: &'static str,
 }
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -38,6 +83,8 @@ pub struct Report {
     /// Present only for `migrate --incremental`: what each folder's discovery scan found.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub discovery: Vec<Discovery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_check: Option<HistoryCheck>,
     pub entries: Vec<Entry>,
 }
 /// Outcome of discovery for one folder in an incremental run.
@@ -63,11 +110,18 @@ impl Report {
             interrupted: false,
             halt_reason: None,
             discovery: Vec::new(),
+            history_check: None,
             entries: Vec::new(),
         }
     }
     fn finish(&mut self) {
-        self.complete = !self.interrupted && self.entries.iter().all(|e| e.result == "confirmed");
+        // `drift` (flags differ on a message whose content was just proven) does not make a run
+        // incomplete; it is counted and listed. Everything else must be a confirmation.
+        self.complete = !self.interrupted
+            && self
+                .entries
+                .iter()
+                .all(|e| e.result == "confirmed" || e.result == "drift");
     }
 }
 fn entry(
@@ -84,6 +138,8 @@ fn entry(
         detail: detail.into(),
         omitted_flags: record.map(|r| r.omitted.clone()).unwrap_or_default(),
         candidate_uids: Vec::new(),
+        level: None,
+        last_full_verification: None,
     }
 }
 fn skipped_entry(key: &MessageKey, record: &Record, reason: &str) -> Entry {
@@ -519,7 +575,7 @@ fn discover(
 
 /// `migrate --incremental --dry-run`: reports what discovery would find. The journal is opened
 /// read-only (no lock file, no upgrade, no scan, no backup) and nothing is sent to the destination.
-pub fn dry_run_incremental(c: &Config) -> Result<serde_json::Value> {
+pub fn dry_run_incremental(c: &Config, history: HistoryLevel) -> Result<serde_json::Value> {
     require_mappings(c)?;
     let path = c.state_dir.join("journal.sqlite3");
     let journal =
@@ -546,6 +602,7 @@ pub fn dry_run_incremental(c: &Config) -> Result<serde_json::Value> {
         "scope":"read-only discovery; the journal was not upgraded or written and nothing was sent to the destination",
         "journal_schema":version,
         "would_upgrade_to_schema_5":version < 5,
+        "history_check_level":history.name(),
         "folders":folders
     }))
 }
@@ -639,16 +696,25 @@ impl Payload {
 }
 
 pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
-    migrate_with(c, stop, false)
+    migrate_with(c, stop, None)
 }
 
 /// `migrate --incremental`: discover messages that arrived after the job was planned, record the
 /// discovery durably, then run the ordinary transfer sequence over the extended plan.
-pub fn migrate_incremental(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
-    migrate_with(c, stop, true)
+pub fn migrate_incremental(
+    c: &Config,
+    stop: Arc<AtomicBool>,
+    history: HistoryLevel,
+) -> Result<Report> {
+    migrate_with(c, stop, Some(history))
 }
 
-fn migrate_with(c: &Config, stop: Arc<AtomicBool>, incremental: bool) -> Result<Report> {
+fn migrate_with(
+    c: &Config,
+    stop: Arc<AtomicBool>,
+    history: Option<HistoryLevel>,
+) -> Result<Report> {
+    let incremental = history.is_some();
     require_mappings(c)?;
     // An incremental run extends an existing job; it never creates one.
     let mut job = Job::open(c, !incremental)?;
@@ -713,6 +779,21 @@ fn migrate_with(c: &Config, stop: Arc<AtomicBool>, incremental: bool) -> Result<
         } else {
             Vec::new()
         };
+        // Already-confirmed history: existence or metadata only, unless a full check was asked for
+        // (then the ordinary loop below reads every body, exactly like `verify`).
+        let handled = match history {
+            Some(level) if level != HistoryLevel::Full => history_check(
+                &mut job.journal,
+                &mut dest,
+                &folder,
+                validity,
+                selected.validity,
+                level,
+                &stop,
+                &mut report,
+            )?,
+            _ => BTreeSet::new(),
+        };
         if !blocked.is_empty() {
             eprintln!(
                 "Folder {:?}: {} unresolved uncertain transfer(s) (UIDs {:?}); no new APPEND will be made in this folder",
@@ -730,6 +811,9 @@ fn migrate_with(c: &Config, stop: Arc<AtomicBool>, incremental: bool) -> Result<
             if stop.load(Ordering::Relaxed) {
                 report.interrupted = true;
                 break;
+            }
+            if handled.contains(uid) {
+                continue;
             }
             eprintln!(
                 "Folder {:?}: {}/{} (UID {})",
@@ -1048,17 +1132,19 @@ fn transfer_flags(flags: &[String], supported: &[String]) -> (Vec<String>, Vec<S
     }
     (kept.into_iter().collect(), omitted.into_iter().collect())
 }
-/// The one comparison of journal evidence against a destination message: content hash,
-/// INTERNALDATE and supported persistent flags.
-fn matches_digest(r: &Record, m: &crate::transport::MessageDigest) -> Result<()> {
+/// Content identity: SHA-256 and INTERNALDATE. A difference here is a real integrity problem.
+fn compare_content(r: &Record, m: &crate::transport::MessageDigest) -> Result<()> {
     if m.sha256 != r.hash {
         bail!("content hash mismatch");
     }
     if Some(m.date.timestamp()) != r.date {
         bail!("INTERNALDATE mismatch");
     }
-    let actual: BTreeSet<_> = m
-        .flags
+    Ok(())
+}
+/// Supported persistent flags equal to the journal's (case-insensitive, `\Recent` ignored).
+fn flags_equal(r: &Record, flags: &[String]) -> Result<bool> {
+    let actual: BTreeSet<_> = flags
         .iter()
         .filter(|f| !f.eq_ignore_ascii_case("\\Recent"))
         .map(|f| f.to_ascii_lowercase())
@@ -1070,20 +1156,45 @@ fn matches_digest(r: &Record, m: &crate::transport::MessageDigest) -> Result<()>
         .iter()
         .map(|f| f.to_ascii_lowercase())
         .collect();
-    if actual != expected {
+    Ok(actual == expected)
+}
+/// Strict comparison (content, INTERNALDATE and flags), used where a flag difference must stop an
+/// attribution or a first confirmation: uncertain-transfer candidates and not-yet-confirmed records.
+fn matches_digest(r: &Record, m: &crate::transport::MessageDigest) -> Result<()> {
+    compare_content(r, m)?;
+    if !flags_equal(r, &m.flags)? {
         bail!("persistent flags mismatch");
     }
     Ok(())
 }
+fn flag_difference(r: &Record, flags: &[String]) -> String {
+    let show = |list: &[String]| {
+        let mut v: Vec<_> = list
+            .iter()
+            .filter(|f| !f.eq_ignore_ascii_case("\\Recent"))
+            .cloned()
+            .collect();
+        v.sort();
+        format!("{v:?}")
+    };
+    format!(
+        "persistent flags differ from the journal (journal {}, destination {})",
+        show(r.flags.as_deref().unwrap_or(&[])),
+        show(flags)
+    )
+}
 fn verification_failure(
     j: &mut Journal,
     r: &Record,
+    level: &str,
     result: &str,
+    size: Option<u64>,
     detail: impl Into<String>,
 ) -> Result<Entry> {
-    // Persist observed failure; do not erase historical confirmation merely
-    // because a new check started and could be interrupted.
-    j.invalidate(&r.key)?;
+    // Persist the observed failure and its evidence together; do not erase historical
+    // confirmation merely because a new check started and could be interrupted.
+    let detail = detail.into();
+    j.demote(&r.key, level, result, &detail, size)?;
     Ok(entry(&r.key, Some(r), result, detail))
 }
 fn verify_record(
@@ -1099,7 +1210,9 @@ fn verify_record(
         return verification_failure(
             j,
             r,
+            "full",
             "destination_changed",
+            None,
             "destination UIDVALIDITY differs from APPENDUID",
         );
     }
@@ -1107,32 +1220,77 @@ fn verify_record(
     let m = match d.digest(du, "verification_stream_chunk") {
         Ok(Some(m)) => m,
         Ok(None) => {
-            return verification_failure(j, r, "missing", "destination UID no longer exists");
+            return verification_failure(
+                j,
+                r,
+                "full",
+                "missing",
+                None,
+                "destination UID no longer exists",
+            );
         }
         Err(e) => {
             return verification_failure(
                 j,
                 r,
+                "full",
                 if crate::transport::is_permanent_message(&e) {
                     "verification_failed_permanent"
                 } else {
                     "failed"
                 },
+                None,
                 format!("destination read failed: {e:#}"),
             );
         }
     };
     crate::fault::point("after_verification_fetch");
-    if let Err(e) = matches_digest(r, &m) {
-        return verification_failure(j, r, "mismatch", e.to_string());
+    if let Err(e) = compare_content(r, &m) {
+        return verification_failure(j, r, "full", "mismatch", Some(m.size), e.to_string());
     }
+    let flags_match = match flags_equal(r, &m.flags) {
+        Ok(v) => v,
+        Err(e) => {
+            return verification_failure(j, r, "full", "mismatch", Some(m.size), e.to_string());
+        }
+    };
     if r.state == "confirmed" {
-        // Exact read-back above is still mandatory for this run. Its historical
-        // confirmation already exists durably, so no new transition is needed.
+        // Exact read-back above is mandatory for this run. The historical confirmation already
+        // exists durably, so no state transition is needed; the successful full check is recorded
+        // as renewed evidence. A flag-only difference is drift, never a demotion.
         crate::fault::point("before_confirm");
         crate::fault::point("after_confirm");
+        let detail = if flags_match {
+            "full content, INTERNALDATE and flags matched"
+        } else {
+            "full content and INTERNALDATE matched; flags differ (drift)"
+        };
+        j.note_full_ok(&r.key, Some(m.size), detail)?;
+        if !flags_match {
+            let mut e = entry(
+                &r.key,
+                Some(r),
+                "drift",
+                format!(
+                    "content and INTERNALDATE verified by full SHA-256; {}; no state change",
+                    flag_difference(r, &m.flags)
+                ),
+            );
+            e.level = Some("full");
+            return Ok(e);
+        }
+    } else if !flags_match {
+        // Not yet confirmed: flags must match before the first confirmation.
+        return verification_failure(
+            j,
+            r,
+            "full",
+            "mismatch",
+            Some(m.size),
+            "persistent flags mismatch",
+        );
     } else {
-        j.confirm_content_fingerprint(&r.key, dv, du, &m.sha256)?;
+        j.confirm_verified(&r.key, dv, du, &m.sha256, Some(m.size))?;
     }
     Ok(entry(
         &r.key,
@@ -1141,6 +1299,198 @@ fn verify_record(
         "exact content, INTERNALDATE and supported persistent flags match",
     ))
 }
+/// A real problem found by a lightweight check: demote with evidence, never re-upload.
+#[allow(clippy::too_many_arguments)]
+fn history_problem(
+    j: &mut Journal,
+    report: &mut Report,
+    level: HistoryLevel,
+    last_full: String,
+    r: &Record,
+    result: &str,
+    size: Option<u64>,
+    detail: String,
+) -> Result<()> {
+    crate::fault::point("before_history_demote");
+    let mut e = verification_failure(j, r, level.name(), result, size, detail)?;
+    e.level = Some(level.name());
+    e.last_full_verification = Some(last_full);
+    report.entries.push(e);
+    Ok(())
+}
+
+fn unknown_time() -> String {
+    "unknown (no recorded full verification before schema 5)".into()
+}
+
+/// The lightweight check of already-confirmed history for one folder (`existence` or `metadata`).
+/// It reads no message body, so it can only demote or report drift; it never confirms and never
+/// writes a `full` event. Returns the UIDs it handled so the transfer loop does not repeat them.
+#[allow(clippy::too_many_arguments)]
+fn history_check(
+    j: &mut Journal,
+    d: &mut DestinationReader<'_>,
+    folder: &str,
+    validity: u32,
+    destination_validity: u32,
+    level: HistoryLevel,
+    stop: &AtomicBool,
+    report: &mut Report,
+) -> Result<BTreeSet<u32>> {
+    debug_assert!(level != HistoryLevel::Full);
+    let records = j.confirmed_records(folder, validity)?;
+    let mut handled = BTreeSet::new();
+    if records.is_empty() {
+        return Ok(handled);
+    }
+    // Identity first: every destination UID is only meaningful inside its recorded UIDVALIDITY.
+    // Incremental discovery already refused a changed epoch; this guards the check itself.
+    if let Some(r) = records.iter().find(|r| {
+        r.destination
+            .is_none_or(|(dv, _)| dv != destination_validity)
+    }) {
+        bail!(
+            "destination UIDVALIDITY of the folder holding source UID {} differs from the journal; refusing to check history",
+            r.key.uid
+        );
+    }
+    let started = chrono::Utc::now().to_rfc3339();
+    let last = j.last_full_verifications(folder)?;
+    let (mut checked, mut drift, mut problems, mut size_unknown) = (0u64, 0u64, 0u64, 0u64);
+    let stamp = |r: &Record| {
+        last.get(&(r.key.uid_validity, r.key.uid))
+            .map(|f| f.observed_at.clone())
+            .unwrap_or_else(unknown_time)
+    };
+    let chunk_size = 500;
+    let mut existing: Option<BTreeSet<u32>> = None;
+    if level == HistoryLevel::Existence {
+        existing = Some(d.read(|d| d.uids())?.into_iter().collect());
+    }
+    for chunk in records.chunks(chunk_size) {
+        if stop.load(Ordering::Relaxed) {
+            report.interrupted = true;
+            break;
+        }
+        crate::fault::point("before_history_fetch");
+        let metas = if level == HistoryLevel::Metadata {
+            let uids: Vec<u32> = chunk
+                .iter()
+                .filter_map(|r| r.destination.map(|(_, u)| u))
+                .collect();
+            Some(d.read(|d| d.message_metadata(&uids))?)
+        } else {
+            None
+        };
+        for r in chunk {
+            let (_, du) = r.destination.expect("filtered by confirmed_records");
+            handled.insert(r.key.uid);
+            checked += 1;
+            if let Some(existing) = &existing {
+                if !existing.contains(&du) {
+                    problems += 1;
+                    history_problem(j, report, level, stamp(r), r, "missing", None, "destination UID no longer exists (existence check; the message is not re-uploaded)".into())?;
+                }
+                continue;
+            }
+            let Some(m) = metas.as_ref().and_then(|m| m.get(&du)) else {
+                problems += 1;
+                history_problem(j, report, level, stamp(r), r, "missing", None, "destination UID no longer exists (metadata check; the message is not re-uploaded)".into())?;
+                continue;
+            };
+            if Some(m.date.timestamp()) != r.date {
+                problems += 1;
+                history_problem(
+                    j,
+                    report,
+                    level,
+                    stamp(r),
+                    r,
+                    "mismatch",
+                    Some(m.size),
+                    "INTERNALDATE mismatch".into(),
+                )?;
+                continue;
+            }
+            match last
+                .get(&(r.key.uid_validity, r.key.uid))
+                .and_then(|f| f.size)
+            {
+                Some(known) if known != m.size => {
+                    problems += 1;
+                    history_problem(
+                        j,
+                        report,
+                        level,
+                        stamp(r),
+                        r,
+                        "mismatch",
+                        Some(m.size),
+                        format!(
+                            "size differs from the full verification (recorded {known}, now {})",
+                            m.size
+                        ),
+                    )?;
+                    continue;
+                }
+                Some(_) => {}
+                None => size_unknown += 1,
+            }
+            match flags_equal(r, &m.flags) {
+                Ok(true) => {}
+                Ok(false) => {
+                    drift += 1;
+                    let mut e = entry(
+                        &r.key,
+                        Some(r),
+                        "drift",
+                        format!(
+                            "metadata check only (content NOT re-read); {}; no state change",
+                            flag_difference(r, &m.flags)
+                        ),
+                    );
+                    e.level = Some("metadata");
+                    e.last_full_verification = Some(stamp(r));
+                    report.entries.push(e);
+                }
+                Err(e) => {
+                    problems += 1;
+                    history_problem(
+                        j,
+                        report,
+                        level,
+                        stamp(r),
+                        r,
+                        "mismatch",
+                        Some(m.size),
+                        e.to_string(),
+                    )?;
+                }
+            }
+        }
+    }
+    if checked > 0 {
+        j.record_history_run(&crate::journal::HistoryRun {
+            level: level.name(),
+            started_at: &started,
+            checked,
+            drift,
+            problems,
+        })?;
+    }
+    let summary = report.history_check.get_or_insert_with(|| HistoryCheck {
+        level: level.name(),
+        scope: "lightweight check of already-confirmed messages; message content was NOT re-read and no confirmation was created or renewed",
+        ..HistoryCheck::default()
+    });
+    summary.checked += checked;
+    summary.drift += drift;
+    summary.problems += problems;
+    summary.passed += checked - drift - problems;
+    summary.size_unknown += size_unknown;
+    Ok(handled)
+}
+
 fn reconcile(r: &Record, d: &mut DestinationReader<'_>, validity: u32) -> Result<Entry> {
     let mut result = entry(
         &r.key,

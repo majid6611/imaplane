@@ -135,15 +135,51 @@ evidence are never rewritten. Without the flag, `migrate` behaves exactly as bef
 - The first real incremental run upgrades a schema-4 journal to schema 5 after a
   verified backup (`journal.sqlite3.v4.bak`). The upgrade is additive; `--dry-run`
   never upgrades or writes anything. An older IMAPLANE cannot open a schema-5 journal.
-- A run with nothing new writes nothing to the journal. A crash during discovery
-  cannot lose or duplicate a message: the scan is either fully recorded or absent.
+- A run with nothing new changes no transfer, scan or mapping record. Its only journal
+  write is one append-only summary row per folder for the history check (below). A crash
+  during discovery cannot lose or duplicate a message: the scan is either fully recorded
+  or absent.
 - It refuses, before any transfer, if a source or destination UIDVALIDITY changed
   or if the configured folder mappings differ from the job's. Use a new job then.
 - A folder that still has an unresolved `uncertain` transfer receives no new APPEND
   (reported as `blocked_by_uncertain`); other folders continue. Resolve, recover or
-  skip the uncertain message, then rerun.
-- This phase still reads back every previously transferred message on each run.
-  Messages deleted from the source after transfer are left alone.
+  skip the uncertain message, then rerun. This is a difference from ordinary
+  `migrate`, which (unchanged) keeps copying the remaining planned messages of such a
+  folder after reporting the uncertain one: every further append raises the number of
+  destination candidates that must be examined to resolve it, and a scheduled
+  incremental run would repeat that every night, so only `--incremental` stops.
+- Messages deleted from the source after transfer are left alone.
+
+#### How much of the history is re-checked (`--verify-history`)
+
+Already-confirmed messages are not downloaded again by default. Three levels are
+kept strictly apart and every report names the level it used:
+
+| Level | What it reads | Proves | Does not prove |
+|---|---|---|---|
+| `existence` | the destination UID list | the UID still exists | content, size, date, flags |
+| `metadata` (default) | `UID FETCH (FLAGS INTERNALDATE RFC822.SIZE)`, no bodies | INTERNALDATE equal; size equal when a full check recorded it; flags compared | the content hash |
+| `full` | every body, SHA-256 | content, INTERNALDATE, flags | nothing about later changes |
+
+Only a full read-back creates or renews a `confirmed` result: new transfers, any
+message not yet confirmed or demoted, `verify`, ordinary `migrate`, and
+`--verify-history full`. A lightweight check never writes a confirmation. For
+example, a destination message whose bytes were replaced by different bytes of
+the same length is not noticed by `existence` or `metadata`; `verify` or
+`--verify-history full` finds it. A lightweight pass reports its level and counts
+(`history_check`), not "confirmed", and each problem entry shows when the content
+was last proven by a full check, or `unknown` for anything confirmed before schema
+5 (no time is ever invented). A missing destination message, an INTERNALDATE or
+known-size mismatch, or a content mismatch demotes that record to `accepted`
+(evidence appended, nothing re-uploaded, exit status 2) and a full check judges
+it again on the next run.
+
+**Flag-only differences are drift**, in `migrate`, `verify` and `migrate
+--incremental` alike: a destination message whose content and INTERNALDATE are
+verified but whose flags differ from the journal (for example read or flagged in
+the destination mailbox after the copy) is listed as `drift`, counted, and left
+`confirmed`. Drift does not make a run incomplete. Before its first confirmation a
+message's flags must still match.
 A new state directory starts an independent copy and can duplicate mail already
 copied by another job. Do not discard state to resolve an uncertain transfer.
 
@@ -155,8 +191,10 @@ historical confirmation is retained without redundant journal writes. Observed
 verification failures durably downgrade it; offline status remains historical
 evidence, especially if a new verification was interrupted. Planned records may
 continue copying. Source UIDVALIDITY changes stop migration. Destination
-UIDVALIDITY changes, missing messages, changed bytes, dates or flags are reported;
-IMAPLANE does not overwrite or automatically recreate those destination messages.
+UIDVALIDITY changes, missing messages, changed bytes and changed dates are reported
+as problems (the record is demoted to `accepted`, never re-uploaded); a flag-only
+difference on a message whose content is verified is reported as drift and the record
+stays confirmed. IMAPLANE does not overwrite or automatically recreate destination messages.
 
 Each upload is committed as **uncertain before any APPEND bytes are sent**. A
 successful reply with APPENDUID is **accepted**. It becomes **confirmed** only

@@ -32,7 +32,7 @@ CREATE TABLE verification_events (
     folder TEXT NOT NULL,
     validity INTEGER NOT NULL,
     uid INTEGER NOT NULL,
-    level TEXT NOT NULL CHECK(level IN ('full')),
+    level TEXT NOT NULL CHECK(level IN ('existence','metadata','full')),
     result TEXT NOT NULL,
     size INTEGER,
     observed_at TEXT NOT NULL,
@@ -95,7 +95,40 @@ pub(crate) struct AppendMetadata<'a> {
     pub baseline: (u32, u32),
 }
 
-pub struct Journal(Connection);
+pub struct Journal(Connection, Evidence);
+
+/// Verification evidence not yet written. Only full-content successes for records that are
+/// already confirmed are buffered (they renew evidence but change no state); every state change
+/// and every problem is written in its own transaction. Losing buffered rows in a crash costs
+/// evidence, never correctness: nothing is claimed that is not durable.
+#[derive(Default)]
+struct Evidence {
+    ready: std::cell::Cell<Option<bool>>,
+    pending: Vec<PendingEvent>,
+}
+struct PendingEvent {
+    key: MessageKey,
+    size: Option<u64>,
+    detail: String,
+    observed_at: String,
+}
+const EVIDENCE_FLUSH_AT: usize = 256;
+
+/// The most recent full (SHA-256) verification that succeeded for a message, if one was recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullVerification {
+    pub observed_at: String,
+    pub size: Option<u64>,
+}
+
+/// A summary of one lightweight (existence or metadata) pass over already-confirmed records.
+pub struct HistoryRun<'a> {
+    pub level: &'a str,
+    pub started_at: &'a str,
+    pub checked: u64,
+    pub drift: u64,
+    pub problems: u64,
+}
 
 impl Journal {
     /// Existing journals only. A status typo must not create a new empty job.
@@ -153,7 +186,7 @@ impl Journal {
         if !SUPPORTED_SCHEMAS.contains(&version) {
             bail!("unsupported journal schema {version}");
         }
-        Ok(Self(conn))
+        Ok(Self(conn, Evidence::default()))
     }
 
     fn configure(mut conn: Connection, path: Option<&Path>) -> Result<Self> {
@@ -208,7 +241,7 @@ impl Journal {
             crate::fault::point("after_skip_schema_upgrade");
         }
         conn.pragma_update(None, "trusted_schema", false)?;
-        Ok(Self(conn))
+        Ok(Self(conn, Evidence::default()))
     }
 
     pub(crate) fn reject_append(
@@ -252,6 +285,8 @@ impl Journal {
     /// stored binding, and the upgrade is refused (nothing changed) if the journal's evidence names
     /// a folder the binding does not.
     pub fn upgrade_to_v5(&mut self, path: &Path) -> Result<bool> {
+        // Whether evidence tables exist changes with this call; never trust an earlier answer.
+        self.1.ready.set(None);
         let version: i64 = self
             .0
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -735,13 +770,41 @@ impl Journal {
         uid: u32,
         fingerprint: &str,
     ) -> Result<()> {
+        self.confirm_verified(key, validity, uid, fingerprint, None)
+    }
+
+    /// The only transition that creates `confirmed`. It is reached only after a full SHA-256
+    /// read-back, and on a schema-5 journal it appends the matching `full`/`ok` evidence event in
+    /// the same transaction (so the observed size is durable exactly when the state is).
+    pub fn confirm_verified(
+        &mut self,
+        key: &MessageKey,
+        validity: u32,
+        uid: u32,
+        fingerprint: &str,
+        size: Option<u64>,
+    ) -> Result<()> {
         crate::fault::point("before_confirm");
-        let count = self.0.execute(
+        let evidence = self.evidence_ready()?;
+        let tx = self.0.transaction()?;
+        let count = tx.execute(
             "UPDATE transfers SET state='confirmed' WHERE folder=?1 AND uid_validity=?2 AND uid=?3
              AND state='accepted' AND destination_validity=?4 AND destination_uid=?5 AND fingerprint=?6",
             params![key.folder, key.uid_validity, key.uid, validity, uid, fingerprint],
         ).context("persist content verification")?;
         require_one(count)?;
+        if evidence {
+            insert_event(
+                &tx,
+                key,
+                "full",
+                "ok",
+                size,
+                "content, INTERNALDATE and flags matched; record confirmed",
+                &chrono::Utc::now().to_rfc3339(),
+            )?;
+        }
+        tx.commit()?;
         crate::fault::point("after_confirm");
         Ok(())
     }
@@ -889,6 +952,172 @@ impl Journal {
         crate::fault::point("before_invalidate");
         self.0.execute("UPDATE transfers SET state='accepted' WHERE folder=?1 AND uid_validity=?2 AND uid=?3 AND state='confirmed'",params![key.folder,key.uid_validity,key.uid])?;
         crate::fault::point("after_invalidate");
+        Ok(())
+    }
+
+    /// Demote a `confirmed` record to `accepted` because a check observed a real problem, and
+    /// append the evidence (level, result, observed size) in the same transaction on schema 5.
+    /// Nothing is deleted and nothing is re-uploaded: the destination identity stays recorded.
+    pub fn demote(
+        &mut self,
+        key: &MessageKey,
+        level: &str,
+        result: &str,
+        detail: &str,
+        size: Option<u64>,
+    ) -> Result<()> {
+        crate::fault::point("before_invalidate");
+        let evidence = self.evidence_ready()?;
+        let tx = self.0.transaction()?;
+        tx.execute("UPDATE transfers SET state='accepted' WHERE folder=?1 AND uid_validity=?2 AND uid=?3 AND state='confirmed'",params![key.folder,key.uid_validity,key.uid])?;
+        if evidence {
+            insert_event(
+                &tx,
+                key,
+                level,
+                result,
+                size,
+                detail,
+                &chrono::Utc::now().to_rfc3339(),
+            )?;
+        }
+        tx.commit()?;
+        crate::fault::point("after_invalidate");
+        Ok(())
+    }
+
+    /// True when this journal can hold verification evidence: schema 5 with the current table
+    /// definition. A schema-5 journal made by a pre-release build (events limited to `full`) is
+    /// reported as an error by `require_evidence`, never silently treated as evidence-free.
+    pub fn evidence_ready(&self) -> Result<bool> {
+        if let Some(ready) = self.1.ready.get() {
+            return Ok(ready);
+        }
+        let ready = if self.has_table("verification_events")? {
+            let ddl: String = self.0.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='verification_events'",
+                [],
+                |r| r.get(0),
+            )?;
+            if !ddl.contains("'existence'") {
+                bail!(
+                    "this schema-5 journal was created by a pre-release build whose evidence tables cannot record lightweight checks; start a new job"
+                );
+            }
+            true
+        } else {
+            false
+        };
+        self.1.ready.set(Some(ready));
+        Ok(ready)
+    }
+
+    /// A full-content check passed for an already-confirmed record. This renews evidence only; it
+    /// changes no state. Buffered and written in batches (see `Evidence`).
+    pub fn note_full_ok(
+        &mut self,
+        key: &MessageKey,
+        size: Option<u64>,
+        detail: &str,
+    ) -> Result<()> {
+        if !self.evidence_ready()? {
+            return Ok(());
+        }
+        self.1.pending.push(PendingEvent {
+            key: key.clone(),
+            size,
+            detail: detail.into(),
+            observed_at: chrono::Utc::now().to_rfc3339(),
+        });
+        if self.1.pending.len() >= EVIDENCE_FLUSH_AT {
+            self.flush_evidence()?;
+        }
+        Ok(())
+    }
+
+    /// Write buffered renewal evidence in one transaction.
+    pub fn flush_evidence(&mut self) -> Result<()> {
+        if self.1.pending.is_empty() {
+            return Ok(());
+        }
+        let tx = self.0.transaction()?;
+        for e in &self.1.pending {
+            insert_event(&tx, &e.key, "full", "ok", e.size, &e.detail, &e.observed_at)?;
+        }
+        crate::fault::point("evidence_before_commit");
+        tx.commit()?;
+        crate::fault::point("evidence_after_commit");
+        self.1.pending.clear();
+        Ok(())
+    }
+
+    /// Latest successful full verification per message of one folder, from the event table. A
+    /// message with no such event (anything confirmed before schema 5) is simply absent: its
+    /// verification time is unknown and is never reconstructed.
+    pub fn last_full_verifications(
+        &self,
+        folder: &str,
+    ) -> Result<std::collections::HashMap<(u32, u32), FullVerification>> {
+        let mut map = std::collections::HashMap::new();
+        if !self.evidence_ready()? {
+            return Ok(map);
+        }
+        let mut stmt = self.0.prepare(
+            "SELECT validity,uid,observed_at,size FROM verification_events
+             WHERE folder=?1 AND level='full' AND result='ok' ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map([folder], |r| {
+            Ok((
+                r.get::<_, u32>(0)?,
+                r.get::<_, u32>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (v, u, at, size) = row?;
+            let size = size.and_then(|s| u64::try_from(s).ok());
+            // A later event without a size (legacy path) must not erase a size learned earlier.
+            let known = map.get(&(v, u)).and_then(|f: &FullVerification| f.size);
+            map.insert(
+                (v, u),
+                FullVerification {
+                    observed_at: at,
+                    size: size.or(known),
+                },
+            );
+        }
+        Ok(map)
+    }
+
+    /// Records of one folder that are currently `confirmed` and have a destination identity.
+    pub fn confirmed_records(&self, folder: &str, validity: u32) -> Result<Vec<Record>> {
+        let mut stmt = self.0.prepare("SELECT folder,uid_validity,uid,fingerprint,state,destination_validity,destination_uid,date,flags,omitted,baseline_validity,baseline_next FROM transfers WHERE folder=?1 AND uid_validity=?2 AND state='confirmed' AND destination_uid IS NOT NULL ORDER BY uid")?;
+        let rows = stmt.query_map(params![folder, validity], read_record)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Summarise one lightweight pass (counts and times only; per-message rows are written solely
+    /// for problems). Nothing here can change a transfer state.
+    pub fn record_history_run(&mut self, run: &HistoryRun<'_>) -> Result<()> {
+        if !self.evidence_ready()? {
+            return Ok(());
+        }
+        let tx = self.0.transaction()?;
+        tx.execute(
+            "INSERT INTO verification_runs (level,started_at,finished_at,checked,drift,problems) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                run.level,
+                run.started_at,
+                chrono::Utc::now().to_rfc3339(),
+                run.checked as i64,
+                run.drift as i64,
+                run.problems as i64
+            ],
+        )?;
+        crate::fault::point("history_run_before_commit");
+        tx.commit()?;
+        crate::fault::point("history_run_after_commit");
         Ok(())
     }
 
@@ -1091,6 +1320,38 @@ fn backup_before_upgrade(conn: &Connection, path: &Path, version: i64) -> Result
 }
 
 /// Union of the plan (snapshot and scans) and every transfer row for one folder and validity.
+fn insert_event(
+    conn: &Connection,
+    key: &MessageKey,
+    level: &str,
+    result: &str,
+    size: Option<u64>,
+    detail: &str,
+    observed_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO verification_events (folder,validity,uid,level,result,size,observed_at,detail) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            key.folder,
+            key.uid_validity,
+            key.uid,
+            level,
+            result,
+            size.map(|s| s as i64),
+            observed_at,
+            detail
+        ],
+    )?;
+    Ok(())
+}
+
+impl Drop for Journal {
+    fn drop(&mut self) {
+        // Best effort only; a failure here loses renewal evidence, never state.
+        let _ = self.flush_evidence();
+    }
+}
+
 fn known_in(
     conn: &Connection,
     folder: &str,

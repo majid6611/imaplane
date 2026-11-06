@@ -112,6 +112,22 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-') as tmp:
                 h.update(p.name.encode()); h.update(p.read_bytes())
             return h.hexdigest()
 
+        def core(self):
+            """Digest of every journal table except the append-only run summaries: a repeated
+            incremental run adds one summary row per folder it re-checked and nothing else."""
+            h = hashlib.sha256()
+            c = sqlite3.connect(self.journal)
+            try:
+                h.update(repr(c.execute('PRAGMA user_version').fetchall()).encode())
+                for (name,) in c.execute("select name from sqlite_master where type='table' and name not like 'sqlite_%' and name<>'verification_runs' order by name").fetchall():
+                    h.update(name.encode()); h.update(repr(c.execute(f'select * from "{name}" order by rowid').fetchall()).encode())
+            finally:
+                c.close()
+            return h.hexdigest()
+
+        def runs(self): return self.sql('select level,checked,drift,problems from verification_runs order by run_id') if 'verification_runs' in self.tables() else []
+        def events(self): return self.sql('select uid,level,result,size from verification_events order by rowid') if 'verification_events' in self.tables() else []
+
         def check(self, recovers=0):
             """Stress-harness invariants; fixture-side expunges are restored for the source comparison."""
             live = [m if m is not None else self.ever[i] for i, m in enumerate(self.server.messages['source'])]
@@ -174,14 +190,17 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-') as tmp:
         assert e.sql('select count(*) from job_folders')[0][0] == 1
         e.check()
         # Repeated runs with nothing new change nothing in the journal and send nothing.
-        done = e.digest()
-        for _ in range(2):
+        done = e.core(); runs = len(e.runs()); events = e.events()
+        for n in (1, 2):
             code, rep, _ = e.inc()
             assert code == 0 and rep['complete'] and rep['discovery'][0]['new_uids'] == [] and rep['discovery'][0]['scan_generation'] is None, rep
-            assert e.digest() == done and e.appends() == 5
+            assert e.core() == done and e.appends() == 5 and e.events() == events
+            # The only write is one append-only summary of the lightweight history check.
+            assert len(e.runs()) == runs + n and e.runs()[-1] == ('metadata', 5, 0, 0), e.runs()
+        full = e.digest()
         code, dry, _ = e.inc('--dry-run')
         assert code == 0 and dry['would_upgrade_to_schema_5'] is False and dry['folders'][0]['new_uids'] == []
-        assert e.digest() == done
+        assert e.digest() == full
         # A later arrival becomes generation 2; the first scan and the snapshot are untouched.
         e.arrive(1)
         code, rep, _ = e.inc()
@@ -227,9 +246,9 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-') as tmp:
                 assert e.states() == ['confirmed'] * 5 and e.appends() == 5 and e.server.messages['destination'] == e.ever
                 assert e.scans() == [(1, [4, 5])], 'exactly one scan, never duplicated or lost'
                 assert e.version() == 5
-                done = e.digest()
+                done = e.core()
                 code, rep, _ = e.inc()
-                assert code == 0 and e.digest() == done and e.appends() == 5
+                assert code == 0 and e.core() == done and e.appends() == 5
                 e.check()
 
     for point in ('after_plan', 'after_acknowledge', 'after_confirm'):
@@ -258,7 +277,9 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-') as tmp:
             assert code == 2 and not rep['complete'], (code, rep)
             assert rep['discovery'][0]['new_uids'] == ([5] if run_number == 0 else [])
             results = {x['source_uid']: x['result'] for x in rep['entries']}
-            assert results == {1: 'confirmed', 2: 'uncertain', 3: 'blocked_by_uncertain', 4: 'blocked_by_uncertain', 5: 'blocked_by_uncertain'}, results
+            # UID 1 is confirmed history: re-checked by metadata only, so it has no per-message entry.
+            assert results == {2: 'uncertain', 3: 'blocked_by_uncertain', 4: 'blocked_by_uncertain', 5: 'blocked_by_uncertain'}, results
+            assert rep['history_check']['level'] == 'metadata' and rep['history_check']['checked'] == 1, rep['history_check']
             blocked = [x for x in rep['entries'] if x['result'] == 'blocked_by_uncertain']
             assert all('NOT transferred' in x['detail'] and '[2]' in x['detail'] for x in blocked)
             assert 'no new APPEND' in err and e.appends() == 2 and len(e.server.messages['destination']) == 2
@@ -336,11 +357,12 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-') as tmp:
         code, _, _ = e.inc(fault=('scan_after_commit', 1))
         assert code == -signal.SIGKILL
         e.expunge(4)
-        for _ in range(2):
+        for n in (1, 2):
             code, rep, err = e.inc()
             assert rep is not None, (code, err[-500:])
             results = {x['source_uid']: x['result'] for x in rep['entries']}
-            assert code == 2 and not rep['complete'] and results[4] == 'source_changed' and results[5] == 'confirmed', (code, results)
+            assert code == 2 and not rep['complete'] and results[4] == 'source_changed', (code, results)
+            assert results.get(5) == ('confirmed' if n == 1 else None), results   # UID 5 is history on the second run
         assert e.appends() == 4 and e.states() == ['confirmed'] * 4
         e.check()
 

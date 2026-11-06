@@ -194,6 +194,11 @@ class ProtocolServer:
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); self.ctx.load_cert_chain(cert,key)
         self.stopped = False; self.errors = []
         self.missing_inventory = False
+        self.body_fetches = {'source': 0, 'destination': 0}  # UID FETCH requests that read a body
+        self.meta_fetches = {'source': 0, 'destination': 0}  # metadata-only UID FETCH requests
+        self.dest_flags = {}   # destination uid -> flag text served instead of \\Seen
+        self.dest_dates = {}   # destination uid -> INTERNALDATE text served instead of the default
+        self.dest_size_delta = {}  # destination uid -> bytes added to the RFC822.SIZE of metadata fetches
         self.failed_body = False
         self.events = []
         self.injected = False
@@ -311,6 +316,18 @@ class ProtocolServer:
                             uids = [i+1 for i in range(upper) if self.messages[user][i] is not None]
                             for uid in (uids[:-1] if self.missing_inventory and user == 'source' else uids):
                                 client.sendall(b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()+b')\r\n')
+                        elif re.fullmatch(rb'FETCH [\d:,]+ \(UID FLAGS INTERNALDATE RFC822\.SIZE\)', args[0]):
+                            self.meta_fetches[user] += 1
+                            wanted = set()
+                            for part in args[0].split()[1].split(b','):
+                                lo, _, hi = part.partition(b':')
+                                wanted.update(range(int(lo), int(hi or lo) + 1))
+                            for uid in sorted(wanted):
+                                if uid <= len(self.messages[user]) and self.messages[user][uid-1] is not None:
+                                    size = len(self.messages[user][uid-1]) + (self.dest_size_delta.get(uid, 0) if user == 'destination' else 0)
+                                    flags = self.dest_flags.get(uid, b'\\Seen') if user == 'destination' else b'\\Seen'
+                                    date = self.dest_dates.get(uid, b'02-Jan-2020 03:04:05 +0000') if user == 'destination' else b'02-Jan-2020 03:04:05 +0000'
+                                    client.sendall(b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()+b' FLAGS ('+flags+b') INTERNALDATE "'+date+b'" RFC822.SIZE '+str(size).encode()+b')\r\n')
                         else:
                             match = re.fullmatch(rb'FETCH (\d+) (.*)',args[0])
                             assert match, args
@@ -324,6 +341,7 @@ class ProtocolServer:
                                     client.sendall(prefix+b' RFC822.SIZE '+str(len(body) + (1 if self.bad_size and user == 'source' and uid == 1 else 0)).encode()+b')\r\n')
                                 else:
                                     assert request == b'(UID FLAGS INTERNALDATE BODY.PEEK[])'
+                                    self.body_fetches[user] += 1
                                     if (not self.failed_body and mode.endswith('source-fault') and user == 'source') or (mode.endswith('destination-fault') and user == 'destination'):
                                         self.failed_body = True
                                         if user == 'source':
@@ -343,7 +361,9 @@ class ProtocolServer:
                                             self.listener = listener; self.stopped = False; self.serve()
                                         threading.Thread(target=restart,daemon=True).start()
                                         return
-                                    payload = prefix+b' FLAGS (\\Seen) INTERNALDATE "02-Jan-2020 03:04:05 +0000" BODY[] {'+str(len(body)).encode()+b'}\r\n'+body+b')\r\n'
+                                    flags = self.dest_flags.get(uid, b'\\Seen') if user == 'destination' else b'\\Seen'
+                                    date = self.dest_dates.get(uid, b'02-Jan-2020 03:04:05 +0000') if user == 'destination' else b'02-Jan-2020 03:04:05 +0000'
+                                    payload = prefix+b' FLAGS ('+flags+b') INTERNALDATE "'+date+b'" BODY[] {'+str(len(body)).encode()+b'}\r\n'+body+b')\r\n'
                                     if user == 'source' and self.stall_source_fetch_at is not None and len(payload) > self.stall_source_fetch_at:
                                         client.sendall(payload[:self.stall_source_fetch_at]); time.sleep(30); return
                                     if user == 'source' and self.truncate_source_fetch_at is not None and len(payload) > self.truncate_source_fetch_at:
@@ -588,12 +608,15 @@ def main():
             after_arrival = snapshot(src,folders)
             run('migrate','--config',cfg,'--json')
             assert snapshot(dst, folders) == copied
-            # Verification catches destination flag changes, and migrate will not re-upload.
+            # A destination flag change is drift: reported by verify and migrate, never a demotion,
+            # and migrate does not re-upload.
             victim = next(e['destination_uid'] for e in first['entries'] if e['source_folder'] == 'INBOX')
             dst.select('INBOX'); dst.uid('STORE', str(victim), '+FLAGS.SILENT', '(\\Seen)')
-            check = run('verify','--config',cfg,'--json',code=2)
-            assert any(e['result'] == 'mismatch' for e in check['entries'])
-            run('migrate','--config',cfg,'--json',code=2)
+            check = run('verify','--config',cfg,'--json')
+            assert any(e['result'] == 'drift' and e['level'] == 'full' for e in check['entries']) and check['complete']
+            assert not any(e['result'] == 'mismatch' for e in check['entries'])
+            again = run('migrate','--config',cfg,'--json')
+            assert any(e['result'] == 'drift' for e in again['entries'])
             assert len(snapshot(dst, ['INBOX'])['INBOX'][1]) == 3
             dst.select('INBOX'); dst.uid('STORE', str(victim), '-FLAGS.SILENT', '(\\Seen)')
             run('verify','--config',cfg,'--json')
