@@ -53,6 +53,8 @@ impl Job {
             bail!("no migration journal exists");
         };
         let new_folders = journal.check_binding_mode(&binding, allow_new)?;
+        // A development-era schema-5 journal is refused here, before any network use or write.
+        journal.require_compatible_evidence()?;
         Ok(Self {
             journal,
             new_folders,

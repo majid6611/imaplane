@@ -295,14 +295,30 @@ with tempfile.TemporaryDirectory(prefix='imaplane-add-') as tmp:
         code, rep, _ = e.inc(cfg=cfg)
         assert code == 0 and e.scans_of(EX) == [(1, []), (2, [1, 2])] and e.dest_extra(EX) == e.bodies[EX]
 
-    @check('an existing destination folder is reported, its mail is left alone, and copies are appended after it')
+    @check('an existing destination folder is reported; mail in it is warned about, left alone, and copies are appended after it')
     @with_ext('destexists', 2)
     def _(e):
-        migrate_ok(e); e.add_source(EX, 2); pre = b'Subject: already here\r\n\r\nx\r\n'
-        e.server.extra['destination'][EX] = [pre]
-        code, rep, err = e.inc('--add-new-folders', cfg=e.cfg_for((EX, EX)))
-        assert code == 0 and rep['added_folders'][0]['destination_exists'] is True, (code, rep, err[-300:])
-        assert e.dest_extra(EX) == [pre] + e.bodies[EX]
+        migrate_ok(e); e.add_source(EX, 2); pre = [b'Subject: already here\r\n\r\nx\r\n', b'Subject: and here\r\n\r\ny\r\n']
+        e.server.extra['destination'][EX] = list(pre)
+        cfg = e.cfg_for((EX, EX)); before = e.digest()
+        code, dry, err = e.inc('--add-new-folders', '--dry-run', cfg=cfg)
+        w = dry['would_add_folders'][0]
+        assert code == 0 and w['destination_existing_messages'] == 2 and '2 message(s)' in w['warning'] and e.digest() == before, (code, dry)
+        code, rep, err = e.inc('--add-new-folders', cfg=cfg)
+        a = rep['added_folders'][0]
+        assert code == 0 and a['destination_exists'] is True and a['destination_existing_messages'] == 2, (code, rep, err[-300:])
+        assert len(rep['warnings']) == 1 and '2 message(s)' in rep['warnings'][0] and 'cannot attribute' in rep['warnings'][0] and 'WARNING' in err
+        assert e.dest_extra(EX) == pre + e.bodies[EX], 'pre-existing mail untouched, copies appended after it'
+        assert e.state_of(EX) == ['confirmed'] * 2
+        # the warning is printed in the text report too
+        e.server.errors.clear(); e.arrive_extra(EX, 0)
+        text = subprocess.run([str(binary), 'migrate', '--incremental', '--add-new-folders', '--config', str(cfg)], capture_output=True, text=True, timeout=120)
+        assert text.returncode == 0 and 'Verification this run:' in text.stdout
+        # an existing but EMPTY destination folder is reported as existing, without a warning
+        e.add_source('Quiet', 1); e.server.extra['destination']['Quiet'] = []
+        code, rep, _ = e.inc('--add-new-folders', cfg=e.cfg_for((EX, EX), ('Quiet', 'Quiet'), tag='q'))
+        q = [a for a in rep['added_folders'] if a['source'] == 'Quiet'][0]
+        assert code == 0 and q['destination_exists'] is True and q['destination_existing_messages'] == 0 and 'warnings' not in rep
 
     @check('removal, renaming, remapping and conflicting or duplicate mappings are refused on schema 4 and 5, also in dry run, changing nothing')
     @with_ext('refuse', 3)

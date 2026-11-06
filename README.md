@@ -118,6 +118,33 @@ The first run saves each configured folder's UID set. New arrivals are outside
 that job's snapshot, even after resume, unless you ask for them explicitly. This
 is not continuous synchronization.
 
+### What a report claims, by level
+
+Every `migrate` and `verify` report (text and JSON) ends with a **verification**
+statement that never lets a lighter check pass for a full one:
+
+```
+Verification this run: 2 message(s) proven by a full SHA-256 read-back in this run;
+  5 checked by metadata only and 0 by existence only (content NOT re-read);
+  1 flag-drift, 0 uncertain, 0 blocked by an uncertain transfer, 0 problem(s)
+  Folder "INBOX": 7 confirmed; oldest recorded full verification: 2026-...; newest: 2026-...;
+    no recorded full-verification time: 5
+```
+
+- `fully_verified_this_run`: messages whose body was read back from the destination and
+  compared by SHA-256 in this run. Nothing else is ever counted here.
+- `metadata_checked_only` / `existence_checked_only`: already-confirmed messages checked
+  without reading their content (`--verify-history`, incremental runs only).
+- `flag_drift`, `uncertain`, `blocked_by_uncertain`, `problems`: counted separately.
+- Per folder, the oldest and newest **recorded** full verification, and how many
+  confirmed messages have **no recorded time** (everything confirmed before schema 5;
+  a time is never invented). `complete: true` means nothing is unfinished or wrong, not
+  that all content was re-verified in this run: read the statement.
+- `imaplane status` is offline and prints the same per-folder record. It checks nothing live.
+- `warnings` lists conditions worth reading even after a successful run, for example an
+  added destination folder that already held mail this job did not copy, or an ordinary
+  `migrate` continuing past an unresolved uncertain transfer.
+
 ### Catching up on newly arrived mail (`--incremental`)
 
 ```sh
@@ -148,6 +175,10 @@ evidence are never rewritten. Without the flag, `migrate` behaves exactly as bef
   folder after reporting the uncertain one: every further append raises the number of
   destination candidates that must be examined to resolve it, and a scheduled
   incremental run would repeat that every night, so only `--incremental` stops.
+  Ordinary `migrate` now prints a warning when it does this.
+- A schema-5 journal created by an earlier development build (its evidence table cannot
+  record lightweight checks) is refused by every command that would use it, before any
+  network access or write; `status` still describes it. Schema 5 was never released.
 - Messages deleted from the source after transfer are left alone.
 
 #### Adding folders to an existing job (`--add-new-folders`)
@@ -181,7 +212,10 @@ cannot become a permanent mapping. The flag works only with `--incremental`.
   shows `would_add_folders`; it upgrades, writes and sends nothing.
 - A missing source folder, or a changed source UIDVALIDITY in an added folder, is
   refused before anything is written. If the destination folder already exists its
-  mail is left alone and reported (`destination_exists`); copies are appended after it.
+  mail is left alone; the report says how many messages it held
+  (`destination_existing_messages`) and prints a **warning** when there are any, because
+  the job did not copy them, cannot attribute them, and they are never compared with
+  anything. Copies are appended after them.
 - Ordinary `migrate` and `verify` read a job containing added folders and keep
   its plan, but never add or discover anything. A folder with an unresolved
   `uncertain` transfer blocks new APPENDs in that folder only, as before.

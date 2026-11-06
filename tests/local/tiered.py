@@ -353,6 +353,101 @@ with tempfile.TemporaryDirectory(prefix='imaplane-tier-') as tmp:
         code, dry, _ = e.inc('--dry-run', '--verify-history', 'full')
         assert dry['history_check_level'] == 'full' and e.digest() == before
 
+    def text_run(e, *args):
+        env = os.environ.copy(); env.pop('IMAPLANE_FAULT_POINT', None)
+        p = subprocess.run([str(binary), *args, '--config', str(e.cfg)], env=env, capture_output=True, text=True, timeout=180)
+        e.server.errors.clear()
+        return p
+
+    @check('reports and status say which level proved what: full read-backs this run, metadata-only checks, drift, oldest full verification')
+    @with_env('levels', 5)
+    def _(e):
+        migrate_ok(e); e.arrive(2)
+        code, rep, _ = e.inc()
+        v = rep['verification']
+        assert (v['fully_verified_this_run'], v['metadata_checked_only'], v['existence_checked_only'], v['flag_drift'], v['uncertain'], v['problems']) == (2, 5, 0, 0, 0, 0), v
+        assert 'NOT re-read' in v['statement'] and '2 message(s) proven by a full SHA-256' in v['statement']
+        f = v['folders'][0]
+        assert (f['confirmed'], f['full_verification_recorded'], f['full_verification_unknown']) == (7, 2, 5), f
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        assert f['oldest_full_verification'] and f['oldest_full_verification'] <= f['newest_full_verification']
+        assert datetime.datetime.fromisoformat(f['newest_full_verification']) <= now, 'a recorded time can never lie in the future'
+        # a lightweight rerun proves nothing new and says so; the oldest time does not move
+        code, rep, _ = e.inc('--verify-history', 'existence')
+        v = rep['verification']
+        assert (v['fully_verified_this_run'], v['metadata_checked_only'], v['existence_checked_only']) == (0, 0, 7) and v['folders'][0]['oldest_full_verification'] == f['oldest_full_verification'], v
+        e.server.dest_flags[1] = b'\\Seen \\Flagged'
+        code, rep, _ = e.inc()
+        v = rep['verification']
+        assert (v['fully_verified_this_run'], v['metadata_checked_only'], v['flag_drift']) == (0, 7, 1), v
+        # a full pass proves everything and replaces the unknown times
+        code, rep, _ = e.inc('--verify-history', 'full')
+        v = rep['verification']
+        assert (v['fully_verified_this_run'], v['metadata_checked_only'], v['flag_drift']) == (7, 0, 1), v
+        f2 = v['folders'][0]
+        assert (f2['full_verification_recorded'], f2['full_verification_unknown']) == (7, 0) and f2['oldest_full_verification'] > f['oldest_full_verification']
+        # ordinary verify is a full pass and reports like one
+        code, rep, _ = e.run('verify')
+        assert rep['verification']['fully_verified_this_run'] == 7 and rep['verification']['metadata_checked_only'] == 0
+        # text reports: the statement, the per-folder times; never a bare "verified"
+        p = text_run(e, 'migrate', '--incremental')
+        assert p.returncode == 0 and 'Verification this run: 0 message(s) proven by a full SHA-256 read-back' in p.stdout, p.stdout
+        assert '7 checked by metadata only' in p.stdout and 'content NOT re-read' in p.stdout and 'oldest recorded full verification: 20' in p.stdout, p.stdout
+        # status: offline, same distinction, per folder
+        s = subprocess.run([str(binary), 'status', '--state', str(e.journal), '--json'], capture_output=True, text=True)
+        j = json.loads(s.stdout)
+        assert j['confirmed'] == 7 and j['verification']['evidence'] == 'recorded' and j['verification']['folders'][0]['full_verification_unknown'] == 0
+        s = subprocess.run([str(binary), 'status', '--state', str(e.journal)], capture_output=True, text=True)
+        assert 'does not check anything live' in s.stdout and 'oldest recorded full verification: 20' in s.stdout, s.stdout
+
+    @check('status on a schema-4 job reports every full-verification time as unknown, never an invented one')
+    @with_env('statusv4', 3)
+    def _(e):
+        migrate_ok(e)
+        j = json.loads(subprocess.run([str(binary), 'status', '--state', str(e.journal), '--json'], capture_output=True, text=True).stdout)
+        f = j['verification']['folders'][0]
+        assert j['verification']['evidence'] == 'none' and (f['confirmed'], f['full_verification_unknown'], f['oldest_full_verification'], f['newest_full_verification']) == (3, 3, None, None), j['verification']
+        code, rep, _ = e.run('verify')                      # still schema 4: nothing can be recorded
+        f = rep['verification']['folders'][0]
+        assert rep['verification']['fully_verified_this_run'] == 3 and f['oldest_full_verification'] is None and f['full_verification_unknown'] == 3 and e.version() == 4
+
+    @check('a development-era schema-5 journal is refused up front by every command; status describes it; nothing changes')
+    @with_env('devjournal', 3)
+    def _(e):
+        migrate_ok(e); code, _, _ = e.inc(); assert e.version() == 5
+        c = sqlite3.connect(e.journal)
+        c.executescript("DROP TABLE verification_events; CREATE TABLE verification_events (folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL, level TEXT NOT NULL CHECK(level IN ('full')), result TEXT NOT NULL, size INTEGER, observed_at TEXT NOT NULL, detail TEXT NOT NULL);")
+        c.commit(); c.close()
+        before, wire, apps = e.digest(), len(e.server.events), e.appends()
+        for action, extra in (('verify', ()), ('migrate', ()), ('migrate', ('--incremental',)), ('migrate', ('--incremental', '--dry-run'))):
+            code, rep, err = e.run(action, extra=extra)
+            assert code == 1 and 'pre-release' in err and 'refused' in err, (action, extra, code, err[-300:])
+            assert e.digest() == before and e.appends() == apps and len(e.server.events) == wire, 'refusal must precede any network use or write'
+        s = subprocess.run([str(binary), 'status', '--state', str(e.journal), '--json'], capture_output=True, text=True)
+        j = json.loads(s.stdout)
+        assert s.returncode == 2 and j['confirmed'] == 3 and j['verification']['evidence'] == 'incompatible' and j['verification']['folders'][0]['full_verification_unknown'] == 3
+        s = subprocess.run([str(binary), 'status', '--state', str(e.journal)], capture_output=True, text=True)
+        assert s.returncode == 2 and 'incompatible' in s.stdout and e.digest() == before
+
+    @check('ordinary migrate keeps its behaviour with an uncertain record in the folder, but now warns; --incremental still blocks')
+    @with_env('uncwarn', 4)
+    def _(e):
+        code, _, _ = e.run('migrate', fault=('after_append_reply', 2))
+        assert code == -signal.SIGKILL and e.states() == ['confirmed', 'uncertain']
+        code, rep, err = e.run('migrate')
+        r = results(rep)
+        assert code == 2 and r[2] == 'uncertain' and r[3] == r[4] == 'confirmed', r        # unchanged: later messages are still copied
+        assert len(rep['warnings']) == 1 and 'unresolved uncertain' in rep['warnings'][0] and '1000' in rep['warnings'][0] and 'WARNING' in err
+        assert rep['verification']['uncertain'] == 1 and rep['verification']['fully_verified_this_run'] == 3
+        e2 = Env('uncwarn2', 4)
+        try:
+            code, _, _ = e2.run('migrate', fault=('after_append_reply', 2)); assert code == -signal.SIGKILL
+            code, rep, _ = e2.inc()
+            assert results(rep)[3] == results(rep)[4] == 'blocked_by_uncertain' and 'warnings' not in rep, results(rep)
+        finally:
+            e2.close()
+
     POINTS = [('before_history_fetch', 'metadata'), ('before_history_demote', 'metadata'), ('before_invalidate', 'metadata'),
               ('after_invalidate', 'metadata'), ('history_run_before_commit', 'metadata'), ('history_run_after_commit', 'metadata'),
               ('evidence_before_commit', 'full'), ('evidence_after_commit', 'full')]

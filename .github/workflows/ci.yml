@@ -45,6 +45,10 @@ jobs:
         run: |
           python3 tests/local/addfolders.py target/fault-tests/debug/imaplane
           IMAPLANE_TEST_STREAM_THRESHOLD=0 python3 tests/local/addfolders.py target/fault-tests/debug/imaplane
+      - name: Incremental randomized SIGKILL stress (arrivals, folder additions, interrupted scans)
+        run: |
+          python3 tests/local/incremental_stress.py --selftest
+          python3 tests/local/incremental_stress.py target/fault-tests/debug/imaplane --trials 6 --seed 20260101
       - name: Incremental migration with two folders on disposable Dovecot
         run: python3 tests/local/incremental_dovecot.py target/fault-tests/debug/imaplane
       - name: Schema 5 upgrade crash test and end-to-end compatibility

@@ -88,7 +88,33 @@ pub struct Report {
     /// Present only when `--add-new-folders` added folders to the job in this run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub added_folders: Vec<AddedFolder>,
+    /// Conditions an operator should read even when the run succeeded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// What this run proved and at which level (set when the run finishes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerificationSummary>,
     pub entries: Vec<Entry>,
+}
+/// What a run established, by level. Metadata and existence checks are counted separately and
+/// are never part of `fully_verified_this_run`.
+#[derive(Debug, Serialize, Default)]
+pub struct VerificationSummary {
+    /// Messages whose body was read back from the destination and compared by SHA-256 in this run.
+    pub fully_verified_this_run: u64,
+    /// Already-confirmed messages checked by size/date/flags only (content NOT re-read).
+    pub metadata_checked_only: u64,
+    /// Already-confirmed messages checked for existence only.
+    pub existence_checked_only: u64,
+    /// Flag-only differences on messages whose existence/metadata/content is otherwise intact.
+    pub flag_drift: u64,
+    pub uncertain: u64,
+    pub blocked_by_uncertain: u64,
+    /// Missing, changed or unreadable destination messages (demoted or still unconfirmed).
+    pub problems: u64,
+    pub statement: String,
+    /// Oldest and newest recorded full verification per folder (from the journal, after the run).
+    pub folders: Vec<crate::journal::FolderVerification>,
 }
 /// A folder added to an existing job, with the baseline that was recorded for it.
 #[derive(Debug, Serialize, Clone)]
@@ -101,6 +127,9 @@ pub struct AddedFolder {
     pub observed_uidnext: u32,
     /// The destination folder already existed (otherwise it is created before the first APPEND).
     pub destination_exists: bool,
+    /// Messages already in that destination folder. They did not come from this job, are not
+    /// attributed to it, and are never touched or compared.
+    pub destination_existing_messages: u32,
 }
 /// Outcome of discovery for one folder in an incremental run.
 #[derive(Debug, Serialize, Clone)]
@@ -127,6 +156,8 @@ impl Report {
             discovery: Vec::new(),
             history_check: None,
             added_folders: Vec::new(),
+            warnings: Vec::new(),
+            verification: None,
             entries: Vec::new(),
         }
     }
@@ -138,6 +169,56 @@ impl Report {
                 .entries
                 .iter()
                 .all(|e| e.result == "confirmed" || e.result == "drift");
+        let count =
+            |f: &dyn Fn(&Entry) -> bool| self.entries.iter().filter(|e| f(e)).count() as u64;
+        let mut v = VerificationSummary {
+            // A full read-back happened for "confirmed" and for drift found by the full level.
+            fully_verified_this_run: count(&|e| {
+                e.result == "confirmed" || (e.result == "drift" && e.level == Some("full"))
+            }),
+            flag_drift: count(&|e| e.result == "drift"),
+            uncertain: count(&|e| e.result == "uncertain"),
+            blocked_by_uncertain: count(&|e| e.result == "blocked_by_uncertain"),
+            problems: count(&|e| {
+                matches!(
+                    e.result.as_str(),
+                    "missing"
+                        | "mismatch"
+                        | "destination_changed"
+                        | "failed"
+                        | "verification_failed_permanent"
+                )
+            }),
+            ..VerificationSummary::default()
+        };
+        if let Some(h) = &self.history_check {
+            match h.level {
+                "metadata" => v.metadata_checked_only = h.checked,
+                "existence" => v.existence_checked_only = h.checked,
+                _ => {}
+            }
+        }
+        v.statement = format!(
+            "{} message(s) proven by a full SHA-256 read-back in this run; {} checked by metadata only and {} by existence only (content NOT re-read); {} flag-drift, {} uncertain, {} blocked by an uncertain transfer, {} problem(s)",
+            v.fully_verified_this_run,
+            v.metadata_checked_only,
+            v.existence_checked_only,
+            v.flag_drift,
+            v.uncertain,
+            v.blocked_by_uncertain,
+            v.problems
+        );
+        self.verification = Some(v);
+    }
+    /// Attach the journal's recorded full-verification times (oldest/newest per folder). Best effort:
+    /// a report must never fail because the overview could not be read.
+    fn attach_overview(&mut self, c: &Config) {
+        let path = c.state_dir.join("journal.sqlite3");
+        if let (Some(v), Ok(j)) = (self.verification.as_mut(), Journal::open_read_only(&path)) {
+            if let Ok(o) = j.verification_overview() {
+                v.folders = o.folders;
+            }
+        }
     }
 }
 fn entry(
@@ -556,6 +637,8 @@ struct Addition {
     next: u32,
     uids: Vec<u32>,
     destination_exists: bool,
+    /// Messages already in the destination folder (not from this job; never attributed or touched).
+    destination_messages: u32,
 }
 
 /// Read-only planning for `--add-new-folders`: a consistent, inventory-checked listing of each new
@@ -583,6 +666,11 @@ fn plan_additions(
         if mapped.is_some_and(|f| !f.selectable) {
             bail!("destination folder {d:?} exists but cannot be selected; refusing to add it");
         }
+        let destination_messages = if mapped.is_some() {
+            dest.select(d, false)?.exists
+        } else {
+            0
+        };
         plans.push(Addition {
             source: s.clone(),
             destination: d.clone(),
@@ -590,9 +678,19 @@ fn plan_additions(
             next,
             uids,
             destination_exists: mapped.is_some(),
+            destination_messages,
         });
     }
     Ok(plans)
+}
+
+/// The warning for an added folder whose destination already holds mail the job did not copy.
+fn unattributed_warning(destination: &str, messages: u32) -> Option<String> {
+    (messages > 0).then(|| {
+        format!(
+            "destination folder {destination:?} already contains {messages} message(s) that this job did not copy and cannot attribute to it; they are left untouched and are not compared with anything. If an upload to this folder ever becomes uncertain they can appear as extra candidates"
+        )
+    })
 }
 
 /// Real incremental discovery: plan read-only, then upgrade to schema 5 if needed, then record
@@ -629,6 +727,7 @@ fn discover(
             messages: a.uids.len(),
             observed_uidnext: a.next,
             destination_exists: a.destination_exists,
+            destination_existing_messages: a.destination_messages,
         });
     }
     let mut found = Vec::new();
@@ -679,6 +778,7 @@ pub fn dry_run_incremental(
         );
     }
     let new_folders = journal.check_binding_mode(&c.binding()?, add_new_folders)?;
+    journal.require_compatible_evidence()?;
     let sp = c.source.password("Source")?;
     let dp = c.destination.password("Destination")?;
     let mut source = SourceReader::new(c, &sp)?;
@@ -686,7 +786,7 @@ pub fn dry_run_incremental(
     let listings = plan_discovery(c, &journal, &mut source, &mut dest, &new_folders)?;
     let additions: Vec<_> = plan_additions(&new_folders, &mut source, &mut dest)?
         .into_iter()
-        .map(|a| serde_json::json!({"source":a.source,"destination":a.destination,"uid_validity":a.validity,"messages":a.uids.len(),"new_uids":a.uids,"observed_uidnext":a.next,"destination_exists":a.destination_exists}))
+        .map(|a| serde_json::json!({"source":a.source,"destination":a.destination,"uid_validity":a.validity,"messages":a.uids.len(),"new_uids":a.uids,"observed_uidnext":a.next,"destination_exists":a.destination_exists,"destination_existing_messages":a.destination_messages,"warning":unattributed_warning(&a.destination,a.destination_messages)}))
         .collect();
     let folders: Vec<_> = listings
         .iter()
@@ -793,7 +893,9 @@ impl Payload {
 }
 
 pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
-    migrate_with(c, stop, None, false)
+    let mut report = migrate_with(c, stop, None, false)?;
+    report.attach_overview(c);
+    Ok(report)
 }
 
 /// `migrate --incremental`: discover messages that arrived after the job was planned, record the
@@ -804,7 +906,9 @@ pub fn migrate_incremental(
     history: HistoryLevel,
     add_new_folders: bool,
 ) -> Result<Report> {
-    migrate_with(c, stop, Some(history), add_new_folders)
+    let mut report = migrate_with(c, stop, Some(history), add_new_folders)?;
+    report.attach_overview(c);
+    Ok(report)
 }
 
 fn migrate_with(
@@ -827,6 +931,12 @@ fn migrate_with(
     );
     if incremental {
         (report.discovery, report.added_folders) = discover(c, &mut job, &mut source, &mut dest)?;
+        for a in &report.added_folders {
+            if let Some(w) = unattributed_warning(&a.destination, a.destination_existing_messages) {
+                eprintln!("WARNING: {w}");
+                report.warnings.push(w);
+            }
+        }
     } else {
         // Snapshot ALL configured source folders before any destination writes. A folder added by
         // `--incremental --add-new-folders` has no original snapshot, only its recorded baseline scan;
@@ -898,6 +1008,19 @@ fn migrate_with(
             )?,
             _ => BTreeSet::new(),
         };
+        if !incremental {
+            // Unchanged behaviour, stated loudly: ordinary migrate keeps copying the folder's other
+            // planned messages after an uncertain one, which only `--incremental` stops.
+            let unresolved = job.journal.uncertain_uids(&folder)?;
+            if !unresolved.is_empty() {
+                let w = format!(
+                    "folder {folder:?} has {} unresolved uncertain transfer(s) (source UIDs {unresolved:?}); this command still copies the folder's other planned messages, and every further copy adds destination candidates that must be examined to attribute them (only the first 1000 destination UIDs after the saved baseline are examined). Resolve, recover or skip them first (see the operator guide); `migrate --incremental` stops adding to such a folder",
+                    unresolved.len()
+                );
+                eprintln!("WARNING: {w}");
+                report.warnings.push(w);
+            }
+        }
         if !blocked.is_empty() {
             eprintln!(
                 "Folder {:?}: {} unresolved uncertain transfer(s) (UIDs {:?}); no new APPEND will be made in this folder",
@@ -1627,6 +1750,12 @@ fn reconcile(r: &Record, d: &mut DestinationReader<'_>, validity: u32) -> Result
 }
 
 pub fn verify(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
+    let mut report = verify_inner(c, stop)?;
+    report.attach_overview(c);
+    Ok(report)
+}
+
+fn verify_inner(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
     require_mappings(c)?;
     let mut job = Job::open(c, false)?;
     let dp = c.destination.password("Destination")?;

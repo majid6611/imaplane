@@ -332,7 +332,7 @@ Fault points added: `before_history_fetch`, `before_history_demote`, `history_ru
 `before_invalidate`/`after_invalidate`, now around the atomic demotion).
 
 
-## 14. Phase I3 status (implemented, awaiting approval to start I4)
+## 14. Phase I3 status (implemented and approved)
 
 Implemented as designed in section 6, with these precise choices and two refinements to the approved design.
 
@@ -378,7 +378,7 @@ folder is allowed (reported), because ordinary migrate already allows it; its pr
 attributed. A folder added while another folder has an uncertain transfer is added and copied; the uncertain
 folder stays blocked.
 
-## 15. Follow-up concerns recorded for Phase I4 (from the I2 review)
+## 15. Follow-up concerns recorded for Phase I4 (from the I2 review; resolved in section 16)
 
 1. **Reports must distinguish metadata from full verification everywhere.** The incremental JSON has
    `history_check` (level, counts, scope text), per-entry `level` and `last_full_verification`, and the text
@@ -398,3 +398,80 @@ folder stays blocked.
    them (decision D2). Evaluate for I4 whether ordinary `migrate` should also block (same candidate-growth
    reason), the effect on a user resuming an interrupted first copy, and whether the block should become the
    default with an explicit override. This changes recovery behaviour, so it needs your approval first.
+
+
+## 16. Phase I4 status (implemented, awaiting approval)
+
+**Reporting.** Every report from `migrate` and `verify` carries `verification`: `fully_verified_this_run`
+(bodies read back and SHA-256 compared in this run), `metadata_checked_only`, `existence_checked_only`,
+`flag_drift`, `uncertain`, `blocked_by_uncertain`, `problems`, a one-sentence `statement` ("... content NOT
+re-read"), and per folder the oldest and newest recorded full verification plus the number of confirmed
+messages with no recorded time (never invented; all of them on schema 4). The text report prints the statement
+and the per-folder lines; `imaplane status` prints the same record offline (`verification` in its JSON). Metadata
+and existence checks are counted in their own fields and never in `fully_verified_this_run` or in the
+oldest/newest times. `warnings` is a new list for conditions an operator should read.
+
+**Unattributed destination mail.** When `--add-new-folders` maps a source folder onto a destination folder that
+already exists, the report gives `destination_existing_messages` (EXAMINE's EXISTS before anything is written;
+the dry run shows it too) and, if it is above zero, a warning on stderr, in the text report and in `warnings`.
+The mail is left untouched and never attributed or compared.
+
+**Development-era schema-5 journals.** Refusal is kept and moved up front: `Job::open` (every command that
+opens a job) and the incremental dry run refuse a schema-5 journal whose `verification_events` cannot record
+lightweight checks, before any network access or write (tests assert the journal bytes, the APPEND count and the
+wire events are unchanged). `status` never fails on it: it reports `evidence: "incompatible"` and unknown
+verification times. No upgrade path is provided: schema 5 was never released, so the only such journals are
+development artifacts (decision recorded; revisit only if a real one turns up).
+
+**Ordinary versus incremental when a folder holds an uncertain transfer: safety analysis (semantics unchanged).**
+
+Facts from the code. An `uncertain` record is never replayed. `reconcile` lists destination UIDs at or above the
+baseline saved when the record was prepared, examines at most 1000 of them and reports those whose content, date
+and flags match as candidates; identical messages cannot be told apart, so attribution is an operator decision
+(`resolve`). Every APPEND made into the folder after the uncertain record adds a UID above that baseline.
+
+| | ordinary `migrate` (today) | `migrate --incremental` (D2) |
+|---|---|---|
+| later planned messages in the folder | copied | not copied (blocked) |
+| candidate set for the uncertain record | grows with every copy | frozen |
+| beyond 1000 later copies | "candidate search incomplete"; the operator must find the message by hand | cannot happen |
+| a resumed large first copy | finishes everything else; one short manual list | stalls that folder until the operator acts |
+| integrity (no loss, no duplicate by IMAPLANE) | preserved | preserved |
+
+The risk of continuing is therefore operator effort and ambiguity (a long folder, or duplicate mails in the
+source, can turn a one-candidate case into an unresolvable one), not data loss or duplicates: neither mode ever
+replays the uncertain transfer. The cost of blocking is availability: one lost reply halts a possibly huge folder.
+Options: (A) keep the asymmetry, documented (now also warned about at run time; a message-only change made in
+I4); (B) block in both modes; (C) block in both by default with an explicit `--continue-past-uncertain`
+override; (D) continue but only while the post-baseline count stays well under the cap, then block. Recommendation:
+A for v0.1 with the warning, then C for the next minor version, because it gives one rule with an escape hatch and
+keeps the large-copy workflow possible. B/C/D change recovery behaviour and need your explicit approval; nothing
+was changed beyond the warning.
+
+**Tests added.** `tests/local/incremental_stress.py` (see below), report/status/compatibility scenarios in
+`tiered.py`, the unattributed-mail warning in `addfolders.py`, the ordinary-migrate warning in `tiered.py`.
+
+**Randomized SIGKILL stress for incremental migration.** `incremental_stress.py` drives a job through random
+sequences of arrivals, expunges, new source folders, folder additions and runs of `migrate`,
+`migrate --incremental` (all history levels) and `verify`, killed by hooks at transfer, discovery, upgrade,
+folder-addition, history and evidence points or by a timed SIGKILL, applying the documented operator steps for
+uncertain records, then converging. Invariants I1-I12 are checked after every run (journal integrity, no
+duplicate and no foreign destination message, source unchanged and read-only on the wire, exact copies behind
+every confirmed record, well-formed states, no unaudited replay, no leftover files, append-only mappings and
+evidence, no snapshot for added folders, no UID planned twice) plus final convergence checks; `--selftest`
+proves every invariant can fire.
+
+## 17. Blockers for a public v0.1 CLI release (consolidated)
+
+1. Live-provider validation (Phase 5B) with disposable Gmail and Microsoft 365 accounts: on hold for your approval.
+2. OAuth helper packaging and security review (decided: ship the helper), Microsoft flow untested.
+3. SECURITY.md (GitHub private vulnerability reporting must be enabled by you), CONTRIBUTING.md, CHANGELOG.md.
+4. Release workflow never run on a tag: local rehearsal, then a throwaway-branch dry run (needs your approval to push),
+   native arm64 runs of the spool, streaming and crash suites.
+5. User documentation: quick start, install guide, exit-code table, operator guide for uncertain/recover/resolve/skip,
+   compatibility matrix, man page and completions.
+6. Streaming default decision after live validation (stays off until then).
+7. CI has never executed the new I0-I4 steps on GitHub; supply-chain checks (cargo audit/deny) are not in CI.
+8. Independent external review of the journal, the authorization fence and the vendored client patches.
+9. Decision on the ordinary-versus-incremental uncertain-folder asymmetry (this section).
+Not blockers: incremental migration itself (done through I4), flag drift semantics, folder addition.

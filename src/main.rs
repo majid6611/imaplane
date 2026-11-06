@@ -139,6 +139,26 @@ fn print_report(report: &engine::Report, json: bool) -> anyhow::Result<ExitCode>
             report.entries.len() - confirmed - drift,
             report.interrupted
         );
+        if let Some(v) = &report.verification {
+            println!("Verification this run: {}", v.statement);
+            for f in &v.folders {
+                println!(
+                    "  Folder {:?}: {} confirmed; oldest recorded full verification: {}; newest: {}; no recorded full-verification time: {}",
+                    f.folder,
+                    f.confirmed,
+                    f.oldest_full_verification
+                        .as_deref()
+                        .unwrap_or("none recorded"),
+                    f.newest_full_verification
+                        .as_deref()
+                        .unwrap_or("none recorded"),
+                    f.full_verification_unknown
+                );
+            }
+        }
+        for w in &report.warnings {
+            println!("WARNING: {w}");
+        }
         if let Some(h) = &report.history_check {
             println!(
                 "History re-checked at the {} level only (content NOT re-read): {} checked, {} passed, {} drift, {} problems",
@@ -252,12 +272,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             json,
         ),
         Command::Status { state, json } => {
-            let summary = Journal::open_read_only(&state)?.summary()?;
+            let journal = Journal::open_read_only(&state)?;
+            let summary = journal.summary()?;
+            let overview = journal.verification_overview()?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&summary)?);
+                let mut value = serde_json::to_value(&summary)?;
+                value["verification"] = serde_json::to_value(&overview)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 println!(
-                    "Scope: {}\nPlanned: {}\nUncertain: {}\nAccepted: {}\nContent confirmed: {}\nSkipped by operator (not migrated): {}",
+                    "Scope: {}\nPlanned: {}\nUncertain: {}\nAccepted: {}\nContent confirmed: {} (by full SHA-256 read-back at some time; this command does not check anything live)\nSkipped by operator (not migrated): {}",
                     summary.scope,
                     summary.planned,
                     summary.uncertain,
@@ -265,6 +289,24 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     summary.confirmed,
                     summary.skipped
                 );
+                println!(
+                    "Full-verification record ({}): {}",
+                    overview.evidence, overview.note
+                );
+                for f in &overview.folders {
+                    println!(
+                        "  Folder {:?}: {} confirmed; oldest recorded full verification: {}; newest: {}; no recorded time: {}",
+                        f.folder,
+                        f.confirmed,
+                        f.oldest_full_verification
+                            .as_deref()
+                            .unwrap_or("none recorded"),
+                        f.newest_full_verification
+                            .as_deref()
+                            .unwrap_or("none recorded"),
+                        f.full_verification_unknown
+                    );
+                }
             }
             Ok(ExitCode::from(2))
         }

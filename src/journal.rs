@@ -113,6 +113,34 @@ struct PendingEvent {
     observed_at: String,
 }
 const EVIDENCE_FLUSH_AT: usize = 256;
+const INCOMPATIBLE_EVIDENCE: &str = "this schema-5 journal was created by a pre-release development build whose evidence tables cannot record lightweight checks; it is refused (nothing was changed). Schema 5 was never released: finish or abandon the job with that build, or start a new job";
+
+/// What a journal can hold for verification evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceState {
+    Absent,
+    Current,
+    Incompatible,
+}
+
+/// Verification times for one folder's confirmed messages (see `Journal::verification_overview`).
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct FolderVerification {
+    pub folder: String,
+    pub confirmed: u64,
+    /// Confirmed messages whose last successful full read-back has a recorded time.
+    pub full_verification_recorded: u64,
+    /// Confirmed messages with no recorded full-verification time (never invented).
+    pub full_verification_unknown: u64,
+    pub oldest_full_verification: Option<String>,
+    pub newest_full_verification: Option<String>,
+}
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct VerificationOverview {
+    pub evidence: &'static str,
+    pub note: &'static str,
+    pub folders: Vec<FolderVerification>,
+}
 
 /// The most recent full (SHA-256) verification that succeeded for a message, if one was recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1154,30 +1182,147 @@ impl Journal {
         Ok(())
     }
 
+    /// What this journal can hold for verification evidence: nothing (before schema 5), the
+    /// current tables, or tables made by a pre-release development build that cannot record
+    /// lightweight checks. Never fails on an incompatible file, so read-only reporting can describe it.
+    pub fn evidence_state(&self) -> Result<EvidenceState> {
+        if !self.has_table("verification_events")? {
+            return Ok(EvidenceState::Absent);
+        }
+        let ddl: String = self.0.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='verification_events'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(if ddl.contains("'existence'") {
+            EvidenceState::Current
+        } else {
+            EvidenceState::Incompatible
+        })
+    }
+
     /// True when this journal can hold verification evidence: schema 5 with the current table
-    /// definition. A schema-5 journal made by a pre-release build (events limited to `full`) is
-    /// reported as an error by `require_evidence`, never silently treated as evidence-free.
+    /// definition. A schema-5 journal made by a pre-release build (events limited to `full`) is an
+    /// error, never silently treated as evidence-free.
     pub fn evidence_ready(&self) -> Result<bool> {
         if let Some(ready) = self.1.ready.get() {
             return Ok(ready);
         }
-        let ready = if self.has_table("verification_events")? {
-            let ddl: String = self.0.query_row(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='verification_events'",
-                [],
-                |r| r.get(0),
-            )?;
-            if !ddl.contains("'existence'") {
-                bail!(
-                    "this schema-5 journal was created by a pre-release build whose evidence tables cannot record lightweight checks; start a new job"
-                );
-            }
-            true
-        } else {
-            false
+        let ready = match self.evidence_state()? {
+            EvidenceState::Absent => false,
+            EvidenceState::Current => true,
+            EvidenceState::Incompatible => bail!(INCOMPATIBLE_EVIDENCE),
         };
         self.1.ready.set(Some(ready));
         Ok(ready)
+    }
+
+    /// Refuse, before any network or write, a journal whose evidence tables came from a pre-release
+    /// development build.
+    pub fn require_compatible_evidence(&self) -> Result<()> {
+        if self.evidence_state()? == EvidenceState::Incompatible {
+            bail!(INCOMPATIBLE_EVIDENCE);
+        }
+        Ok(())
+    }
+
+    /// Per folder: how many messages are confirmed, when the content of those was last proven by a
+    /// full SHA-256 read-back (oldest and newest recorded), and how many have no recorded time at
+    /// all. Read-only and valid on any schema; nothing is invented for older journals.
+    pub fn verification_overview(&self) -> Result<VerificationOverview> {
+        let state = self.evidence_state()?;
+        let mut latest: std::collections::HashMap<(String, u32, u32), String> =
+            std::collections::HashMap::new();
+        if state == EvidenceState::Current {
+            let mut stmt = self.0.prepare(
+                "SELECT folder,validity,uid,observed_at FROM verification_events WHERE level='full' AND result='ok' ORDER BY rowid",
+            )?;
+            for row in stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, u32>(1)?,
+                    r.get::<_, u32>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })? {
+                let (f, v, u, at) = row?;
+                latest.insert((f, v, u), at);
+            }
+        }
+        // Status must describe any journal it can open; an unreadable binding only costs the list of
+        // folders that have no confirmed message yet (the others are found from the transfers).
+        let mut folders: std::collections::BTreeMap<String, FolderVerification> = self
+            .recorded_folders()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(source, _)| {
+                (
+                    source.clone(),
+                    FolderVerification {
+                        folder: source,
+                        ..FolderVerification::default()
+                    },
+                )
+            })
+            .collect();
+        let mut stmt = self
+            .0
+            .prepare("SELECT folder,uid_validity,uid FROM transfers WHERE state='confirmed'")?;
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u32>(1)?,
+                r.get::<_, u32>(2)?,
+            ))
+        })? {
+            let (f, v, u) = row?;
+            let entry = folders
+                .entry(f.clone())
+                .or_insert_with(|| FolderVerification {
+                    folder: f.clone(),
+                    ..FolderVerification::default()
+                });
+            entry.confirmed += 1;
+            match latest.get(&(f, v, u)) {
+                Some(at) => {
+                    entry.full_verification_recorded += 1;
+                    if entry
+                        .oldest_full_verification
+                        .as_ref()
+                        .is_none_or(|o| at < o)
+                    {
+                        entry.oldest_full_verification = Some(at.clone());
+                    }
+                    if entry
+                        .newest_full_verification
+                        .as_ref()
+                        .is_none_or(|n| at > n)
+                    {
+                        entry.newest_full_verification = Some(at.clone());
+                    }
+                }
+                None => entry.full_verification_unknown += 1,
+            }
+        }
+        let (evidence, note) = match state {
+            EvidenceState::Absent => (
+                "none",
+                "this journal predates schema 5 and records no verification times: every confirmed message has an unknown last full verification",
+            ),
+            EvidenceState::Current => (
+                "recorded",
+                "times are the last recorded successful full SHA-256 read-backs; messages confirmed before schema 5 have no recorded time. A metadata or existence check is never counted here",
+            ),
+            EvidenceState::Incompatible => (
+                "incompatible",
+                "the evidence tables were made by a pre-release development build and are not read; every confirmed message is reported with an unknown last full verification",
+            ),
+        };
+        Ok(VerificationOverview {
+            evidence,
+            note,
+            folders: folders.into_values().collect(),
+        })
     }
 
     /// A full-content check passed for an already-confirmed record. This renews evidence only; it
