@@ -237,6 +237,8 @@ class ProtocolServer:
         self.destination_validity = 77
         self.append_validity = 77
         self.append_uid_override = None
+        self.extra = {'source': {}, 'destination': {}}  # additional folders: name -> list of messages (None = expunged)
+        self.folder_validity = {}                       # (user, folder) -> UIDVALIDITY override
         self.messages = {'source': [b'Subject: protocol fixture\r\n\r\nraw message\r\n'], 'destination': []}
         threading.Thread(target=self.serve,daemon=True).start()
     def serve(self):
@@ -257,6 +259,8 @@ class ProtocolServer:
                 if mode.startswith('utf8'): caps += b' UTF8=ONLY UTF8=ACCEPT ENABLE'
                 enabled = mode == 'rev2'
                 user = None
+                selected = [self.DEFAULT]
+                def msgs(): return self.box(user, selected[0])
                 while True:
                     if user == 'destination' and self.idle_drop: client.settimeout(self.idle_drop)
                     line = reader.readline()
@@ -294,17 +298,23 @@ class ProtocolServer:
                         name = '台北/📬'
                         wire = name.encode() if enabled else utf7(name).encode()
                         client.sendall(b'* LIST () "/" {'+str(len(wire)).encode()+b'}\r\n'+wire+b'\r\n')
+                        for extra_name in self.extra[user]:
+                            client.sendall(b'* LIST () "/" "'+extra_name.encode()+b'"\r\n')
                     elif verb in [b'EXAMINE',b'SELECT']:
                         name = '台北/📬'
                         expected = name.encode() if enabled else utf7(name).encode()
-                        assert args[0] == b'"'+expected+b'"', (mode,args)
-                        count = sum(m is not None for m in self.messages[user])  # None marks an expunged message
-                        validity = self.source_validity if user == 'source' else self.destination_validity
-                        client.sendall(b'* FLAGS (\\Seen)\r\n* '+str(count).encode()+b' EXISTS\r\n* OK [PERMANENTFLAGS (\\Seen)] flags\r\n* OK [UIDVALIDITY '+str(validity).encode()+b'] validity\r\n* OK [UIDNEXT '+str(len(self.messages[user])+1).encode()+b'] next\r\n')
+                        if args[0] == b'"'+expected+b'"': selected[0] = self.DEFAULT
+                        else:
+                            chosen = args[0][1:-1].decode()
+                            assert args[0][:1] == b'"' and chosen in self.extra[user], (mode,args)
+                            selected[0] = chosen
+                        count = sum(m is not None for m in msgs())  # None marks an expunged message
+                        validity = self.folder_validity.get((user, selected[0]), self.source_validity if user == 'source' else self.destination_validity)
+                        client.sendall(b'* FLAGS (\\Seen)\r\n* '+str(count).encode()+b' EXISTS\r\n* OK [PERMANENTFLAGS (\\Seen)] flags\r\n* OK [UIDVALIDITY '+str(validity).encode()+b'] validity\r\n* OK [UIDNEXT '+str(len(msgs())+1).encode()+b'] next\r\n')
                         client.sendall(tag+b' OK '+(b'[READ-ONLY]' if verb == b'EXAMINE' else b'[READ-WRITE]')+b' selected\r\n')
                         if self.concurrent and user == 'source':
                             self.concurrent = False
-                            self.messages[user].append(b'Subject: concurrent delivery\r\n\r\nnew\r\n')
+                            msgs().append(b'Subject: concurrent delivery\r\n\r\nnew\r\n')
                         continue
                     elif verb == b'UID':
                         if re.fullmatch(rb'FETCH 1:(?:\d+|\*) \(UID\)', args[0]):
@@ -312,8 +322,8 @@ class ProtocolServer:
                                 self.list_count += 1
                                 if self.list_hook: self.list_hook(self.list_count)
                             horizon = args[0].split()[1].split(b':')[1]
-                            upper = len(self.messages[user]) if horizon == b'*' else min(int(horizon), len(self.messages[user]))
-                            uids = [i+1 for i in range(upper) if self.messages[user][i] is not None]
+                            upper = len(msgs()) if horizon == b'*' else min(int(horizon), len(msgs()))
+                            uids = [i+1 for i in range(upper) if msgs()[i] is not None]
                             for uid in (uids[:-1] if self.missing_inventory and user == 'source' else uids):
                                 client.sendall(b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()+b')\r\n')
                         elif re.fullmatch(rb'FETCH [\d:,]+ \(UID FLAGS INTERNALDATE RFC822\.SIZE\)', args[0]):
@@ -323,8 +333,8 @@ class ProtocolServer:
                                 lo, _, hi = part.partition(b':')
                                 wanted.update(range(int(lo), int(hi or lo) + 1))
                             for uid in sorted(wanted):
-                                if uid <= len(self.messages[user]) and self.messages[user][uid-1] is not None:
-                                    size = len(self.messages[user][uid-1]) + (self.dest_size_delta.get(uid, 0) if user == 'destination' else 0)
+                                if uid <= len(msgs()) and msgs()[uid-1] is not None:
+                                    size = len(msgs()[uid-1]) + (self.dest_size_delta.get(uid, 0) if user == 'destination' else 0)
                                     flags = self.dest_flags.get(uid, b'\\Seen') if user == 'destination' else b'\\Seen'
                                     date = self.dest_dates.get(uid, b'02-Jan-2020 03:04:05 +0000') if user == 'destination' else b'02-Jan-2020 03:04:05 +0000'
                                     client.sendall(b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()+b' FLAGS ('+flags+b') INTERNALDATE "'+date+b'" RFC822.SIZE '+str(size).encode()+b')\r\n')
@@ -332,8 +342,8 @@ class ProtocolServer:
                             match = re.fullmatch(rb'FETCH (\d+) (.*)',args[0])
                             assert match, args
                             uid = int(match.group(1)); request = match.group(2)
-                            if uid <= len(self.messages[user]) and self.messages[user][uid-1] is not None:
-                                body = self.messages[user][uid-1]
+                            if uid <= len(msgs()) and msgs()[uid-1] is not None:
+                                body = msgs()[uid-1]
                                 prefix = b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()
                                 if self.source_fetch_no and user=='source':
                                     client.sendall(tag+b' NO [AUTHENTICATIONFAILED] PRIVATE expired token\r\n'); continue
@@ -413,16 +423,26 @@ class ProtocolServer:
                             self.injected = True
                             for _ in range(20):
                                 client.sendall(b'* OK progress\r\n'); time.sleep(.1)
-                        self.messages[user].append(data[:-2])
+                        target = self.messages[user]
+                        named = re.match(rb'APPEND "((?:[^"\\]|\\.)*)"', line.strip()[len(tag)+1:])
+                        if named and named.group(1).decode(errors='replace') in self.extra[user]:
+                            target = self.extra[user][named.group(1).decode()]
+                        target.append(data[:-2])
                         if self.pause_append_reply: self.hook('append_reply')
                         if self.drop_reply_after_commit: return
-                        client.sendall(tag+b' OK [APPENDUID '+str(self.append_validity).encode()+b' '+str(self.append_uid_override if self.append_uid_override is not None else len(self.messages[user])).encode()+b'] appended\r\n')
+                        client.sendall(tag+b' OK [APPENDUID '+str(self.append_validity).encode()+b' '+str(self.append_uid_override if self.append_uid_override is not None else len(target)).encode()+b'] appended\r\n')
                         continue
+                    elif verb == b'CREATE':
+                        assert user == 'destination'
+                        self.extra[user].setdefault(args[0].strip(b'"').decode(), [])
                     else:
                         raise AssertionError((mode,verb))
                     client.sendall(tag+b' OK complete\r\n')
         except (OSError,ssl.SSLError): pass
         except Exception as exc: self.errors.append(repr(exc))
+    DEFAULT = '台北/📬'
+    def box(self, user, name):
+        return self.messages[user] if name == self.DEFAULT else self.extra[user][name]
     def hook(self, name):
         reached, resume = self.hooks[name]
         reached.set()

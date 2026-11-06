@@ -85,7 +85,22 @@ pub struct Report {
     pub discovery: Vec<Discovery>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_check: Option<HistoryCheck>,
+    /// Present only when `--add-new-folders` added folders to the job in this run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub added_folders: Vec<AddedFolder>,
     pub entries: Vec<Entry>,
+}
+/// A folder added to an existing job, with the baseline that was recorded for it.
+#[derive(Debug, Serialize, Clone)]
+pub struct AddedFolder {
+    pub source: String,
+    pub destination: String,
+    pub uid_validity: u32,
+    /// Messages in the baseline scan (generation 1); all of them are queued for transfer.
+    pub messages: usize,
+    pub observed_uidnext: u32,
+    /// The destination folder already existed (otherwise it is created before the first APPEND).
+    pub destination_exists: bool,
 }
 /// Outcome of discovery for one folder in an incremental run.
 #[derive(Debug, Serialize, Clone)]
@@ -111,6 +126,7 @@ impl Report {
             halt_reason: None,
             discovery: Vec::new(),
             history_check: None,
+            added_folders: Vec::new(),
             entries: Vec::new(),
         }
     }
@@ -451,10 +467,13 @@ fn plan_discovery(
     journal: &Journal,
     source: &mut SourceReader<'_>,
     dest: &mut DestinationReader<'_>,
+    new_folders: &[(String, String)],
 ) -> Result<Vec<Listing>> {
     let plan = journal.work_list()?;
     let mut listings = Vec::new();
-    for f in &c.folders {
+    // Folders the job does not record yet are planned by `plan_additions`, not discovered.
+    let is_new = |f: &crate::config::FolderMap| new_folders.iter().any(|(s, _)| *s == f.source);
+    for f in c.folders.iter().filter(|f| !is_new(f)) {
         let Some((_, recorded, _)) = plan.iter().find(|(name, _, _)| *name == f.source) else {
             bail!(
                 "job has no recorded plan for folder {:?}; run an ordinary migrate first",
@@ -504,7 +523,7 @@ fn plan_discovery(
     }
     // Destination: a folder that holds our transfers must still be the same UIDVALIDITY epoch.
     let existing = dest.read(|d| d.folders())?;
-    for f in &c.folders {
+    for f in c.folders.iter().filter(|f| !is_new(f)) {
         let recorded = journal.destination_validities(&f.source)?;
         if recorded.is_empty() {
             continue;
@@ -529,6 +548,53 @@ fn plan_discovery(
     Ok(listings)
 }
 
+/// A folder to add, with the consistent source listing that becomes its baseline scan.
+struct Addition {
+    source: String,
+    destination: String,
+    validity: u32,
+    next: u32,
+    uids: Vec<u32>,
+    destination_exists: bool,
+}
+
+/// Read-only planning for `--add-new-folders`: a consistent, inventory-checked listing of each new
+/// source folder (retried if mail arrives or is expunged while it is read) and the state of its
+/// destination folder. Nothing is written anywhere.
+fn plan_additions(
+    new_folders: &[(String, String)],
+    source: &mut SourceReader<'_>,
+    dest: &mut DestinationReader<'_>,
+) -> Result<Vec<Addition>> {
+    if new_folders.is_empty() {
+        return Ok(Vec::new());
+    }
+    let existing = dest.read(|d| d.folders())?;
+    let mut plans = Vec::new();
+    for (s, d) in new_folders {
+        let (selected, listed) = source.snapshot(s)?;
+        let next = selected
+            .next
+            .context("source omitted UIDNEXT; cannot record a folder baseline")?;
+        let mut uids = listed;
+        uids.sort_unstable();
+        uids.dedup();
+        let mapped = existing.iter().find(|f| same_folder(&f.name, d));
+        if mapped.is_some_and(|f| !f.selectable) {
+            bail!("destination folder {d:?} exists but cannot be selected; refusing to add it");
+        }
+        plans.push(Addition {
+            source: s.clone(),
+            destination: d.clone(),
+            validity: selected.validity,
+            next,
+            uids,
+            destination_exists: mapped.is_some(),
+        });
+    }
+    Ok(plans)
+}
+
 /// Real incremental discovery: plan read-only, then upgrade to schema 5 if needed, then record
 /// one atomic scan per folder that has new messages. Every scan is durable before any transfer.
 fn discover(
@@ -536,12 +602,34 @@ fn discover(
     job: &mut Job,
     source: &mut SourceReader<'_>,
     dest: &mut DestinationReader<'_>,
-) -> Result<Vec<Discovery>> {
-    let listings = plan_discovery(c, &job.journal, source, dest)?;
+) -> Result<(Vec<Discovery>, Vec<AddedFolder>)> {
+    let new_folders = job.new_folders.clone();
+    let listings = plan_discovery(c, &job.journal, source, dest, &new_folders)?;
+    let additions = plan_additions(&new_folders, source, dest)?;
     crate::fault::point("scan_listed");
     if job.journal.schema_version()? < 5 {
         job.journal
             .upgrade_to_v5(&c.state_dir.join("journal.sqlite3"))?;
+    }
+    // Each new folder joins the plan in one transaction: mapping and baseline scan together.
+    let mut added = Vec::new();
+    for a in additions {
+        job.journal
+            .add_folder(&a.source, &a.destination, a.validity, a.next, &a.uids)?;
+        eprintln!(
+            "Folder {:?} added to the job: {} message(s) queued for {:?}",
+            a.source,
+            a.uids.len(),
+            a.destination
+        );
+        added.push(AddedFolder {
+            source: a.source,
+            destination: a.destination,
+            uid_validity: a.validity,
+            messages: a.uids.len(),
+            observed_uidnext: a.next,
+            destination_exists: a.destination_exists,
+        });
     }
     let mut found = Vec::new();
     for l in listings {
@@ -570,12 +658,16 @@ fn discover(
             observed_uidnext: l.next,
         });
     }
-    Ok(found)
+    Ok((found, added))
 }
 
 /// `migrate --incremental --dry-run`: reports what discovery would find. The journal is opened
 /// read-only (no lock file, no upgrade, no scan, no backup) and nothing is sent to the destination.
-pub fn dry_run_incremental(c: &Config, history: HistoryLevel) -> Result<serde_json::Value> {
+pub fn dry_run_incremental(
+    c: &Config,
+    history: HistoryLevel,
+    add_new_folders: bool,
+) -> Result<serde_json::Value> {
     require_mappings(c)?;
     let path = c.state_dir.join("journal.sqlite3");
     let journal =
@@ -586,12 +678,16 @@ pub fn dry_run_incremental(c: &Config, history: HistoryLevel) -> Result<serde_js
             "journal schema {version} predates incremental migration; run an ordinary migrate once to bring it to schema 4"
         );
     }
-    journal.check_binding(&c.binding()?)?;
+    let new_folders = journal.check_binding_mode(&c.binding()?, add_new_folders)?;
     let sp = c.source.password("Source")?;
     let dp = c.destination.password("Destination")?;
     let mut source = SourceReader::new(c, &sp)?;
     let mut dest = DestinationReader::new(c, &dp)?;
-    let listings = plan_discovery(c, &journal, &mut source, &mut dest)?;
+    let listings = plan_discovery(c, &journal, &mut source, &mut dest, &new_folders)?;
+    let additions: Vec<_> = plan_additions(&new_folders, &mut source, &mut dest)?
+        .into_iter()
+        .map(|a| serde_json::json!({"source":a.source,"destination":a.destination,"uid_validity":a.validity,"messages":a.uids.len(),"new_uids":a.uids,"observed_uidnext":a.next,"destination_exists":a.destination_exists}))
+        .collect();
     let folders: Vec<_> = listings
         .iter()
         .map(|l| serde_json::json!({"source":l.folder,"uid_validity":l.validity,"listed":l.listed,"known":l.known,"new_uids":l.new,"observed_uidnext":l.next}))
@@ -603,6 +699,7 @@ pub fn dry_run_incremental(c: &Config, history: HistoryLevel) -> Result<serde_js
         "journal_schema":version,
         "would_upgrade_to_schema_5":version < 5,
         "history_check_level":history.name(),
+        "would_add_folders":additions,
         "folders":folders
     }))
 }
@@ -696,7 +793,7 @@ impl Payload {
 }
 
 pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
-    migrate_with(c, stop, None)
+    migrate_with(c, stop, None, false)
 }
 
 /// `migrate --incremental`: discover messages that arrived after the job was planned, record the
@@ -705,19 +802,21 @@ pub fn migrate_incremental(
     c: &Config,
     stop: Arc<AtomicBool>,
     history: HistoryLevel,
+    add_new_folders: bool,
 ) -> Result<Report> {
-    migrate_with(c, stop, Some(history))
+    migrate_with(c, stop, Some(history), add_new_folders)
 }
 
 fn migrate_with(
     c: &Config,
     stop: Arc<AtomicBool>,
     history: Option<HistoryLevel>,
+    add_new_folders: bool,
 ) -> Result<Report> {
     let incremental = history.is_some();
     require_mappings(c)?;
     // An incremental run extends an existing job; it never creates one.
-    let mut job = Job::open(c, !incremental)?;
+    let mut job = Job::open_with(c, !incremental, add_new_folders)?;
     let sp = c.source.password("Source")?;
     let dp = c.destination.password("Destination")?;
     let mut source = SourceReader::new(c, &sp)?;
@@ -727,10 +826,15 @@ fn migrate_with(
         "live destination content, INTERNALDATE and supported flags against the durable source UID snapshot",
     );
     if incremental {
-        report.discovery = discover(c, &mut job, &mut source, &mut dest)?;
+        (report.discovery, report.added_folders) = discover(c, &mut job, &mut source, &mut dest)?;
     } else {
-        // Snapshot ALL configured source folders before any destination writes.
+        // Snapshot ALL configured source folders before any destination writes. A folder added by
+        // `--incremental --add-new-folders` has no original snapshot, only its recorded baseline scan;
+        // ordinary migrate never discovers or re-plans it, it only finishes what the journal recorded.
         for f in &c.folders {
+            if job.journal.is_scan_only(&f.source)? {
+                continue;
+            }
             let (s, uids) = source.snapshot(&f.source)?;
             job.journal.snapshot(&f.source, s.validity, &uids)?;
         }

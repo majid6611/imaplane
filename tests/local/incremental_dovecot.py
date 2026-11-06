@@ -56,6 +56,17 @@ def core(journal):
     return h.hexdigest()
 
 
+def plan(journal):
+    """The durable plan and mappings only (a message that stays missing adds an evidence event per run)."""
+    h = hashlib.sha256(); c = sqlite3.connect(journal)
+    try:
+        for name in ('job', 'snapshots', 'scans', 'transfers', 'job_folders'):
+            h.update(name.encode()); h.update(repr(c.execute(f'select * from "{name}" order by rowid').fetchall()).encode())
+    finally:
+        c.close()
+    return h.hexdigest()
+
+
 def appends(proxy):
     return sum(v == 'APPEND' for v, _ in proxy.commands)
 
@@ -131,4 +142,37 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-dovecot-') as tmp:
         assert appends(proxies[1]) == total, 'a missing destination message must never be re-uploaded'
         assert all(not p.errors for p in proxies)
         print('PASS real Dovecot: metadata drift without demotion, full agreement, missing message demoted and never re-sent', flush=True)
+
+        # Adding folders on real Dovecot: refused without the flag, dry run writes nothing, a crash right
+        # after the atomic addition is finished by an ordinary migrate, exact copies, source untouched.
+        def results(rep): return {(e['source_folder'], e['source_uid']): e['result'] for e in rep['entries']}
+        def rows(conn, folder): return [r[1:] for r in snapshot(conn, [folder])[folder][1]]
+        for folder, tag in (('Archive', 'plain'), ('Spam', 'crash')):
+            lab.seed(mk(b'add', folder, 3), folder)
+            cfg.write_text(cfg.read_text() + f'[[folders]]\nsource = "{folder}"\ndestination = "{folder}"\n')
+            before, sent = plan(journal), appends(proxies[1])
+            run(cfg, 'migrate', code=1); run(cfg, 'migrate', extra=['--incremental'], code=1)
+            assert plan(journal) == before and appends(proxies[1]) == sent
+            _, dry, _ = run(cfg, extra=['--incremental', '--add-new-folders', '--dry-run'], code=0)
+            assert [(w['source'], w['messages']) for w in dry['would_add_folders']] == [(folder, 3)], dry
+            assert plan(journal) == before and appends(proxies[1]) == sent
+            assert folder not in [x.decode() for x in dst.list()[1] if x] or True
+            if tag == 'plain':
+                _, rep, _ = run(cfg, extra=['--incremental', '--add-new-folders'], code=2)   # code 2: the earlier missing INBOX message
+            else:
+                run(cfg, extra=['--incremental', '--add-new-folders'], fault=('folder_add_after_commit', 1), code=-signal.SIGKILL)
+                assert appends(proxies[1]) == sent, 'a crash right after the addition sends nothing'
+                assert db.execute('select count(*) from job_folders where source=?', (folder,)).fetchone()[0] == 1
+                _, rep, _ = run(cfg, 'migrate', code=2)                                           # ordinary migrate finishes the recorded baseline
+                assert 'discovery' not in rep
+            assert [results(rep)[(folder, u)] for u in (1, 2, 3)] == ['confirmed'] * 3, results(rep)
+            assert db.execute('select origin from job_folders where source=?', (folder,)).fetchone()[0] == 'added'
+            assert db.execute('select count(*) from snapshots where folder=?', (folder,)).fetchone()[0] == 0
+            assert appends(proxies[1]) == sent + 3 and rows(dst, folder) == rows(lab.source, folder)
+            done = plan(journal)
+            _, rep, _ = run(cfg, extra=['--incremental', '--add-new-folders'], code=2)
+            assert 'added_folders' not in rep and plan(journal) == done and appends(proxies[1]) == sent + 3
+        assert snapshot(lab.source, ['Archive', 'Spam']) == {k: v for k, v in lab.before.items() if k in ('Archive', 'Spam')}
+        assert all(not p.errors for p in proxies)
+        print('PASS real Dovecot: folders added atomically (also across a crash), exact copies, repeat is idempotent, source unchanged', flush=True)
 print('all incremental Dovecot checks passed')

@@ -490,6 +490,17 @@ impl Journal {
                 |r| r.get(0),
             )
             .optional()?;
+        // A folder added after the job began has no original snapshot; its first scan is its baseline.
+        let planned = match planned {
+            Some(v) => Some(v),
+            None => tx
+                .query_row(
+                    "SELECT validity FROM scans WHERE folder=?1 ORDER BY generation LIMIT 1",
+                    [folder],
+                    |r| r.get(0),
+                )
+                .optional()?,
+        };
         if planned != Some(validity) {
             bail!("scan UIDVALIDITY differs from the folder's recorded plan");
         }
@@ -542,38 +553,195 @@ impl Journal {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Identity check used by every command that does not add folders: the journal must belong to
+    /// this configuration, and (schema 5) the configured folder mappings must be exactly the recorded ones.
     pub fn check_binding(&self, expected: &str) -> Result<()> {
+        self.check_binding_mode(expected, false).map(|_| ())
+    }
+
+    /// Identity check that may admit new folders. The account part of the binding (hosts, ports,
+    /// users) must match exactly. Every recorded mapping must be in the configuration, unchanged;
+    /// a recorded folder that is missing, renamed or mapped elsewhere, and a new mapping that
+    /// reuses a recorded destination, are refused. Mappings the job does not record yet are
+    /// returned when `allow_new`, and refused (naming them) otherwise. A schema-4 journal with
+    /// `allow_new == false` is compared byte for byte, exactly as before schema 5 existed.
+    pub fn check_binding_mode(
+        &self,
+        expected: &str,
+        allow_new: bool,
+    ) -> Result<Vec<(String, String)>> {
         let actual: String = self
             .0
             .query_row("SELECT binding FROM job WHERE id=1", [], |r| r.get(0))?;
-        if actual != expected {
+        if !self.has_table("job_folders")? && !allow_new {
+            if actual != expected {
+                // Same accounts and every recorded folder, only more folders configured: say how to add them.
+                if let Ok(new) = self.check_binding_mode(expected, true) {
+                    if !new.is_empty() {
+                        let names: Vec<_> = new.iter().map(|(s, _)| s.as_str()).collect();
+                        bail!(
+                            "the configuration lists folder(s) {names:?} that this job does not record; folder mappings of an existing job are immutable except through `migrate --incremental --add-new-folders`"
+                        );
+                    }
+                }
+                bail!("journal belongs to a different migration");
+            }
+            return Ok(Vec::new());
+        }
+        let parse = |text: &str| -> Result<serde_json::Value> {
+            serde_json::from_str(text).context("binding is not valid JSON")
+        };
+        let (have, want) = (parse(&actual)?, parse(expected)?);
+        if have["source"] != want["source"] || have["destination"] != want["destination"] {
             bail!("journal belongs to a different migration");
         }
-        // Schema 5: the recorded folder mappings are the authority and must equal the config's.
-        let recorded = self.job_folders()?;
-        if !recorded.is_empty() {
-            let wanted: serde_json::Value = serde_json::from_str(expected)?;
-            let configured: Vec<(String, String)> = wanted["folders"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|f| {
-                            (
-                                f["source"].as_str().unwrap_or_default().to_owned(),
-                                f["destination"].as_str().unwrap_or_default().to_owned(),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let recorded: Vec<(String, String)> =
-                recorded.into_iter().map(|(s, d, _)| (s, d)).collect();
-            if recorded != configured {
-                bail!(
-                    "configured folder mappings differ from the mappings recorded in the journal"
-                );
+        let configured: Vec<(String, String)> = want["folders"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|f| {
+                        (
+                            f["source"].as_str().unwrap_or_default().to_owned(),
+                            f["destination"].as_str().unwrap_or_default().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let recorded = self.recorded_folders()?;
+        let canon = |n: &str| {
+            if n.eq_ignore_ascii_case("INBOX") {
+                "INBOX".to_owned()
+            } else {
+                n.to_owned()
+            }
+        };
+        for (rs, rd) in &recorded {
+            match configured.iter().find(|(s, _)| s == rs) {
+                None => bail!(
+                    "folder {rs:?} is recorded in this job but missing from the configuration; folder mappings are immutable (removing or renaming a folder is refused)"
+                ),
+                Some((_, d)) if d != rd => bail!(
+                    "folder {rs:?} is recorded as mapped to {rd:?} but the configuration maps it to {d:?}; folder mappings are immutable (remapping is refused)"
+                ),
+                Some(_) => {}
             }
         }
+        let mut new = Vec::new();
+        for (s, d) in &configured {
+            if recorded.iter().any(|(rs, _)| rs == s) {
+                continue;
+            }
+            if let Some((rs, _)) = recorded.iter().find(|(_, rd)| canon(rd) == canon(d)) {
+                bail!(
+                    "destination {d:?} is already used by recorded source folder {rs:?}; a conflicting folder mapping is refused"
+                );
+            }
+            new.push((s.clone(), d.clone()));
+        }
+        if !new.is_empty() && !allow_new {
+            let names: Vec<_> = new.iter().map(|(s, _)| s.as_str()).collect();
+            bail!(
+                "the configuration lists folder(s) {names:?} that this job does not record; folder mappings of an existing job are immutable except through `migrate --incremental --add-new-folders`"
+            );
+        }
+        Ok(new)
+    }
+
+    /// The job's folder mappings: `job_folders` on schema 5 (the authority, including added
+    /// folders), otherwise the mappings in the never-rewritten binding.
+    pub fn recorded_folders(&self) -> Result<Vec<(String, String)>> {
+        if self.has_table("job_folders")? {
+            return Ok(self
+                .job_folders()?
+                .into_iter()
+                .map(|(s, d, _)| (s, d))
+                .collect());
+        }
+        self.binding_folders()
+    }
+
+    /// True for a folder whose plan consists only of scans (it was added after the job began).
+    pub fn is_scan_only(&self, folder: &str) -> Result<bool> {
+        if !self.has_table("scans")? {
+            return Ok(false);
+        }
+        Ok(self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scans WHERE folder=?1) AND NOT EXISTS(SELECT 1 FROM snapshots WHERE folder=?1)",
+            [folder],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Add a folder to an existing schema-5 job, atomically: its immutable mapping and its first
+    /// scan (the full, consistent UID listing; the baseline that fixes its source UIDVALIDITY and
+    /// UIDNEXT, empty if the folder is empty) become durable together or not at all. Refused if the
+    /// source or destination is already recorded or the journal holds any evidence for the folder.
+    /// No existing snapshot, scan or mapping is touched.
+    pub fn add_folder(
+        &mut self,
+        source: &str,
+        destination: &str,
+        validity: u32,
+        observed_uidnext: u32,
+        uids: &[u32],
+    ) -> Result<()> {
+        if self.schema_version()? != SCHEMA_V5 {
+            bail!("adding a folder requires a schema 5 journal");
+        }
+        if validity == 0 || observed_uidnext == 0 {
+            bail!("a folder baseline needs a nonzero UIDVALIDITY and UIDNEXT");
+        }
+        if uids.windows(2).any(|w| w[0] >= w[1])
+            || uids.iter().any(|u| *u == 0 || *u >= observed_uidnext)
+        {
+            bail!("a folder baseline must list ascending UIDs below UIDNEXT");
+        }
+        let tx = self.0.transaction()?;
+        let canon = |n: &str| {
+            if n.eq_ignore_ascii_case("INBOX") {
+                "INBOX".to_owned()
+            } else {
+                n.to_owned()
+            }
+        };
+        let mappings: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT source,destination FROM job_folders")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        if mappings.iter().any(|(s, _)| canon(s) == canon(source)) {
+            bail!("folder {source:?} is already part of this job");
+        }
+        if mappings.iter().any(|(_, d)| canon(d) == canon(destination)) {
+            bail!("destination {destination:?} is already used by another folder of this job");
+        }
+        let evidence: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transfers WHERE folder=?1) OR EXISTS(SELECT 1 FROM snapshots WHERE folder=?1) OR EXISTS(SELECT 1 FROM scans WHERE folder=?1)",
+            [source],
+            |r| r.get(0),
+        )?;
+        if evidence {
+            bail!("the journal already holds evidence for folder {source:?}; refusing to add it");
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO job_folders (source,destination,origin,added_at) VALUES (?1,?2,'added',?3)",
+            params![source, destination, now],
+        )?;
+        tx.execute(
+            "INSERT INTO scans (folder,validity,generation,observed_uidnext,uids,scanned_at) VALUES (?1,?2,1,?3,?4,?5)",
+            params![
+                source,
+                validity,
+                observed_uidnext,
+                serde_json::to_string(uids)?,
+                now
+            ],
+        )?;
+        crate::fault::point("folder_add_before_commit");
+        tx.commit()?;
+        crate::fault::point("folder_add_after_commit");
         Ok(())
     }
 

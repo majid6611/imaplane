@@ -150,6 +150,42 @@ evidence are never rewritten. Without the flag, `migrate` behaves exactly as bef
   incremental run would repeat that every night, so only `--incremental` stops.
 - Messages deleted from the source after transfer are left alone.
 
+#### Adding folders to an existing job (`--add-new-folders`)
+
+A job's folder mappings are fixed when it is created. To bring one more folder
+into an existing job, add its `[[folders]]` entry to the configuration and run
+
+```sh
+imaplane migrate --config /path/to/migration.toml --incremental --add-new-folders --dry-run
+imaplane migrate --config /path/to/migration.toml --incremental --add-new-folders
+```
+
+Without `--add-new-folders` (or without `--incremental`) any command refuses a
+configuration that lists a folder the job does not record, naming it, so a typo
+cannot become a permanent mapping. The flag works only with `--incremental`.
+
+- Only genuinely new source-to-destination pairs are accepted. A recorded folder
+  can never be removed from the configuration, renamed or mapped elsewhere, and a
+  new folder cannot reuse a recorded destination. The configuration must keep
+  listing every folder ever added. To change a mapping, start a new job in a fresh
+  destination.
+- The new folder joins the job in one atomic journal commit: its mapping and its
+  baseline (a complete, consistent listing of the source folder, which fixes its
+  UIDVALIDITY and UIDNEXT, even when empty). Nothing already recorded is rewritten
+  and no original snapshot is invented. All messages in the baseline are then
+  copied with the normal copy-and-verify sequence; mail arriving later is found by
+  the next `--incremental` run.
+- A crash cannot add a folder twice or lose messages: the folder is either fully
+  recorded (then any `--incremental` run, or an ordinary `migrate`, finishes it) or
+  absent (rerun the same command). `--dry-run` reads the journal read-only and
+  shows `would_add_folders`; it upgrades, writes and sends nothing.
+- A missing source folder, or a changed source UIDVALIDITY in an added folder, is
+  refused before anything is written. If the destination folder already exists its
+  mail is left alone and reported (`destination_exists`); copies are appended after it.
+- Ordinary `migrate` and `verify` read a job containing added folders and keep
+  its plan, but never add or discover anything. A folder with an unresolved
+  `uncertain` transfer blocks new APPENDs in that folder only, as before.
+
 #### How much of the history is re-checked (`--verify-history`)
 
 Already-confirmed messages are not downloaded again by default. Three levels are

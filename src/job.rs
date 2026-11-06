@@ -9,10 +9,18 @@ use std::{
 
 pub struct Job {
     pub journal: Journal,
+    /// Configured folder mappings the job does not record yet (only with `allow_new`).
+    pub new_folders: Vec<(String, String)>,
     _lock: File,
 }
 impl Job {
     pub fn open(c: &Config, create: bool) -> Result<Self> {
+        Self::open_with(c, create, false)
+    }
+
+    /// `allow_new` admits configured folders the job does not record (only `migrate --incremental
+    /// --add-new-folders`); they are listed in `new_folders` and added by the engine.
+    pub fn open_with(c: &Config, create: bool, allow_new: bool) -> Result<Self> {
         if create {
             DirBuilder::new()
                 .recursive(true)
@@ -44,9 +52,10 @@ impl Job {
         } else {
             bail!("no migration journal exists");
         };
-        journal.check_binding(&binding)?;
+        let new_folders = journal.check_binding_mode(&binding, allow_new)?;
         Ok(Self {
             journal,
+            new_folders,
             _lock: lock,
         })
     }

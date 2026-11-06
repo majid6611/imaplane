@@ -266,7 +266,7 @@ Known limits carried forward: adding folders (I3); verification tiers and flag d
 UID-reuse case for already-confirmed UIDs (C11).
 
 
-## 13. Phase I2 status (implemented, awaiting approval to start I3)
+## 13. Phase I2 status (implemented and approved)
 
 Implemented as designed in sections 5.1-5.4, with these precise choices.
 
@@ -330,3 +330,71 @@ block is a separate decision for you.
 Fault points added: `before_history_fetch`, `before_history_demote`, `history_run_before_commit`,
 `history_run_after_commit`, `evidence_before_commit`, `evidence_after_commit` (and the existing
 `before_invalidate`/`after_invalidate`, now around the atomic demotion).
+
+
+## 14. Phase I3 status (implemented, awaiting approval to start I4)
+
+Implemented as designed in section 6, with these precise choices and two refinements to the approved design.
+
+**Command.** `migrate --incremental --add-new-folders [--dry-run]`; clap refuses the flag without
+`--incremental`. Every command (ordinary migrate and verify included) refuses a configuration that lists a
+folder the job does not record, naming it and the flag, before touching anything.
+
+**Binding check (`Journal::check_binding_mode`).** The account part of the binding is compared exactly.
+Every recorded mapping (schema 5: `job_folders`; schema 4: the binding) must appear in the configuration with
+the same source and destination, compared exactly (no INBOX alias spelling): a missing or renamed folder is a
+removal, a different destination is a remap, a new source that reuses a recorded destination is a conflict;
+all are refused whatever the flag. Unrecorded configured folders are refused without the flag and returned
+with it. A schema-4 journal checked without the flag is still compared byte for byte (an additional hint is
+given if only folders were added). Order of folders in the configuration no longer matters on schema 5.
+
+**Order of a real run.** open the job (never creates) -> read-only planning of existing folders (unchanged)
+-> read-only planning of each new folder (a consistent, inventory-checked source listing, retried on
+inconsistency; destination folder existence) -> upgrade to schema 5 if needed -> `add_folder` per new folder
+-> scans of existing folders -> the unchanged transfer loop. A failure before the upgrade has written nothing.
+
+**Atomic addition (`Journal::add_folder`).** One transaction inserts the `job_folders` row (origin `added`) and
+the folder's first scan (generation 1 = the baseline: UIDVALIDITY, UIDNEXT, the listed UIDs, possibly none).
+Refused, changing nothing, if the source or destination is already recorded (INBOX aliases included), if any
+snapshot, scan or transfer evidence exists for the folder, or if the baseline is malformed.
+
+**Refinement 1 (baseline is a scan, not a snapshot).** Section 6 says the folder's "first scan" is its baseline.
+Built that way: an added folder never has an original snapshot (`snapshot()` still refuses to create one),
+`work_list` already extends snapshots with scans, and `record_scan` now accepts a folder whose plan begins
+with its generation-1 scan. An empty baseline is allowed only here, so an empty folder still fixes its UIDVALIDITY.
+
+**Refinement 2 (ordinary migrate).** Ordinary `migrate` skips the snapshot step for scan-only folders
+(`is_scan_only`), so it finishes an addition that crashed before the transfers but never discovers or re-plans
+anything. `verify` needed no change (it reads `work_list`).
+
+**Safety carried over.** UIDVALIDITY: the baseline records the source epoch; every later run compares it
+(`plan_discovery`) and the destination epochs of recorded transfers, refusing before any write. A new folder has
+no destination epoch until its first APPENDUID, which must equal the epoch selected for that APPEND (existing
+guard). Uncertain blocking is per folder and unchanged. Dry run opens the journal read-only. Fault points:
+`folder_add_before_commit`, `folder_add_after_commit` (plus `scan_listed` and the upgrade points).
+
+**Not changed / limits.** No removal, renaming or remapping in v0.1 (new job instead). An existing destination
+folder is allowed (reported), because ordinary migrate already allows it; its pre-existing mail is never
+attributed. A folder added while another folder has an uncertain transfer is added and copied; the uncertain
+folder stays blocked.
+
+## 15. Follow-up concerns recorded for Phase I4 (from the I2 review)
+
+1. **Reports must distinguish metadata from full verification everywhere.** The incremental JSON has
+   `history_check` (level, counts, scope text), per-entry `level` and `last_full_verification`, and the text
+   output prints the level. Still to do in I4: make the text report and `status` say plainly, in one line, which
+   level the run used and how many messages were proven by a full read-back in this run (versus only checked);
+   consider an explicit `fully_verified_this_run` count and a `complete` wording that cannot be read as "all
+   content was re-verified"; show the oldest `last_full_verification` per folder in `status`; document the
+   fields in a reference page.
+2. **Compatibility with schema-5 journals made by earlier development builds.** I0 and I1 builds created
+   `verification_events` with `level IN ('full')`. Today such a journal is refused (clear error) the first time
+   evidence is needed. I4 must decide: (a) keep refusing (schema 5 is unreleased, no such journals outside
+   development), (b) a one-time, backed-up, transactional rebuild of the table copying its rows, or (c) a
+   schema 6. Recommendation: (a) for v0.1 and say so in the changelog, unless a real journal exists. Also test
+   `status`, `verify`, ordinary `migrate` and the dry run against such a file (they must not crash).
+3. **Consistent uncertain-folder behaviour across ordinary and incremental migration.** Ordinary `migrate`
+   keeps appending a folder's other planned messages after reporting an uncertain one; `--incremental` blocks
+   them (decision D2). Evaluate for I4 whether ordinary `migrate` should also block (same candidate-growth
+   reason), the effect on a user resuming an interrupted first copy, and whether the block should become the
+   default with an explicit override. This changes recovery behaviour, so it needs your approval first.

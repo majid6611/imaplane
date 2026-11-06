@@ -45,6 +45,11 @@ enum Command {
         /// confirmation; `full` re-reads every body like `verify`.
         #[arg(long, value_enum, default_value = "metadata", requires = "incremental")]
         verify_history: engine::HistoryLevel,
+        /// With --incremental: add configured folders the job does not record yet (their baseline is
+        /// recorded atomically, then their messages are copied). Recorded folders can never be
+        /// removed, renamed or remapped.
+        #[arg(long, requires = "incremental")]
+        add_new_folders: bool,
         #[arg(long)]
         json: bool,
     },
@@ -183,12 +188,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             dry_run,
             incremental,
             verify_history,
+            add_new_folders,
             json,
         } => {
             let c = Config::load(&config)?;
             if dry_run {
                 let plan = if incremental {
-                    engine::dry_run_incremental(&c, verify_history)?
+                    engine::dry_run_incremental(&c, verify_history, add_new_folders)?
                 } else {
                     engine::dry_run(&c)?
                 };
@@ -197,7 +203,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             if incremental {
                 return print_report(
-                    &engine::migrate_incremental(&c, stop, verify_history)?,
+                    &engine::migrate_incremental(&c, stop, verify_history, add_new_folders)?,
                     json,
                 );
             }
