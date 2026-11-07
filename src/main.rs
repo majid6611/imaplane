@@ -275,9 +275,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let journal = Journal::open_read_only(&state)?;
             let summary = journal.summary()?;
             let overview = journal.verification_overview()?;
+            let storage = journal.storage(&state)?;
             if json {
                 let mut value = serde_json::to_value(&summary)?;
                 value["verification"] = serde_json::to_value(&overview)?;
+                value["journal"] = serde_json::to_value(&storage)?;
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 println!(

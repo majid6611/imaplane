@@ -108,7 +108,7 @@ with tempfile.TemporaryDirectory(prefix='imaplane-add-') as tmp:
         def digest(self):
             h = hashlib.sha256()
             for p in sorted(self.state.iterdir()):
-                if p.name.startswith('job.lock') or p.name.endswith('-shm'):
+                if p.name.startswith('job.lock') or p.name.endswith('-shm') or (p.name.endswith('-wal') and p.stat().st_size == 0):
                     continue
                 h.update(p.name.encode()); h.update(p.read_bytes())
             return h.hexdigest()

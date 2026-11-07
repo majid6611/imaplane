@@ -77,6 +77,10 @@ pub struct Config {
     /// Accept a tmpfs/ramfs `spool_dir`, which keeps spooled mail in RAM. Default false.
     #[serde(default)]
     pub spool_allow_memory_backed: bool,
+    /// Journal file storage: `auto` (default) uses a write-ahead log with full synchronous commits when it can be
+    /// done safely, `rollback` keeps (or restores) the rollback journal. Not part of the job binding.
+    #[serde(default)]
+    pub journal_mode: crate::journal::JournalPref,
 }
 fn rejection_limit() -> u32 {
     3

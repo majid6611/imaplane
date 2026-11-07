@@ -210,14 +210,15 @@ impl Report {
         );
         self.verification = Some(v);
     }
-    /// Attach the journal's recorded full-verification times (oldest/newest per folder). Best effort:
-    /// a report must never fail because the overview could not be read.
-    fn attach_overview(&mut self, c: &Config) {
-        let path = c.state_dir.join("journal.sqlite3");
-        if let (Some(v), Ok(j)) = (self.verification.as_mut(), Journal::open_read_only(&path)) {
-            if let Ok(o) = j.verification_overview() {
-                v.folders = o.folders;
-            }
+    /// Attach the journal's recorded full-verification times (oldest/newest per folder), read through the
+    /// job's own connection while it still holds the lock (no second connection to the journal). Best
+    /// effort: a report must never fail because the overview could not be read.
+    fn attach_overview(&mut self, journal: &mut Journal) {
+        // This run's renewal evidence is buffered; write it first so the report cannot understate what the run
+        // itself just proved (a message verified a moment ago must not be shown as "no recorded time").
+        let _ = journal.flush_evidence();
+        if let (Some(v), Ok(o)) = (self.verification.as_mut(), journal.verification_overview()) {
+            v.folders = o.folders;
         }
     }
 }
@@ -893,8 +894,10 @@ impl Payload {
 }
 
 pub fn migrate(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
-    let mut report = migrate_with(c, stop, None, false)?;
-    report.attach_overview(c);
+    require_mappings(c)?;
+    let mut job = Job::open_with(c, true, false)?;
+    let mut report = migrate_with(c, stop, None, false, &mut job)?;
+    report.attach_overview(&mut job.journal);
     Ok(report)
 }
 
@@ -906,8 +909,11 @@ pub fn migrate_incremental(
     history: HistoryLevel,
     add_new_folders: bool,
 ) -> Result<Report> {
-    let mut report = migrate_with(c, stop, Some(history), add_new_folders)?;
-    report.attach_overview(c);
+    require_mappings(c)?;
+    // An incremental run extends an existing job; it never creates one.
+    let mut job = Job::open_with(c, false, add_new_folders)?;
+    let mut report = migrate_with(c, stop, Some(history), add_new_folders, &mut job)?;
+    report.attach_overview(&mut job.journal);
     Ok(report)
 }
 
@@ -916,11 +922,10 @@ fn migrate_with(
     stop: Arc<AtomicBool>,
     history: Option<HistoryLevel>,
     add_new_folders: bool,
+    job: &mut Job,
 ) -> Result<Report> {
+    let _ = add_new_folders;
     let incremental = history.is_some();
-    require_mappings(c)?;
-    // An incremental run extends an existing job; it never creates one.
-    let mut job = Job::open_with(c, !incremental, add_new_folders)?;
     let sp = c.source.password("Source")?;
     let dp = c.destination.password("Destination")?;
     let mut source = SourceReader::new(c, &sp)?;
@@ -930,7 +935,7 @@ fn migrate_with(
         "live destination content, INTERNALDATE and supported flags against the durable source UID snapshot",
     );
     if incremental {
-        (report.discovery, report.added_folders) = discover(c, &mut job, &mut source, &mut dest)?;
+        (report.discovery, report.added_folders) = discover(c, job, &mut source, &mut dest)?;
         for a in &report.added_folders {
             if let Some(w) = unattributed_warning(&a.destination, a.destination_existing_messages) {
                 eprintln!("WARNING: {w}");
@@ -1750,14 +1755,14 @@ fn reconcile(r: &Record, d: &mut DestinationReader<'_>, validity: u32) -> Result
 }
 
 pub fn verify(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
-    let mut report = verify_inner(c, stop)?;
-    report.attach_overview(c);
+    require_mappings(c)?;
+    let mut job = Job::open(c, false)?;
+    let mut report = verify_inner(c, stop, &mut job)?;
+    report.attach_overview(&mut job.journal);
     Ok(report)
 }
 
-fn verify_inner(c: &Config, stop: Arc<AtomicBool>) -> Result<Report> {
-    require_mappings(c)?;
-    let mut job = Job::open(c, false)?;
+fn verify_inner(c: &Config, stop: Arc<AtomicBool>, job: &mut Job) -> Result<Report> {
     let dp = c.destination.password("Destination")?;
     let mut dest = DestinationReader::new(c, &dp)?;
     let mut report = Report::new(

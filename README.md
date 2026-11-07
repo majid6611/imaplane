@@ -98,6 +98,21 @@ changed mapping requires a separate job. Never run the same job using a copied
 state directory concurrently. Use local storage with working SQLite locking
 and durability semantics; network filesystems have not been validated.
 
+**Journal files.** The job journal (`journal.sqlite3`) is an SQLite database in
+write-ahead-log mode with `synchronous=FULL`: every durable commit is synced to disk
+before the next step, exactly as before, but through one sync of a log file instead
+of four. While a job runs, the directory also holds `journal.sqlite3-wal` and
+`journal.sqlite3-shm` (private, mode 0600); a clean exit removes them. After a crash
+or kill, a `-wal` file remains and **holds committed data**: copy it together with
+`journal.sqlite3` if you ever move the state directory (`imaplane status` tells you
+when a log is pending), and never delete it by hand. Existing journals from earlier
+versions are converted once, on the first command that writes, after a verified
+backup (`journal.sqlite3.prewal.bak`). IMAPLANE refuses to enable write-ahead logging
+on filesystems where it cannot be trusted (NFS, SMB/CIFS, FUSE, 9p and similar) and
+refuses to use an existing WAL journal there; in that case keep the journal on a local
+disk, or set `journal_mode = "rollback"` in the configuration to keep (or restore) the
+older rollback-journal storage. Details: [docs/WAL_JOURNAL.md](docs/WAL_JOURNAL.md).
+
 Progress goes to stderr. Add `--json` to migrate/verify for a versioned JSON
 report on stdout. To retain a private report:
 

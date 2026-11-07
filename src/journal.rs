@@ -12,6 +12,75 @@ const SCHEMA_VERSION: i64 = 4;
 const SCHEMA_V5: i64 = 5;
 const SUPPORTED_SCHEMAS: [i64; 5] = [1, 2, 3, SCHEMA_VERSION, SCHEMA_V5];
 
+/// First SQLite release without the "WAL-reset bug" (a data race that can corrupt a WAL database when two
+/// connections write or checkpoint at the same instant; present in 3.7.0 through 3.51.2). Write-ahead logging is
+/// never enabled, and an already-WAL journal is never used, on an older library. See docs/WAL_JOURNAL.md.
+pub const WAL_MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
+const JOURNAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
+
+/// How the journal file is stored (configuration key `journal_mode`). `auto` uses a write-ahead log with
+/// `synchronous=FULL` whenever that can be done safely and otherwise keeps the rollback journal; `rollback`
+/// keeps (or restores) the rollback journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JournalPref {
+    #[default]
+    Auto,
+    Rollback,
+}
+
+/// True when the linked SQLite library is new enough to use WAL safely.
+pub fn wal_safe_version(version_number: i32) -> bool {
+    version_number >= WAL_MIN_SQLITE_VERSION_NUMBER
+}
+
+/// Name of a filesystem kind on which SQLite's WAL (shared-memory index, byte-range locks) cannot be trusted,
+/// judged from `statfs` `f_type`. `None` means no known problem.
+pub fn wal_unsafe_filesystem(f_type: u64) -> Option<&'static str> {
+    match f_type {
+        0x6969 => Some("nfs"),
+        0x517B => Some("smb"),
+        0xFF53_4D42 | 0xFE53_4D42 => Some("cifs/smb2"),
+        0x6573_5546 => Some("fuse"),
+        0x0102_1997 => Some("9p"),
+        0x564C => Some("ncp"),
+        0x5346_414F => Some("afs"),
+        0x00C3_6400 => Some("ceph"),
+        0x0BD0_0BD0 => Some("lustre"),
+        0x786f_4256 => Some("vboxsf"),
+        0x7461_636f => Some("ocfs2"),
+        _ => None,
+    }
+}
+
+fn directory_filesystem(dir: &Path) -> Option<&'static str> {
+    #[cfg(feature = "fault-injection")]
+    if let Ok(forced) = std::env::var("IMAPLANE_TEST_FS_TYPE") {
+        // Test seam, compiled only into the fault-injection build: pretend the directory is on this filesystem.
+        return wal_unsafe_filesystem(
+            u64::from_str_radix(forced.trim_start_matches("0x"), 16).ok()?,
+        );
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a valid NUL-terminated path and `st` is a properly sized, writable statfs.
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    wal_unsafe_filesystem(st.f_type as u64)
+}
+
+/// What the journal storage looks like, for `status` and for tests.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct JournalStorage {
+    pub mode: String,
+    pub sqlite_version: String,
+    pub wal_bytes: u64,
+    pub wal_pending: bool,
+    pub filesystem_suspect: Option<String>,
+}
+
 const V5_SCHEMA: &str = "
 CREATE TABLE scans (
     folder TEXT NOT NULL,
@@ -105,6 +174,9 @@ pub struct Journal(Connection, Evidence);
 struct Evidence {
     ready: std::cell::Cell<Option<bool>>,
     pending: Vec<PendingEvent>,
+    /// Storage-mode decision deferred by `open_deferred` until the caller has checked the job's identity:
+    /// (journal path, preference, whether an upgrade backup was already made during this open).
+    storage: Option<(std::path::PathBuf, JournalPref, bool)>,
 }
 struct PendingEvent {
     key: MessageKey,
@@ -161,15 +233,42 @@ pub struct HistoryRun<'a> {
 impl Journal {
     /// Existing journals only. A status typo must not create a new empty job.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with(path, JournalPref::Auto)
+    }
+
+    /// Open for writing with an explicit storage preference. This is the only path that may convert a journal
+    /// between rollback and write-ahead-log storage (after a verified backup).
+    pub fn open_with(path: &Path, pref: JournalPref) -> Result<Self> {
+        let mut journal = Self::open_deferred(path, pref)?;
+        journal.settle_storage()?;
+        Ok(journal)
+    }
+
+    /// Like `open_with`, but the storage mode (rollback / write-ahead log) is left as it is until
+    /// `settle_storage` is called. `Job::open` uses this so that a journal belonging to another job, or one the
+    /// configuration does not match, is refused before it is converted. Schema upgrades still happen here.
+    pub fn open_deferred(path: &Path, pref: JournalPref) -> Result<Self> {
         let conn = Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        Self::configure(conn, Some(path))
+        Self::configure(conn, Some(path), pref)
+    }
+
+    /// Apply the deferred storage decision (idempotent). See `select_storage_mode`.
+    pub fn settle_storage(&mut self) -> Result<()> {
+        if let Some((path, pref, backed_up)) = self.1.storage.take() {
+            select_storage_mode(&self.0, &path, pref, backed_up)?;
+        }
+        Ok(())
     }
 
     /// Create a new private file without overwriting any existing job.
     pub fn create(path: &Path, binding: &str) -> Result<Self> {
+        Self::create_with(path, binding, JournalPref::Auto)
+    }
+
+    pub fn create_with(path: &Path, binding: &str, pref: JournalPref) -> Result<Self> {
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -198,40 +297,98 @@ impl Journal {
         tx.execute("INSERT INTO job VALUES (1, ?1)", [binding])?;
         tx.pragma_update(None, "user_version", 2)?;
         tx.commit()?;
-        drop(Self::configure(conn, None)?);
+        drop(Self::configure(conn, None, pref)?);
         temporary.persist_noclobber(path).map_err(|e| e.error)?;
         std::fs::File::open(parent)?.sync_all()?;
-        Self::open(path)
+        Self::open_with(path, pref)
     }
 
+    /// Read-only access (`status`, dry runs): never converts, upgrades, checkpoints or writes. A journal in
+    /// write-ahead-log mode needs its `-shm` index to be readable and creatable; when the directory is not
+    /// writable, a journal with no pending log (clean shutdown) is read as immutable, and one with a pending
+    /// log is refused with an explanation rather than read inconsistently.
     pub fn open_read_only(path: &Path) -> Result<Self> {
-        let conn = Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        use rusqlite::{ErrorCode, OpenFlags};
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let probe = |c: Connection| -> rusqlite::Result<(Connection, i64)> {
+            c.busy_timeout(std::time::Duration::from_secs(5))?;
+            let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            Ok((c, version))
+        };
+        let first = Connection::open_with_flags(path, flags).and_then(probe);
+        let (conn, version) = match first {
+            Ok(ok) => ok,
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, ErrorCode::CannotOpen | ErrorCode::ReadOnly) =>
+            {
+                let pending = std::fs::metadata(sidecar(path, "-wal"))
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false);
+                if pending {
+                    bail!(
+                        "this journal has a pending write-ahead log and its directory is not writable, so it cannot be read safely; run a command that opens the job (it recovers the log), or copy the journal together with its -wal file to a writable directory"
+                    );
+                }
+                let uri = format!("file:{}?immutable=1", percent_encode_path(path));
+                Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI)
+                    .and_then(probe)
+                    .context("open journal read-only")?
+            }
+            Err(e) => return Err(e.into()),
+        };
         if !SUPPORTED_SCHEMAS.contains(&version) {
             bail!("unsupported journal schema {version}");
         }
         Ok(Self(conn, Evidence::default()))
     }
 
-    fn configure(mut conn: Connection, path: Option<&Path>) -> Result<Self> {
+    /// Journal file mode and write-ahead-log state (read-only; valid on any journal).
+    pub fn storage(&self, path: &Path) -> Result<JournalStorage> {
+        let mode: String = self.0.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        let wal_bytes = std::fs::metadata(sidecar(path, "-wal"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Ok(JournalStorage {
+            mode,
+            sqlite_version: rusqlite::version().to_owned(),
+            wal_bytes,
+            wal_pending: wal_bytes > 0,
+            filesystem_suspect: path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .or(Some(Path::new(".")))
+                .and_then(directory_filesystem)
+                .map(str::to_owned),
+        })
+    }
+
+    /// The storage mode this connection actually uses and its synchronous setting (for tests and diagnostics).
+    pub fn pragmas(&self) -> Result<(String, i64)> {
+        Ok((
+            self.0.query_row("PRAGMA journal_mode", [], |r| r.get(0))?,
+            self.0
+                .pragma_query_value(None, "synchronous", |r| r.get(0))?,
+        ))
+    }
+
+    fn configure(mut conn: Connection, path: Option<&Path>, pref: JournalPref) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if !SUPPORTED_SCHEMAS.contains(&version) {
             bail!("unsupported journal schema {version}");
         }
         conn.pragma_update(None, "synchronous", "FULL")?;
+        let mut backed_up = false;
         if version < SCHEMA_VERSION {
             if let Some(path) = path {
                 crate::fault::point("before_upgrade_backup");
-                backup_before_upgrade(&conn, path, version)?;
+                backup_before_upgrade(&conn, path, &format!("v{version}"))?;
                 crate::fault::point("after_upgrade_backup");
+                backed_up = true;
             }
             crate::fault::point("before_schema_upgrade");
         }
+        let deferred = path.map(|p| (p.to_path_buf(), pref, backed_up));
         if version == 1 {
             // Transactional additive upgrade. Never invent metadata or transfer evidence.
             let tx = conn.transaction()?;
@@ -269,7 +426,9 @@ impl Journal {
             crate::fault::point("after_skip_schema_upgrade");
         }
         conn.pragma_update(None, "trusted_schema", false)?;
-        Ok(Self(conn, Evidence::default()))
+        let mut journal = Self(conn, Evidence::default());
+        journal.1.storage = deferred;
+        Ok(journal)
     }
 
     pub(crate) fn reject_append(
@@ -329,7 +488,7 @@ impl Journal {
         let folders = self.binding_folders()?;
         self.check_folders_declared(&folders)?;
         crate::fault::point("before_v5_backup");
-        backup_before_upgrade(&self.0, path, version)?;
+        backup_before_upgrade(&self.0, path, &format!("v{version}"))?;
         crate::fault::point("after_v5_backup");
         crate::fault::point("before_v5_upgrade");
         let now = chrono::Utc::now().to_rfc3339();
@@ -1588,9 +1747,121 @@ fn checked_reason(reason: &str) -> Result<&str> {
     Ok(reason)
 }
 
+/// Path of a SQLite sidecar file (`-wal`, `-shm`) next to the journal.
+fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
+}
+
+fn percent_encode_path(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::new();
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Choose, verify and (when needed) switch the journal's storage mode. Runs only for write opens of an existing
+/// file. Rules:
+///  * WAL needs a SQLite without the WAL-reset bug and a filesystem that supports its shared-memory index;
+///    otherwise the journal stays in (or the open refuses an already-WAL journal on) the safe configuration.
+///  * An existing journal that holds data is backed up (verified, never overwritten) before the one-time switch.
+///  * After any switch the connection is re-verified: WAL really on, `synchronous=FULL` really in force.
+fn select_storage_mode(
+    conn: &Connection,
+    path: &Path,
+    pref: JournalPref,
+    backed_up: bool,
+) -> Result<()> {
+    let current: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+    let is_wal = current.eq_ignore_ascii_case("wal");
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let suspect = directory_filesystem(dir);
+    let version_ok = wal_safe_version(rusqlite::version_number());
+    match (pref, is_wal) {
+        (JournalPref::Auto, true) => {
+            if !version_ok {
+                bail!(
+                    "this journal is in write-ahead-log mode but the linked SQLite {} predates the 3.51.3 fix for the WAL-reset bug; refusing to use it",
+                    rusqlite::version()
+                );
+            }
+            if let Some(fs) = suspect {
+                bail!(
+                    "this journal is in write-ahead-log mode but its directory is on a {fs} filesystem, where WAL durability cannot be guaranteed; move the state directory to a local filesystem (copy journal.sqlite3 together with any -wal file), or set journal_mode = \"rollback\" to convert it back"
+                );
+            }
+        }
+        (JournalPref::Auto, false) => {
+            if !version_ok {
+                eprintln!(
+                    "WARNING: SQLite {} predates the 3.51.3 fix for the WAL-reset bug; the journal stays in rollback mode",
+                    rusqlite::version()
+                );
+            } else if let Some(fs) = suspect {
+                eprintln!(
+                    "WARNING: the state directory is on a {fs} filesystem where WAL durability cannot be guaranteed; the journal stays in rollback mode"
+                );
+            } else {
+                let has_data: bool =
+                    conn.query_row("SELECT EXISTS(SELECT 1 FROM transfers)", [], |r| r.get(0))?;
+                if has_data && !backed_up {
+                    crate::fault::point("before_wal_backup");
+                    backup_before_upgrade(conn, path, "prewal")?;
+                    crate::fault::point("after_wal_backup");
+                }
+                crate::fault::point("before_wal_switch");
+                let got: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+                crate::fault::point("after_wal_switch");
+                if !got.eq_ignore_ascii_case("wal") {
+                    eprintln!(
+                        "WARNING: SQLite could not enable write-ahead logging here (mode stays {got}); the journal stays in rollback mode"
+                    );
+                }
+            }
+        }
+        (JournalPref::Rollback, true) => {
+            if has_other_data(conn)? && !backed_up {
+                backup_before_upgrade(conn, path, "prerollback")?;
+            }
+            let got: String = conn.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))?;
+            if !got.eq_ignore_ascii_case("delete") {
+                bail!(
+                    "could not convert the journal back to rollback mode (it is now {got}); is another process using it?"
+                );
+            }
+        }
+        (JournalPref::Rollback, false) => {}
+    }
+    // Verify what is actually in force on THIS connection; never assume a pragma took effect.
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    let synchronous: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+    if synchronous != 2 {
+        bail!("journal synchronous mode is {synchronous}, not FULL; refusing to continue");
+    }
+    let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+    if mode.eq_ignore_ascii_case("wal") {
+        conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
+    }
+    Ok(())
+}
+
+fn has_other_data(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM transfers)", [], |r| r.get(0))?)
+}
+
 /// SQLite online backup includes committed WAL pages. Publish without clobbering
 /// even symlinks; failures stop migration before any schema change.
-fn backup_before_upgrade(conn: &Connection, path: &Path, version: i64) -> Result<()> {
+fn backup_before_upgrade(conn: &Connection, path: &Path, label: &str) -> Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1614,9 +1885,9 @@ fn backup_before_upgrade(conn: &Connection, path: &Path, version: i64) -> Result
     let mut temporary = temporary;
     for suffix in 0..10000 {
         let name = if suffix == 0 {
-            format!("{stem}.v{version}.bak")
+            format!("{stem}.{label}.bak")
         } else {
-            format!("{stem}.v{version}.bak.{suffix}")
+            format!("{stem}.{label}.bak.{suffix}")
         };
         match temporary.persist_noclobber(parent.join(name)) {
             Ok(_) => {

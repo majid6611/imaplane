@@ -23,7 +23,7 @@ imap-proto = "0.16.7"
 libc = "0.2.191"
 native-tls = "0.2.18"
 rpassword = "7.5.4"
-rusqlite = { version = "0.38", features = ["bundled", "backup"] }
+rusqlite = { version = "0.39", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

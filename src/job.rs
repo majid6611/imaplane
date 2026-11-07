@@ -44,17 +44,28 @@ impl Job {
             .context("another process holds this migration job lock")?;
         let path = c.state_dir.join("journal.sqlite3");
         let binding = c.binding()?;
-        let journal = if path.try_exists()? {
+        let mut journal = if path.try_exists()? {
             check_private_file(&path)?;
-            Journal::open(&path)?
+            // A write-ahead log and its index belong to this journal and hold its data: same rules as the file.
+            for suffix in ["-wal", "-shm"] {
+                let mut name = path.clone().into_os_string();
+                name.push(suffix);
+                let side = std::path::PathBuf::from(name);
+                if fs::symlink_metadata(&side).is_ok() {
+                    check_private_file(&side)?;
+                }
+            }
+            Journal::open_deferred(&path, c.journal_mode)?
         } else if create {
-            Journal::create(&path, &binding)?
+            Journal::create_with(&path, &binding, c.journal_mode)?
         } else {
             bail!("no migration journal exists");
         };
         let new_folders = journal.check_binding_mode(&binding, allow_new)?;
         // A development-era schema-5 journal is refused here, before any network use or write.
         journal.require_compatible_evidence()?;
+        // Only now, with the job's identity and mappings accepted, may the journal's storage be converted.
+        journal.settle_storage()?;
         Ok(Self {
             journal,
             new_folders,

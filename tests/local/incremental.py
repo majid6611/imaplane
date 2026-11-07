@@ -107,9 +107,11 @@ with tempfile.TemporaryDirectory(prefix='imaplane-inc-') as tmp:
         def digest(self):
             h = hashlib.sha256()
             for p in sorted(self.state.iterdir()):
-                if p.name.startswith('job.lock') or p.name.endswith('-shm'):
+                if p.name.startswith('job.lock') or p.name.endswith('-shm') or (p.name.endswith('-wal') and p.stat().st_size == 0):
                     continue
                 h.update(p.name.encode()); h.update(p.read_bytes())
+                if os.environ.get('DEBUG_DIGEST'):
+                    print('   digest part', p.name, p.stat().st_size, hashlib.sha256(p.read_bytes()).hexdigest()[:10])
             return h.hexdigest()
 
         def core(self):
