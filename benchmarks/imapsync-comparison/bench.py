@@ -32,6 +32,13 @@ from common import HERE, SRC_USER, DST_USER, sh, utf7
 
 WORK = Path(os.environ.get('BENCH_WORK', Path.home() / 'imaplane-bench-work'))
 IMAPLANE_BIN = Path(os.environ.get('IMAPLANE_BIN', '/tmp/claude-1000/-home-majid-Desktop-imaplane/7cf405e2-bd5d-4301-a605-fe5d60682523/scratchpad/cargo-target/release/imaplane'))
+# Configs named imaplane-wal* run the Phase 1 (write-ahead-log journal) binary; imaplane / imaplane-stream run IMAPLANE_BIN
+# (the original a6ec32f build). Both are release builds of committed sources; their hashes are recorded in env.json.
+IMAPLANE_WAL_BIN = Path(os.environ['IMAPLANE_WAL_BIN']) if 'IMAPLANE_WAL_BIN' in os.environ else None
+
+
+def binary_for(cfg):
+    return IMAPLANE_WAL_BIN if cfg.startswith('imaplane-wal') else IMAPLANE_BIN
 TOOL_LIMITS = ['--cpus', '2', '--memory', '2g']
 CONFIGS = ['imapsync', 'imapsync-tuned', 'imaplane', 'imaplane-stream']
 NEWMAIL = 200
@@ -130,6 +137,7 @@ class Run:
         self.src_before = None
         self.tool_name = f'bench-tool-{self.rid}'
         self.extra_env, self.binary, self.global_args, self.cmd_prefix = {}, None, [], []
+        self.cfg_binary = None
 
     def close(self):
         self.src.stop(); self.dst.stop()
@@ -163,7 +171,7 @@ class Run:
             for f in self.folders:
                 c += ['--folder', utf7(f)]
             return c
-        self.write_imaplane_config(cfg == 'imaplane-stream')
+        self.write_imaplane_config(cfg.endswith('stream'))
         base = ['imaplane'] + self.global_args
         if step in ('fresh', 'resume', 'ordinary'):
             return base + ['migrate', '--config', '/work/imaplane.toml', '--json']
@@ -176,11 +184,12 @@ class Run:
         env = [x for k, v in self.extra_env.items() for x in ('-e', f'{k}={v}')]
         return (['docker', 'run'] + (['-d'] if detach else []) + ['--rm', '--name', name, '--network', self.net] + TOOL_LIMITS + ['--user', f'{common.UID}:{common.UID}', '-e', 'HOME=/tmp'] + env + [
                 '-v', f'{self.dir}/imaplane.toml:/work/imaplane.toml:ro', '-v', f'{WORK}/tls.crt:/work/tls.crt:ro', '-v', f'{WORK}/password:/work/password:ro',
-                '-v', f'{self.dir}/state:/state', '-v', f'{self.dir}/out:/out', '-v', f'{HERE}:/bench:ro', '-v', f'{self.binary or IMAPLANE_BIN}:/usr/local/bin/imaplane:ro', common.RUNNER_IMAGE,
+                '-v', f'{self.dir}/state:/state', '-v', f'{self.dir}/out:/out', '-v', f'{HERE}:/bench:ro', '-v', f'{self.binary or self.cfg_binary or IMAPLANE_BIN}:/usr/local/bin/imaplane:ro', common.RUNNER_IMAGE,
                 'python3', '/bench/measure.py', '/out', outname, '--'])
 
     # ---- measured execution -------------------------------------------------------------------
     def measure(self, cfg, step, label, timeout=14400):
+        self.cfg_binary = binary_for(cfg) if cfg.startswith('imaplane') else None
         cmd = self.cmd_prefix + self.command(cfg, step)
         t = time.time()
         sh(*self.docker_args(self.tool_name, label), *cmd, check=False, timeout=timeout)
@@ -238,6 +247,10 @@ def env_info():
     info['imapsync'] = sh('docker', 'run', '--rm', common.RUNNER_IMAGE, 'sh', '-c', 'imapsync --version; cat /usr/local/share/imapsync.sha256; perl -v | sed -n 2p').stdout.strip()
     info['imaplane_binary_sha256'] = hashlib.sha256(IMAPLANE_BIN.read_bytes()).hexdigest()
     info['imaplane_version'] = sh(str(IMAPLANE_BIN), '--version').stdout.strip()
+    if IMAPLANE_WAL_BIN:
+        info['imaplane_wal_binary_sha256'] = hashlib.sha256(IMAPLANE_WAL_BIN.read_bytes()).hexdigest()
+        info['imaplane_wal_binary_path'] = str(IMAPLANE_WAL_BIN)
+    info['imaplane_baseline_binary_path'] = str(IMAPLANE_BIN)
     info['imaplane_commit'] = sh('git', '-C', str(HERE.parents[1]), 'rev-parse', 'HEAD').stdout.strip()
     info['imaplane_tree_clean'] = not sh('git', '-C', str(HERE.parents[1]), 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock').stdout.strip()
     info['limits'] = {'tool_container': TOOL_LIMITS, 'dovecot_containers': '--cpus 2 --memory 2g each'}
@@ -363,7 +376,7 @@ def operator_loop(run, cfg, label, max_rounds=6):
         progressed = False
         for e in unc:
             base = ['docker', 'run', '--rm', '--network', run.net, '--user', f'{common.UID}:{common.UID}', '-e', 'HOME=/tmp', '-v', f'{run.dir}/imaplane.toml:/work/imaplane.toml:ro',
-                    '-v', f'{WORK}/tls.crt:/work/tls.crt:ro', '-v', f'{WORK}/password:/work/password:ro', '-v', f'{run.dir}/state:/state', '-v', f'{IMAPLANE_BIN}:/usr/local/bin/imaplane:ro', common.RUNNER_IMAGE, 'imaplane']
+                    '-v', f'{WORK}/tls.crt:/work/tls.crt:ro', '-v', f'{WORK}/password:/work/password:ro', '-v', f'{run.dir}/state:/state', '-v', f'{run.cfg_binary or IMAPLANE_BIN}:/usr/local/bin/imaplane:ro', common.RUNNER_IMAGE, 'imaplane']
             a = ['--config', '/work/imaplane.toml', '--folder', e['source_folder'], '--uid', str(e['source_uid'])]
             p = sh(*base, 'recover', *a, '--json', check=False)
             if p.returncode == 2:
@@ -394,6 +407,7 @@ def cmd_kill(args):
                 expected = fresh_medians.get(cfg, 60.0)
                 delay = max(2.0, frac * expected)
                 label = f'{tag}-killed'
+                run.cfg_binary = binary_for(cfg) if cfg.startswith('imaplane') else None
                 cmd = run.command(cfg, 'fresh')
                 name = run.tool_name
                 sh(*run.docker_args(name, label, detach=True), *cmd)
@@ -448,6 +462,26 @@ def cmd_stage2(_):
     log('STAGE2 DONE (scale-20000 deferred)')
 
 
+def cmd_stage_p1(_):
+    """Phase 1 (write-ahead-log journal) comparison, all under ONE lock: original binary vs the WAL binary vs tuned
+    imapsync, interleaved, on the mixed dataset; SIGKILL tests for the WAL binary; 1k and 5k scaling."""
+    if IMAPLANE_WAL_BIN is None:
+        sys.exit('set IMAPLANE_WAL_BIN to the Phase 1 release binary')
+    cfgs = 'imaplane,imaplane-wal,imaplane-wal-stream,imapsync-tuned'
+    cmd_run(argparse.Namespace(profile='mixed', reps=3, seed=21, no_newmail=False, configs=cfgs, out='p1-main-mixed'))
+    med = {}
+    for l in open(HERE / 'results' / 'p1-main-mixed' / 'runs.jsonl'):
+        r = json.loads(l)
+        if r['step'] == 'fresh':
+            med.setdefault(r['cfg'], []).append(r['wall_s'])
+    med = {k: statistics.median(v) for k, v in med.items()}
+    json.dump(med, open(HERE / 'results' / 'p1-fresh-medians-mixed.json', 'w'))
+    cmd_kill(argparse.Namespace(profile='mixed', kills=4, seed=17, configs='imaplane-wal,imaplane-wal-stream', fresh_medians=str(HERE / 'results' / 'p1-fresh-medians-mixed.json'), out='p1-kill-mixed'))
+    for n in (1000, 5000):
+        cmd_run(argparse.Namespace(profile=f'scale-{n}', reps=2, seed=23, no_newmail=True, configs='imaplane,imaplane-wal,imapsync-tuned', out=f'p1-scale-{n}'))
+    log('PHASE 1 BENCHMARK DONE')
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -457,7 +491,7 @@ def main():
     r.add_argument('--configs', default=','.join(CONFIGS)); r.add_argument('--out'); r.add_argument('--no-newmail', action='store_true')
     k = sub.add_parser('kill'); k.add_argument('--profile', default='mixed'); k.add_argument('--kills', type=int, default=4); k.add_argument('--seed', type=int, default=7)
     k.add_argument('--configs', default='imapsync,imaplane,imaplane-stream'); k.add_argument('--fresh-medians'); k.add_argument('--out')
-    sub.add_parser('stage2'); sub.add_parser('clean')
+    sub.add_parser('stage2'); sub.add_parser('clean'); sub.add_parser('stage_p1')
     a = ap.parse_args()
     if a.cmd == 'env':
         print(json.dumps(env_info(), indent=1)); return
@@ -465,7 +499,7 @@ def main():
         if a.cmd == 'clean':
             clean(); return
         preflight()
-        {'golden': cmd_golden, 'run': cmd_run, 'kill': cmd_kill, 'stage2': cmd_stage2}[a.cmd](a)
+        {'golden': cmd_golden, 'run': cmd_run, 'kill': cmd_kill, 'stage2': cmd_stage2, 'stage_p1': cmd_stage_p1}[a.cmd](a)
 
 
 if __name__ == '__main__':
