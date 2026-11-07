@@ -14,3 +14,15 @@
 
 # Sensitive pre-upgrade journal snapshots.
 *.sqlite3.v*.bak*
+
+# OAuth material must never be committed: keep it under ~/.config/imaplane (0700), outside the repository.
+client_secret*.json
+*client_secret*.json
+google-client*.json
+*.access-token
+*.access_token
+access.token
+refresh.token
+*.refresh-token
+*.refresh_token
+.token-*
