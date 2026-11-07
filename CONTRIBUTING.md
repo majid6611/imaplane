@@ -29,3 +29,8 @@ without the change; killing the process at the relevant point must stay duplicat
   verification or change recovery semantics without a written design and review.
 - The `vendor/` patches are required; see `vendor/README.md`.
 - Licensed MIT; by contributing you agree your work is under the same license.
+
+## Dependency advisories
+CI runs `cargo audit` weekly and on every push as a non-blocking job whose findings are shown as a
+warning and in the job summary. Treat any finding as work to triage (upgrade, or document why it does not
+apply); do not ignore it. Locally: `cargo install cargo-audit --locked && cargo audit`.

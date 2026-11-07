@@ -1,5 +1,9 @@
 name: Rust
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 5 * * 1'   # weekly: new advisories appear without any code change
 permissions:
   contents: read
 jobs:
@@ -104,3 +108,36 @@ jobs:
             target/memory-verify-buffered.json
             target/memory-verify-streaming.json
             target/memory-migrate-streaming.json
+  advisories:
+    # Dependency advisory scan (RustSec). NON-BLOCKING by design: a finding does not fail the build,
+    # but it is never silent: it is printed, annotated as a warning and written to the job summary. Triage it; do not ignore it. Run locally with: cargo install cargo-audit --locked
+    # && cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install --yes libssl-dev pkg-config
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: cargo audit (reports vulnerabilities, unmaintained and yanked crates)
+        run: |
+          set +e
+          cargo audit --file Cargo.lock --json > audit.json 2> audit.err
+          status=$?
+          cargo audit --file Cargo.lock 2>&1 | tee audit.txt
+          {
+            echo '## cargo audit'
+            if [ "$status" -eq 0 ]; then echo 'No known vulnerabilities in Cargo.lock.'; else echo '**Findings (or the scan failed) — see below.**'; fi
+            echo '```'; cat audit.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then echo "::warning title=cargo audit::advisories or scan failure (exit $status); see the job summary"; fi
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cargo-audit
+          path: |
+            audit.json
+            audit.txt
