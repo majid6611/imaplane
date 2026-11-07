@@ -13,9 +13,12 @@ case "$package" in
       imaplane migrate --help >/dev/null
       test -f /usr/share/doc/imaplane/examples/migration.toml
       test -s /usr/share/doc/imaplane/THIRD_PARTY_LICENSES.txt
+      test -x /usr/bin/imaplane-oauth-token
+      test -s /usr/share/doc/imaplane/docs/WAL_JOURNAL.md
       apt-get remove -y imaplane >/dev/null
       test "$(cat /root/imaplane-state/sentinel)" = keep-me
       test ! -e /usr/bin/imaplane
+      test ! -e /usr/bin/imaplane-oauth-token
     ' ;;
   *.rpm)
     docker run --rm -v "$package:/tmp/imaplane.rpm:ro" rockylinux:9 sh -ec '
@@ -26,9 +29,12 @@ case "$package" in
       imaplane migrate --help >/dev/null
       test -f /usr/share/doc/imaplane/examples/migration.toml
       test -s /usr/share/doc/imaplane/THIRD_PARTY_LICENSES.txt
+      test -x /usr/bin/imaplane-oauth-token
+      test -s /usr/share/doc/imaplane/docs/WAL_JOURNAL.md
       dnf --disablerepo="*" remove -y imaplane >/dev/null
       test "$(cat /root/imaplane-state/sentinel)" = keep-me
       test ! -e /usr/bin/imaplane
+      test ! -e /usr/bin/imaplane-oauth-token
     ' ;;
   *) echo 'Expected DEB or RPM' >&2; exit 1 ;;
 esac

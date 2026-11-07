@@ -6,6 +6,9 @@ happen in your browser. Part 4 onward contacts Google (OAuth first, IMAP later) 
 waits for your explicit go-ahead. Google's console menus are renamed from time to
 time; if a label differs slightly, follow the intent.
 
+> The commands below use the packaged helper `imaplane-oauth-token`; from a source checkout run
+> `python3 scripts/oauth_token.py` instead. Details: `OAUTH_TOKEN_HELPER.md`.
+
 ## What you will end up with
 
 - A disposable Gmail address, used for nothing else.
@@ -92,7 +95,7 @@ only for the redirect.
 
 ```sh
 cd ~/imaplane-live
-python3 /path/to/imaplane/scripts/oauth_token.py authorize --provider google \
+imaplane-oauth-token authorize --provider google \
     --client-json client.json --login-hint DISPOSABLE@gmail.com \
     --refresh-token-file refresh.token --access-token-file access.token
 ```
@@ -105,7 +108,7 @@ Keep the access token fresh for the length of a run (it lasts about an hour). Le
 this running in its own terminal:
 
 ```sh
-python3 /path/to/imaplane/scripts/oauth_token.py refresh --provider google \
+imaplane-oauth-token refresh --provider google \
     --client-json client.json --refresh-token-file refresh.token \
     --access-token-file access.token --loop
 ```

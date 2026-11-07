@@ -25,6 +25,8 @@ jobs:
         run: python3 tests/local/e2e.py
       - name: Reliability fault regressions
         run: python3 tests/local/reliability.py
+      - name: OAuth token helper (black-box file modes, atomic writes, no secret in output or argv)
+        run: python3 tests/local/oauth_cli_security.py scripts/oauth_token.py
       - name: Offline benchmark harness tests
         run: python3 -m unittest discover -s tests/local -p 'test_*.py'
       - name: Build isolated fault-injection binary

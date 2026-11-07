@@ -15,6 +15,14 @@ contents:
     dst: /usr/bin/imaplane
     file_info:
       mode: 0755
+  - src: scripts/oauth_token.py
+    dst: /usr/bin/imaplane-oauth-token
+    file_info:
+      mode: 0755
+  - src: docs/OAUTH_TOKEN_HELPER.md
+    dst: /usr/share/doc/imaplane/docs/OAUTH_TOKEN_HELPER.md
+    file_info:
+      mode: 0644
   - src: ${NOTICES}
     expand: true
     dst: /usr/share/doc/imaplane/THIRD_PARTY_LICENSES.txt
@@ -115,9 +123,13 @@ overrides:
       - libgcc-s1
       - libssl3 (>= 3.0.0)
       - ca-certificates
+    recommends:
+      - python3
   rpm:
     depends:
       - glibc >= 2.34
       - libgcc
       - openssl-libs >= 3.0.7
       - ca-certificates
+    recommends:
+      - python3

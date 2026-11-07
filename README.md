@@ -45,7 +45,7 @@ Implemented:
    [Recovery and verification](#recovery-and-verification) (`recover`, `resolve`, `skip`).
 6. For Gmail/Microsoft 365 (XOAUTH2, **untested with live accounts**) see
    [XOAUTH2](#xoauth2-and-mandatory-starttls) and the token helper
-   `/usr/share/doc/imaplane/tools/oauth_token.py`.
+   `imaplane-oauth-token` ([docs/OAUTH_TOKEN_HELPER.md](docs/OAUTH_TOKEN_HELPER.md); needs `python3`, standard library only).
 
 ### Exit codes
 
@@ -595,7 +595,7 @@ permissions, symlink and size checks as password files. The token is re-read on
 every connection, including reconnects; atomically replace the file using a
 trusted external token manager before expiration. IMAPLANE never runs an arbitrary
 credential command or falls back to a password after XOAUTH2 failure. OAuth
-consent, token acquisition and refresh are managed outside this tool.
+consent, token acquisition and refresh are done by the separate helper `imaplane-oauth-token` (or any trusted external token manager); the migration program itself never contacts an OAuth service.
 
 For implicit TLS, retain `security = "tls"` (the default) and port 993. For
 STARTTLS, explicitly configure `security = "starttls"` and port 143 (or your server's
