@@ -98,6 +98,17 @@ class Confined(unittest.TestCase):
             self.assertFalse(self.c('a1 ' + bad)[0], bad)
 
 
+class ConfinedReadOnlyExtras(unittest.TestCase):
+    def test_extra_readonly_folders_can_only_be_examined(self):
+        g = lambda t: p.guard(t.encode() + b'\r\n', 0, 'IMAPLANE-Test', ['[Gmail]/All Mail'])
+        self.assertTrue(g('a1 EXAMINE "[Gmail]/All Mail"')[0])
+        self.assertTrue(g('a1 STATUS "[Gmail]/All Mail" (MESSAGES)')[0])
+        self.assertFalse(g('a1 SELECT "[Gmail]/All Mail"')[0])
+        self.assertFalse(g('a1 APPEND "[Gmail]/All Mail" {3}')[0])
+        self.assertFalse(g('a1 EXAMINE INBOX')[0])
+        self.assertTrue(g('a1 UID FETCH 1:* (UID X-GM-MSGID X-GM-THRID X-GM-LABELS FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')[0])
+
+
 class ProxyEndToEnd(unittest.TestCase):
     """The real proxy in confined-write mode against a fake TLS upstream: exact literal bytes, the APPEND cap, refused
     commands that never reach the upstream, and the username substitution."""

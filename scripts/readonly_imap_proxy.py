@@ -78,7 +78,7 @@ def mailbox_name(text):
     return text[1:-1] if len(text) >= 2 and text[0] == text[-1] == '"' else text
 
 
-def guard(line, cut, confine=None):
+def guard(line, cut, confine=None, extra_ro=()):
     """Decide one client command line. Returns (allowed, reason). `cut` is the highest UID the client may name.
     With `confine` (a mailbox name) the proxy is in confined-write mode: in addition to the read-only commands it
     allows CREATE, SELECT, EXAMINE, STATUS, APPEND and CLOSE, but ONLY for that one mailbox; everything else that
@@ -91,8 +91,9 @@ def guard(line, cut, confine=None):
         if verb not in ALLOWED_VERBS | CONFINED_EXTRA:
             return False, f'{verb} is not allowed (confined proxy)'
         if verb in ('CREATE', 'SELECT', 'EXAMINE', 'STATUS'):
-            name = rest.split(' ')[0] if verb == 'STATUS' else rest
-            if name.strip().startswith('{') or mailbox_name(name) != confine:
+            name = (re.match(r'"[^"]*"|\S+', rest) or re.match('', '')).group(0) if verb == 'STATUS' else rest
+            allowed = {confine} | (set(extra_ro) if verb in ('EXAMINE', 'STATUS') else set())
+            if name.strip().startswith('{') or mailbox_name(name) not in allowed:
                 return False, f'{verb} is only allowed on {confine}'
         elif verb == 'APPEND':
             m = APPEND_RE.match(rest)
@@ -329,7 +330,9 @@ def serve_connection(client, args, sl, user, stats, ctx):
             if state['auth_tag']:                     # a SASL continuation line, not a command
                 up.send(rewrite_auth(line.strip(), user) + b'\r\n')
                 continue
-            ok, reason = guard(line, sl.cut if sl is not None else 0, args.confine_folder)
+            ok, reason = guard(line, sl.cut if sl is not None else 0, args.confine_folder, args.readonly_folder or ())
+            if ok and args.confine_folder and args.max_appends == 0 and split_command(line)[1] in ('CREATE', 'SELECT', 'APPEND', 'CLOSE'):
+                ok, reason = False, 'diagnostic mode (--max-appends 0): no write-capable command is allowed'
             parsed = split_command(line)
             tag = parsed[0] if parsed else '*'
             verb = parsed[1] if parsed else '?'
@@ -405,6 +408,7 @@ def main(argv=None):
     ap.add_argument('--token-file', help='access token file (0600), used only by the preflight (read-only mode)')
     ap.add_argument('--count', type=int, help='read-only mode: expose only the oldest N INBOX messages')
     ap.add_argument('--confine-folder', help='confined-write mode: allow CREATE/SELECT/APPEND only for this one mailbox')
+    ap.add_argument('--readonly-folder', action='append', help='confined mode: an additional mailbox that may only be EXAMINEd (repeatable)')
     ap.add_argument('--max-appends', type=int, default=0, help='confined mode: hard cap on APPENDs over the proxy lifetime')
     ap.add_argument('--max-append-bytes', type=int, default=10 << 20)
     ap.add_argument('--upstream-ca', help='extra CA file for the upstream (tests and local rehearsals only)')
@@ -414,8 +418,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     user = os.environ['IMAP_PROXY_USER']
     if args.confine_folder:
-        if args.max_appends < 1:
-            sys.exit('confined mode needs --max-appends')
+        if args.max_appends < 0:
+            sys.exit('--max-appends must be >= 0 (0 = diagnostic, read-only)')
         sl, info = None, {'mode': 'confined-write', 'folder_confined_to': 'set', 'max_appends': args.max_appends}
     else:
         if not args.token_file or not args.count:
