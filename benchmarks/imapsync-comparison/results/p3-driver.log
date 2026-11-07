@@ -1,0 +1,254 @@
+04:22:22 preflight: no stale containers, networks, run directories or measuring processes
+04:22:24 rep 1 order ['imaplane-fd', 'imapsync-tuned', 'imaplane-rt']
+04:22:32 scale-1000-imaplane-fd-r1 fresh: wall 6.9s rc=0 rss=16MiB cmds=5025 verify=ok
+04:22:33 scale-1000-imaplane-fd-r1 rerun-inc-metadata: wall 0.2s rc=0 rss=16MiB cmds=50 verify=None
+04:22:34 scale-1000-imaplane-fd-r1 rerun-inc-full: wall 0.8s rc=0 rss=16MiB cmds=2024 verify=None
+04:22:35 scale-1000-imaplane-fd-r1 rerun-verify: wall 0.7s rc=0 rss=14MiB cmds=2004 verify=None
+04:22:36 scale-1000-imaplane-fd-r1 rerun-ordinary: wall 0.8s rc=0 rss=16MiB cmds=2020 verify=None
+04:22:37 scale-1000-imaplane-fd-r1 rerun-inc-existence: wall 0.2s rc=0 rss=17MiB cmds=27 verify=None
+04:22:52 scale-1000-imapsync-tuned-r1 fresh: wall 12.2s rc=0 rss=175MiB cmds=2049 verify=ok
+04:22:53 scale-1000-imapsync-tuned-r1 rerun: wall 0.8s rc=0 rss=176MiB cmds=66 verify=None
+04:23:24 scale-1000-imaplane-rt-r1 fresh: wall 27.2s rc=0 rss=16MiB cmds=3025 verify=ok
+04:23:25 scale-1000-imaplane-rt-r1 rerun-verify: wall 0.4s rc=0 rss=14MiB cmds=1026 verify=None
+04:23:26 scale-1000-imaplane-rt-r1 rerun-inc-metadata: wall 0.3s rc=0 rss=16MiB cmds=28 verify=None
+04:23:27 scale-1000-imaplane-rt-r1 rerun-inc-existence: wall 0.2s rc=0 rss=16MiB cmds=27 verify=None
+04:23:28 scale-1000-imaplane-rt-r1 rerun-inc-full: wall 0.6s rc=0 rss=16MiB cmds=1024 verify=None
+04:23:29 scale-1000-imaplane-rt-r1 rerun-ordinary: wall 0.6s rc=0 rss=16MiB cmds=1020 verify=None
+04:23:30 rep 2 order ['imaplane-rt', 'imapsync-tuned', 'imaplane-fd']
+04:23:59 scale-1000-imaplane-rt-r2 fresh: wall 27.2s rc=0 rss=16MiB cmds=3025 verify=ok
+04:24:01 scale-1000-imaplane-rt-r2 rerun-inc-full: wall 0.6s rc=0 rss=16MiB cmds=1046 verify=None
+04:24:02 scale-1000-imaplane-rt-r2 rerun-ordinary: wall 0.6s rc=0 rss=16MiB cmds=1020 verify=None
+04:24:03 scale-1000-imaplane-rt-r2 rerun-inc-metadata: wall 0.2s rc=0 rss=16MiB cmds=28 verify=None
+04:24:03 scale-1000-imaplane-rt-r2 rerun-inc-existence: wall 0.2s rc=0 rss=17MiB cmds=27 verify=None
+04:24:05 scale-1000-imaplane-rt-r2 rerun-verify: wall 0.5s rc=0 rss=15MiB cmds=1004 verify=None
+04:24:25 scale-1000-imapsync-tuned-r2 fresh: wall 17.2s rc=0 rss=175MiB cmds=2049 verify=ok
+04:24:26 scale-1000-imapsync-tuned-r2 rerun: wall 0.8s rc=0 rss=176MiB cmds=66 verify=None
+04:24:58 scale-1000-imaplane-fd-r2 fresh: wall 28.0s rc=0 rss=16MiB cmds=5025 verify=ok
+04:24:59 scale-1000-imaplane-fd-r2 rerun-ordinary: wall 0.8s rc=0 rss=16MiB cmds=2042 verify=None
+04:25:00 scale-1000-imaplane-fd-r2 rerun-inc-metadata: wall 0.2s rc=0 rss=16MiB cmds=28 verify=None
+04:25:01 scale-1000-imaplane-fd-r2 rerun-verify: wall 0.7s rc=0 rss=15MiB cmds=2004 verify=None
+04:25:03 scale-1000-imaplane-fd-r2 rerun-inc-full: wall 0.8s rc=0 rss=16MiB cmds=2024 verify=None
+04:25:04 scale-1000-imaplane-fd-r2 rerun-inc-existence: wall 0.2s rc=0 rss=17MiB cmds=27 verify=None
+04:25:05 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/p3-lat0-scale-1000
+04:25:06 rep 1 order ['imapsync-tuned', 'imaplane-fd', 'imaplane-rt']
+04:26:30 scale-1000-imapsync-tuned-r1 fresh: wall 81.5s rc=0 rss=175MiB cmds=2049 verify=ok
+04:26:33 scale-1000-imapsync-tuned-r1 rerun: wall 2.1s rc=0 rss=175MiB cmds=66 verify=None
+04:29:10 scale-1000-imaplane-fd-r1 fresh: wall 153.9s rc=0 rss=16MiB cmds=5025 verify=ok
+04:29:11 scale-1000-imaplane-fd-r1 rerun-inc-metadata: wall 1.2s rc=0 rss=16MiB cmds=50 verify=None
+04:29:56 scale-1000-imaplane-fd-r1 rerun-inc-full: wall 44.1s rc=0 rss=16MiB cmds=2024 verify=None
+04:30:40 scale-1000-imaplane-fd-r1 rerun-verify: wall 43.3s rc=0 rss=15MiB cmds=2004 verify=None
+04:30:42 scale-1000-imaplane-fd-r1 rerun-inc-existence: wall 1.1s rc=0 rss=17MiB cmds=27 verify=None
+04:31:27 scale-1000-imaplane-fd-r1 rerun-ordinary: wall 44.0s rc=0 rss=16MiB cmds=2020 verify=None
+04:33:21 scale-1000-imaplane-rt-r1 fresh: wall 111.1s rc=0 rss=16MiB cmds=3025 verify=ok
+04:33:43 scale-1000-imaplane-rt-r1 rerun-verify: wall 21.9s rc=0 rss=14MiB cmds=1026 verify=None
+04:34:07 scale-1000-imaplane-rt-r1 rerun-ordinary: wall 22.6s rc=0 rss=16MiB cmds=1020 verify=None
+04:34:08 scale-1000-imaplane-rt-r1 rerun-inc-existence: wall 1.2s rc=0 rss=17MiB cmds=27 verify=None
+04:34:10 scale-1000-imaplane-rt-r1 rerun-inc-metadata: wall 1.2s rc=0 rss=16MiB cmds=28 verify=None
+04:34:34 scale-1000-imaplane-rt-r1 rerun-inc-full: wall 22.7s rc=0 rss=16MiB cmds=1024 verify=None
+04:34:35 rep 2 order ['imapsync-tuned', 'imaplane-fd', 'imaplane-rt']
+04:35:58 scale-1000-imapsync-tuned-r2 fresh: wall 81.4s rc=0 rss=175MiB cmds=2049 verify=ok
+04:36:01 scale-1000-imapsync-tuned-r2 rerun: wall 2.1s rc=0 rss=175MiB cmds=66 verify=None
+04:38:38 scale-1000-imaplane-fd-r2 fresh: wall 153.9s rc=0 rss=16MiB cmds=5025 verify=ok
+04:39:23 scale-1000-imaplane-fd-r2 rerun-inc-full: wall 44.2s rc=0 rss=16MiB cmds=2046 verify=None
+04:39:25 scale-1000-imaplane-fd-r2 rerun-inc-metadata: wall 1.2s rc=0 rss=16MiB cmds=28 verify=None
+04:39:27 scale-1000-imaplane-fd-r2 rerun-inc-existence: wall 1.1s rc=0 rss=17MiB cmds=27 verify=None
+04:40:11 scale-1000-imaplane-fd-r2 rerun-ordinary: wall 44.1s rc=0 rss=16MiB cmds=2020 verify=None
+04:40:55 scale-1000-imaplane-fd-r2 rerun-verify: wall 43.4s rc=0 rss=15MiB cmds=2004 verify=None
+04:42:50 scale-1000-imaplane-rt-r2 fresh: wall 111.2s rc=0 rss=16MiB cmds=3025 verify=ok
+04:42:52 scale-1000-imaplane-rt-r2 rerun-inc-existence: wall 1.2s rc=0 rss=17MiB cmds=49 verify=None
+04:43:14 scale-1000-imaplane-rt-r2 rerun-verify: wall 22.0s rc=0 rss=15MiB cmds=1004 verify=None
+04:43:37 scale-1000-imaplane-rt-r2 rerun-ordinary: wall 22.6s rc=0 rss=16MiB cmds=1020 verify=None
+04:43:39 scale-1000-imaplane-rt-r2 rerun-inc-metadata: wall 1.2s rc=0 rss=16MiB cmds=28 verify=None
+04:44:03 scale-1000-imaplane-rt-r2 rerun-inc-full: wall 22.7s rc=0 rss=16MiB cmds=1024 verify=None
+04:44:04 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/p3-lat20-scale-1000
+04:44:05 rep 1 order ['imaplane-rt', 'imaplane-fd', 'imapsync-tuned']
+04:48:41 scale-1000-imaplane-rt-r1 fresh: wall 273.6s rc=0 rss=16MiB cmds=3025 verify=ok
+04:49:44 scale-1000-imaplane-rt-r1 rerun-verify: wall 62.3s rc=0 rss=14MiB cmds=1026 verify=None
+04:49:48 scale-1000-imaplane-rt-r1 rerun-inc-metadata: wall 3.0s rc=0 rss=16MiB cmds=28 verify=None
+04:49:51 scale-1000-imaplane-rt-r1 rerun-inc-existence: wall 2.8s rc=0 rss=16MiB cmds=27 verify=None
+04:50:56 scale-1000-imaplane-rt-r1 rerun-inc-full: wall 64.3s rc=0 rss=16MiB cmds=1024 verify=None
+04:52:00 scale-1000-imaplane-rt-r1 rerun-ordinary: wall 64.0s rc=0 rss=16MiB cmds=1020 verify=None
+04:58:39 scale-1000-imaplane-fd-r1 fresh: wall 395.7s rc=0 rss=16MiB cmds=5025 verify=ok
+05:00:44 scale-1000-imaplane-fd-r1 rerun-verify: wall 123.7s rc=0 rss=15MiB cmds=2026 verify=None
+05:00:47 scale-1000-imaplane-fd-r1 rerun-inc-metadata: wall 3.0s rc=0 rss=16MiB cmds=28 verify=None
+05:02:54 scale-1000-imaplane-fd-r1 rerun-inc-full: wall 125.7s rc=0 rss=16MiB cmds=2024 verify=None
+05:02:57 scale-1000-imaplane-fd-r1 rerun-inc-existence: wall 2.8s rc=0 rss=17MiB cmds=27 verify=None
+05:05:03 scale-1000-imaplane-fd-r1 rerun-ordinary: wall 125.4s rc=0 rss=16MiB cmds=2020 verify=None
+05:08:31 scale-1000-imapsync-tuned-r1 fresh: wall 204.1s rc=0 rss=175MiB cmds=2049 verify=ok
+05:08:36 scale-1000-imapsync-tuned-r1 rerun: wall 4.5s rc=0 rss=176MiB cmds=66 verify=None
+05:08:37 rep 2 order ['imaplane-fd', 'imapsync-tuned', 'imaplane-rt']
+05:15:15 scale-1000-imaplane-fd-r2 fresh: wall 395.7s rc=0 rss=16MiB cmds=5025 verify=ok
+05:17:19 scale-1000-imaplane-fd-r2 rerun-verify: wall 123.8s rc=0 rss=14MiB cmds=2026 verify=None
+05:17:23 scale-1000-imaplane-fd-r2 rerun-inc-metadata: wall 3.0s rc=0 rss=16MiB cmds=28 verify=None
+05:19:29 scale-1000-imaplane-fd-r2 rerun-ordinary: wall 125.4s rc=0 rss=16MiB cmds=2020 verify=None
+05:21:35 scale-1000-imaplane-fd-r2 rerun-inc-full: wall 125.6s rc=0 rss=16MiB cmds=2024 verify=None
+05:21:39 scale-1000-imaplane-fd-r2 rerun-inc-existence: wall 2.8s rc=0 rss=17MiB cmds=27 verify=None
+05:24:57 scale-1000-imapsync-tuned-r2 fresh: wall 194.8s rc=0 rss=175MiB cmds=2049 verify=ok
+05:25:02 scale-1000-imapsync-tuned-r2 rerun: wall 4.6s rc=0 rss=176MiB cmds=66 verify=None
+05:29:22 scale-1000-imaplane-rt-r2 fresh: wall 257.1s rc=0 rss=16MiB cmds=3025 verify=ok
+05:30:25 scale-1000-imaplane-rt-r2 rerun-verify: wall 62.4s rc=0 rss=14MiB cmds=1026 verify=None
+05:31:29 scale-1000-imaplane-rt-r2 rerun-ordinary: wall 63.9s rc=0 rss=16MiB cmds=1020 verify=None
+05:31:33 scale-1000-imaplane-rt-r2 rerun-inc-metadata: wall 2.9s rc=0 rss=16MiB cmds=28 verify=None
+05:31:36 scale-1000-imaplane-rt-r2 rerun-inc-existence: wall 2.8s rc=0 rss=16MiB cmds=27 verify=None
+05:32:41 scale-1000-imaplane-rt-r2 rerun-inc-full: wall 64.2s rc=0 rss=16MiB cmds=1024 verify=None
+05:32:42 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/p3-lat60-scale-1000
+05:32:43 rep 1 order ['imapsync-tuned', 'imaplane-fd', 'imaplane-rt-stream', 'imaplane-rt']
+05:33:54 mixed-imapsync-tuned-r1 fresh: wall 57.8s rc=0 rss=194MiB cmds=6678 verify=ok
+05:33:56 mixed-imapsync-tuned-r1 rerun: wall 1.2s rc=0 rss=176MiB cmds=106 verify=None
+05:34:20 mixed-imapsync-tuned-r1 newmail1: wall 4.9s rc=0 rss=182MiB cmds=503 verify=ok
+05:34:44 mixed-imapsync-tuned-r1 newmail2: wall 5.2s rc=0 rss=182MiB cmds=503 verify=ok
+05:36:54 mixed-imaplane-fd-r1 fresh: wall 106.4s rc=0 rss=35MiB cmds=16473 verify=ok
+05:36:55 mixed-imaplane-fd-r1 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=82 verify=None
+05:37:03 mixed-imaplane-fd-r1 rerun-verify: wall 7.5s rc=0 rss=34MiB cmds=6571 verify=None
+05:37:12 mixed-imaplane-fd-r1 rerun-inc-full: wall 7.8s rc=0 rss=35MiB cmds=6624 verify=None
+05:37:21 mixed-imaplane-fd-r1 rerun-ordinary: wall 7.9s rc=0 rss=35MiB cmds=6614 verify=None
+05:37:22 mixed-imaplane-fd-r1 rerun-inc-existence: wall 0.3s rc=0 rss=19MiB cmds=73 verify=None
+05:37:48 mixed-imaplane-fd-r1 newmail1: wall 7.4s rc=0 rss=19MiB cmds=1079 verify=ok
+05:38:23 mixed-imaplane-fd-r1 newmail2: wall 15.2s rc=0 rss=35MiB cmds=8029 verify=ok
+05:40:29 mixed-imaplane-rt-stream-r1 fresh: wall 102.8s rc=0 rss=17MiB cmds=16473 verify=ok
+05:40:30 mixed-imaplane-rt-stream-r1 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=82 verify=None
+05:40:31 mixed-imaplane-rt-stream-r1 rerun-inc-existence: wall 0.3s rc=0 rss=18MiB cmds=73 verify=None
+05:40:38 mixed-imaplane-rt-stream-r1 rerun-inc-full: wall 5.8s rc=0 rss=18MiB cmds=6624 verify=None
+05:40:44 mixed-imaplane-rt-stream-r1 rerun-ordinary: wall 5.8s rc=0 rss=18MiB cmds=6614 verify=None
+05:40:51 mixed-imaplane-rt-stream-r1 rerun-verify: wall 5.5s rc=0 rss=17MiB cmds=6571 verify=None
+05:41:18 mixed-imaplane-rt-stream-r1 newmail1: wall 7.3s rc=0 rss=17MiB cmds=1079 verify=ok
+05:41:50 mixed-imaplane-rt-stream-r1 newmail2: wall 12.9s rc=0 rss=18MiB cmds=8029 verify=ok
+05:43:58 mixed-imaplane-rt-r1 fresh: wall 105.3s rc=0 rss=35MiB cmds=10623 verify=ok
+05:43:59 mixed-imaplane-rt-r1 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=81 verify=None
+05:44:08 mixed-imaplane-rt-r1 rerun-verify: wall 7.7s rc=0 rss=34MiB cmds=3646 verify=None
+05:44:09 mixed-imaplane-rt-r1 rerun-inc-existence: wall 0.3s rc=0 rss=18MiB cmds=73 verify=None
+05:44:17 mixed-imaplane-rt-r1 rerun-inc-full: wall 7.9s rc=0 rss=35MiB cmds=3699 verify=None
+05:44:26 mixed-imaplane-rt-r1 rerun-ordinary: wall 8.0s rc=0 rss=35MiB cmds=3689 verify=None
+05:44:52 mixed-imaplane-rt-r1 newmail1: wall 7.2s rc=0 rss=19MiB cmds=727 verify=ok
+05:45:27 mixed-imaplane-rt-r1 newmail2: wall 15.3s rc=0 rss=35MiB cmds=4580 verify=ok
+05:45:36 rep 2 order ['imaplane-rt', 'imaplane-fd', 'imaplane-rt-stream', 'imapsync-tuned']
+05:47:35 mixed-imaplane-rt-r2 fresh: wall 105.6s rc=0 rss=35MiB cmds=10623 verify=ok
+05:47:44 mixed-imaplane-rt-r2 rerun-verify: wall 7.6s rc=0 rss=33MiB cmds=3654 verify=None
+05:47:45 mixed-imaplane-rt-r2 rerun-inc-existence: wall 0.3s rc=0 rss=18MiB cmds=73 verify=None
+05:47:53 mixed-imaplane-rt-r2 rerun-inc-full: wall 8.0s rc=0 rss=35MiB cmds=3699 verify=None
+05:48:02 mixed-imaplane-rt-r2 rerun-ordinary: wall 8.0s rc=0 rss=35MiB cmds=3689 verify=None
+05:48:03 mixed-imaplane-rt-r2 rerun-inc-metadata: wall 0.3s rc=0 rss=17MiB cmds=74 verify=None
+05:48:30 mixed-imaplane-rt-r2 newmail1: wall 7.4s rc=0 rss=19MiB cmds=732 verify=ok
+05:49:04 mixed-imaplane-rt-r2 newmail2: wall 15.0s rc=0 rss=34MiB cmds=4566 verify=ok
+05:51:14 mixed-imaplane-fd-r2 fresh: wall 106.7s rc=0 rss=35MiB cmds=16473 verify=ok
+05:51:15 mixed-imaplane-fd-r2 rerun-inc-existence: wall 0.3s rc=0 rss=18MiB cmds=80 verify=None
+05:51:24 mixed-imaplane-fd-r2 rerun-ordinary: wall 7.8s rc=0 rss=35MiB cmds=6614 verify=None
+05:51:33 mixed-imaplane-fd-r2 rerun-inc-full: wall 7.8s rc=0 rss=35MiB cmds=6624 verify=None
+05:51:41 mixed-imaplane-fd-r2 rerun-verify: wall 7.5s rc=0 rss=34MiB cmds=6571 verify=None
+05:51:42 mixed-imaplane-fd-r2 rerun-inc-metadata: wall 0.3s rc=0 rss=17MiB cmds=74 verify=None
+05:52:09 mixed-imaplane-fd-r2 newmail1: wall 7.4s rc=0 rss=19MiB cmds=1079 verify=ok
+05:52:43 mixed-imaplane-fd-r2 newmail2: wall 15.0s rc=0 rss=35MiB cmds=8029 verify=ok
+05:54:50 mixed-imaplane-rt-stream-r2 fresh: wall 103.6s rc=0 rss=17MiB cmds=16473 verify=ok
+05:54:51 mixed-imaplane-rt-stream-r2 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=82 verify=None
+05:54:58 mixed-imaplane-rt-stream-r2 rerun-verify: wall 5.5s rc=0 rss=17MiB cmds=6571 verify=None
+05:54:59 mixed-imaplane-rt-stream-r2 rerun-inc-existence: wall 0.3s rc=0 rss=18MiB cmds=73 verify=None
+05:55:06 mixed-imaplane-rt-stream-r2 rerun-ordinary: wall 5.8s rc=0 rss=17MiB cmds=6614 verify=None
+05:55:12 mixed-imaplane-rt-stream-r2 rerun-inc-full: wall 5.8s rc=0 rss=18MiB cmds=6624 verify=None
+05:55:39 mixed-imaplane-rt-stream-r2 newmail1: wall 7.3s rc=0 rss=17MiB cmds=1079 verify=ok
+05:56:11 mixed-imaplane-rt-stream-r2 newmail2: wall 12.9s rc=0 rss=18MiB cmds=8029 verify=ok
+05:57:41 mixed-imapsync-tuned-r2 fresh: wall 66.4s rc=0 rss=194MiB cmds=6678 verify=ok
+05:57:43 mixed-imapsync-tuned-r2 rerun: wall 1.2s rc=0 rss=176MiB cmds=106 verify=None
+05:58:07 mixed-imapsync-tuned-r2 newmail1: wall 5.0s rc=0 rss=183MiB cmds=503 verify=ok
+05:58:32 mixed-imapsync-tuned-r2 newmail2: wall 4.9s rc=0 rss=183MiB cmds=503 verify=ok
+05:58:41 rep 3 order ['imaplane-rt-stream', 'imapsync-tuned', 'imaplane-fd', 'imaplane-rt']
+06:00:38 mixed-imaplane-rt-stream-r3 fresh: wall 102.6s rc=0 rss=17MiB cmds=16473 verify=ok
+06:00:44 mixed-imaplane-rt-stream-r3 rerun-ordinary: wall 5.6s rc=0 rss=17MiB cmds=6621 verify=None
+06:00:51 mixed-imaplane-rt-stream-r3 rerun-inc-full: wall 5.9s rc=0 rss=18MiB cmds=6624 verify=None
+06:00:52 mixed-imaplane-rt-stream-r3 rerun-inc-metadata: wall 0.3s rc=0 rss=17MiB cmds=74 verify=None
+06:00:59 mixed-imaplane-rt-stream-r3 rerun-verify: wall 5.5s rc=0 rss=17MiB cmds=6571 verify=None
+06:01:00 mixed-imaplane-rt-stream-r3 rerun-inc-existence: wall 0.3s rc=0 rss=18MiB cmds=73 verify=None
+06:01:26 mixed-imaplane-rt-stream-r3 newmail1: wall 7.1s rc=0 rss=17MiB cmds=1079 verify=ok
+06:01:58 mixed-imaplane-rt-stream-r3 newmail2: wall 12.8s rc=0 rss=18MiB cmds=8029 verify=ok
+06:03:28 mixed-imapsync-tuned-r3 fresh: wall 66.9s rc=0 rss=194MiB cmds=6678 verify=ok
+06:03:30 mixed-imapsync-tuned-r3 rerun: wall 1.2s rc=0 rss=176MiB cmds=106 verify=None
+06:03:53 mixed-imapsync-tuned-r3 newmail1: wall 4.9s rc=0 rss=183MiB cmds=503 verify=ok
+06:04:18 mixed-imapsync-tuned-r3 newmail2: wall 5.1s rc=0 rss=183MiB cmds=503 verify=ok
+06:06:28 mixed-imaplane-fd-r3 fresh: wall 106.8s rc=0 rss=35MiB cmds=16473 verify=ok
+06:06:36 mixed-imaplane-fd-r3 rerun-inc-full: wall 7.8s rc=0 rss=36MiB cmds=6632 verify=None
+06:06:37 mixed-imaplane-fd-r3 rerun-inc-existence: wall 0.3s rc=0 rss=18MiB cmds=73 verify=None
+06:06:46 mixed-imaplane-fd-r3 rerun-verify: wall 7.5s rc=0 rss=34MiB cmds=6571 verify=None
+06:06:55 mixed-imaplane-fd-r3 rerun-ordinary: wall 7.8s rc=0 rss=35MiB cmds=6614 verify=None
+06:06:56 mixed-imaplane-fd-r3 rerun-inc-metadata: wall 0.3s rc=0 rss=17MiB cmds=74 verify=None
+06:07:22 mixed-imaplane-fd-r3 newmail1: wall 7.4s rc=0 rss=19MiB cmds=1079 verify=ok
+06:07:56 mixed-imaplane-fd-r3 newmail2: wall 15.0s rc=0 rss=35MiB cmds=8029 verify=ok
+06:10:07 mixed-imaplane-rt-r3 fresh: wall 105.7s rc=0 rss=35MiB cmds=10623 verify=ok
+06:10:15 mixed-imaplane-rt-r3 rerun-inc-full: wall 8.0s rc=0 rss=36MiB cmds=3707 verify=None
+06:10:24 mixed-imaplane-rt-r3 rerun-ordinary: wall 8.1s rc=0 rss=35MiB cmds=3689 verify=None
+06:10:25 mixed-imaplane-rt-r3 rerun-inc-existence: wall 0.3s rc=0 rss=18MiB cmds=73 verify=None
+06:10:34 mixed-imaplane-rt-r3 rerun-verify: wall 7.7s rc=0 rss=34MiB cmds=3646 verify=None
+06:10:35 mixed-imaplane-rt-r3 rerun-inc-metadata: wall 0.3s rc=0 rss=17MiB cmds=74 verify=None
+06:11:01 mixed-imaplane-rt-r3 newmail1: wall 7.2s rc=0 rss=19MiB cmds=715 verify=ok
+06:11:35 mixed-imaplane-rt-r3 newmail2: wall 15.3s rc=0 rss=35MiB cmds=4564 verify=ok
+06:11:44 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/p3-main-mixed
+06:14:06 mixed-imaplane-rt-stream-k1: killed at 43.5s with 1385 in destination; resume 61.4s; one-rerun ok=False 0 dup 1 missing; final ok=False ops=0
+06:16:20 mixed-imaplane-rt-k1: killed at 71.0s with 2167 in destination; resume 40.2s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=None
+06:18:58 mixed-imaplane-rt-k2: killed at 31.0s with 964 in destination; resume 76.9s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=1
+06:21:10 mixed-imaplane-rt-stream-k2: killed at 73.4s with 2290 in destination; resume 34.6s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=None
+06:23:46 mixed-imaplane-rt-k3: killed at 48.4s with 1540 in destination; resume 57.3s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=1
+06:25:57 mixed-imaplane-rt-stream-k3: killed at 75.8s with 2393 in destination; resume 31.3s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=None
+06:28:27 mixed-imaplane-rt-stream-k4: killed at 69.3s with 2169 in destination; resume 37.8s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=1
+06:31:06 mixed-imaplane-rt-k4: killed at 60.9s with 1854 in destination; resume 49.3s; one-rerun ok=False 0 dup 1 missing; final ok=True ops=1
+06:31:08 kill run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/p3-kill-mixed
+06:31:09 rep 1 order ['imaplane-rt', 'imaplane-fd', 'imapsync-tuned']
+06:31:39 scale-1000-imaplane-rt-r1 fresh: wall 27.6s rc=0 rss=16MiB cmds=3025 verify=ok
+06:31:40 scale-1000-imaplane-rt-r1 rerun-inc-metadata: wall 0.3s rc=0 rss=16MiB cmds=50 verify=None
+06:31:41 scale-1000-imaplane-rt-r1 rerun-inc-existence: wall 0.2s rc=0 rss=16MiB cmds=27 verify=None
+06:31:42 scale-1000-imaplane-rt-r1 rerun-inc-full: wall 0.6s rc=0 rss=16MiB cmds=1024 verify=None
+06:31:43 scale-1000-imaplane-rt-r1 rerun-ordinary: wall 0.6s rc=0 rss=16MiB cmds=1020 verify=None
+06:31:44 scale-1000-imaplane-rt-r1 rerun-verify: wall 0.5s rc=0 rss=15MiB cmds=1004 verify=None
+06:32:16 scale-1000-imaplane-fd-r1 fresh: wall 28.4s rc=0 rss=16MiB cmds=5025 verify=ok
+06:32:17 scale-1000-imaplane-fd-r1 rerun-inc-existence: wall 0.2s rc=0 rss=16MiB cmds=49 verify=None
+06:32:18 scale-1000-imaplane-fd-r1 rerun-inc-full: wall 0.8s rc=0 rss=16MiB cmds=2024 verify=None
+06:32:20 scale-1000-imaplane-fd-r1 rerun-ordinary: wall 0.8s rc=0 rss=16MiB cmds=2020 verify=None
+06:32:21 scale-1000-imaplane-fd-r1 rerun-inc-metadata: wall 0.2s rc=0 rss=16MiB cmds=28 verify=None
+06:32:22 scale-1000-imaplane-fd-r1 rerun-verify: wall 0.6s rc=0 rss=15MiB cmds=2004 verify=None
+06:32:43 scale-1000-imapsync-tuned-r1 fresh: wall 17.5s rc=0 rss=175MiB cmds=2049 verify=ok
+06:32:44 scale-1000-imapsync-tuned-r1 rerun: wall 0.8s rc=0 rss=176MiB cmds=66 verify=None
+06:32:45 rep 2 order ['imapsync-tuned', 'imaplane-fd', 'imaplane-rt']
+06:33:05 scale-1000-imapsync-tuned-r2 fresh: wall 17.5s rc=0 rss=175MiB cmds=2049 verify=ok
+06:33:06 scale-1000-imapsync-tuned-r2 rerun: wall 0.8s rc=0 rss=176MiB cmds=66 verify=None
+06:33:38 scale-1000-imaplane-fd-r2 fresh: wall 28.4s rc=0 rss=16MiB cmds=5025 verify=ok
+06:33:39 scale-1000-imaplane-fd-r2 rerun-inc-existence: wall 0.2s rc=0 rss=17MiB cmds=49 verify=None
+06:33:40 scale-1000-imaplane-fd-r2 rerun-ordinary: wall 0.8s rc=0 rss=16MiB cmds=2020 verify=None
+06:33:42 scale-1000-imaplane-fd-r2 rerun-verify: wall 0.7s rc=0 rss=15MiB cmds=2004 verify=None
+06:33:42 scale-1000-imaplane-fd-r2 rerun-inc-metadata: wall 0.2s rc=0 rss=16MiB cmds=28 verify=None
+06:33:44 scale-1000-imaplane-fd-r2 rerun-inc-full: wall 0.8s rc=0 rss=16MiB cmds=2024 verify=None
+06:34:15 scale-1000-imaplane-rt-r2 fresh: wall 27.4s rc=0 rss=16MiB cmds=3025 verify=ok
+06:34:16 scale-1000-imaplane-rt-r2 rerun-ordinary: wall 0.5s rc=0 rss=16MiB cmds=1042 verify=None
+06:34:17 scale-1000-imaplane-rt-r2 rerun-inc-metadata: wall 0.3s rc=0 rss=16MiB cmds=28 verify=None
+06:34:18 scale-1000-imaplane-rt-r2 rerun-verify: wall 0.5s rc=0 rss=15MiB cmds=1004 verify=None
+06:34:19 scale-1000-imaplane-rt-r2 rerun-inc-existence: wall 0.2s rc=0 rss=17MiB cmds=27 verify=None
+06:34:20 scale-1000-imaplane-rt-r2 rerun-inc-full: wall 0.6s rc=0 rss=16MiB cmds=1024 verify=None
+06:34:21 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/p3-scale-1000
+06:34:23 rep 1 order ['imaplane-rt', 'imaplane-fd', 'imapsync-tuned']
+06:36:41 scale-5000-imaplane-rt-r1 fresh: wall 134.2s rc=0 rss=21MiB cmds=15025 verify=ok
+06:36:42 scale-5000-imaplane-rt-r1 rerun-inc-metadata: wall 0.4s rc=0 rss=21MiB cmds=43 verify=None
+06:36:43 scale-5000-imaplane-rt-r1 rerun-inc-existence: wall 0.3s rc=0 rss=24MiB cmds=27 verify=None
+06:36:46 scale-5000-imaplane-rt-r1 rerun-inc-full: wall 2.2s rc=0 rss=21MiB cmds=5024 verify=None
+06:36:49 scale-5000-imaplane-rt-r1 rerun-ordinary: wall 2.3s rc=0 rss=21MiB cmds=5020 verify=None
+06:36:52 scale-5000-imaplane-rt-r1 rerun-verify: wall 2.0s rc=0 rss=18MiB cmds=5004 verify=None
+06:39:19 scale-5000-imaplane-fd-r1 fresh: wall 139.0s rc=0 rss=21MiB cmds=25025 verify=ok
+06:39:20 scale-5000-imaplane-fd-r1 rerun-inc-existence: wall 0.3s rc=0 rss=24MiB cmds=36 verify=None
+06:39:24 scale-5000-imaplane-fd-r1 rerun-inc-full: wall 3.3s rc=0 rss=21MiB cmds=10024 verify=None
+06:39:28 scale-5000-imaplane-fd-r1 rerun-ordinary: wall 3.3s rc=0 rss=21MiB cmds=10020 verify=None
+06:39:30 scale-5000-imaplane-fd-r1 rerun-inc-metadata: wall 0.3s rc=0 rss=21MiB cmds=34 verify=None
+06:39:34 scale-5000-imaplane-fd-r1 rerun-verify: wall 3.0s rc=0 rss=18MiB cmds=10004 verify=None
+06:41:05 scale-5000-imapsync-tuned-r1 fresh: wall 85.1s rc=0 rss=178MiB cmds=10049 verify=ok
+06:41:07 scale-5000-imapsync-tuned-r1 rerun: wall 1.3s rc=0 rss=181MiB cmds=53 verify=None
+06:41:10 rep 2 order ['imapsync-tuned', 'imaplane-fd', 'imaplane-rt']
+06:42:39 scale-5000-imapsync-tuned-r2 fresh: wall 85.2s rc=0 rss=178MiB cmds=10049 verify=ok
+06:42:41 scale-5000-imapsync-tuned-r2 rerun: wall 1.3s rc=0 rss=181MiB cmds=53 verify=None
+06:45:06 scale-5000-imaplane-fd-r2 fresh: wall 138.7s rc=0 rss=21MiB cmds=25025 verify=ok
+06:45:07 scale-5000-imaplane-fd-r2 rerun-inc-existence: wall 0.3s rc=0 rss=24MiB cmds=36 verify=None
+06:45:11 scale-5000-imaplane-fd-r2 rerun-ordinary: wall 3.3s rc=0 rss=21MiB cmds=10020 verify=None
+06:45:15 scale-5000-imaplane-fd-r2 rerun-verify: wall 3.0s rc=0 rss=18MiB cmds=10004 verify=None
+06:45:17 scale-5000-imaplane-fd-r2 rerun-inc-metadata: wall 0.3s rc=0 rss=21MiB cmds=34 verify=None
+06:45:21 scale-5000-imaplane-fd-r2 rerun-inc-full: wall 3.4s rc=0 rss=21MiB cmds=10024 verify=None
+06:47:43 scale-5000-imaplane-rt-r2 fresh: wall 135.1s rc=0 rss=21MiB cmds=15025 verify=ok
+06:47:46 scale-5000-imaplane-rt-r2 rerun-ordinary: wall 2.1s rc=0 rss=21MiB cmds=5029 verify=None
+06:47:47 scale-5000-imaplane-rt-r2 rerun-inc-metadata: wall 0.4s rc=0 rss=21MiB cmds=34 verify=None
+06:47:50 scale-5000-imaplane-rt-r2 rerun-verify: wall 1.9s rc=0 rss=18MiB cmds=5004 verify=None
+06:47:51 scale-5000-imaplane-rt-r2 rerun-inc-existence: wall 0.3s rc=0 rss=24MiB cmds=27 verify=None
+06:47:54 scale-5000-imaplane-rt-r2 rerun-inc-full: wall 2.2s rc=0 rss=21MiB cmds=5024 verify=None
+06:47:56 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/p3-scale-5000
+06:47:56 PHASE 3 BENCHMARK DONE
