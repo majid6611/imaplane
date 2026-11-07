@@ -1,5 +1,16 @@
 # Technical gap list for a public v0.1 Linux CLI
 
+> **Status update (release readiness audit, commit 6f4662d + hygiene commits).** The original
+> list below was written before the incremental, performance and WAL work. Current state:
+> incremental migration (schema 5, tiered verification, `--add-new-folders`), the WAL journal,
+> `fdatasync` and the single-exchange read are implemented and covered by the regression, crash
+> and stress suites; `SECURITY.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, a quick start and an
+> exit-code table now exist; the OAuth helper ships in the packages. **Still open:** live-provider
+> validation (Gmail / Microsoft 365, blocker 1), a tagged release dry run and arm64 runtime
+> evidence (blocker 6, SHOULD 10), the streaming-default decision (blocker 4; streaming stays
+> off by default), an independent review (15), and the parts of 8/9/11/12 not named above.
+> The text below is kept as the historical plan; where it says "nothing implemented" it is stale.
+
 Scope: a reliable, usable **v0.1 preview of the Linux command-line tool**, not enterprise features.
 This is a plan, not work done; nothing here has been implemented. Items are tagged
 **BLOCKER** (do not tag v0.1 without it), **SHOULD** (strongly recommended) or **LATER**.
@@ -9,6 +20,7 @@ This is a plan, not work done; nothing here has been implemented. Items are tagg
 
 - CLI: `inspect`, `migrate` (`--dry-run`), `verify`, `resolve`, `recover`, `skip`, `unskip`, `status`,
   plus opt-in `--diagnostics-file`. Journal schema 4; report format versioned.
+- (Historical snapshot; see the status update above.)
 - Safety design and tests: durable journal, pre-literal authorization fence, exact read-back, source
   read-only, conservative uncertain handling, crash matrices, randomized kill stress, disk-full tests.
 - Optional bounded-memory transfer (disk spool), off by default: peak RSS about 15 MiB up to the

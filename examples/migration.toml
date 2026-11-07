@@ -15,6 +15,11 @@ append_rejection_limit = 3
 # spool_dir = "./spool"                  # private (0700) local directory; default: state_dir
 # spool_allow_memory_backed = false      # true accepts a tmpfs/ramfs spool, which uses RAM
 
+# Journal storage: "auto" (default) uses a write-ahead log with synchronous=FULL on a local
+# filesystem and refuses it on network filesystems (NFS, SMB, FUSE, 9p...); "rollback" keeps or
+# restores the older rollback-journal storage. Durability is the same; see docs/WAL_JOURNAL.md.
+# journal_mode = "auto"
+
 [source]
 host = "imap.old.example"
 port = 993

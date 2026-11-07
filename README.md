@@ -31,6 +31,32 @@ Implemented:
   Uncertain uploads are not automatically repeated. Candidate discovery and
   explicit, audited operator attribution are available.
 
+## Quick start (installed package or built binary)
+
+1. Install: `sudo apt install ./imaplane_0.1.0_amd64.deb` or `sudo dnf install ./imaplane_0.1.0_amd64.rpm`
+   (or build from source, below). The sample configuration is
+   `/usr/share/doc/imaplane/examples/migration.toml`.
+2. Copy it to a private directory, set the two servers, the account names, one small
+   folder mapping and create `0600` password files (or omit them for prompts).
+3. `imaplane inspect --config migration.toml` to see folder names, then
+   `imaplane migrate --config migration.toml --dry-run`.
+4. `imaplane migrate --config migration.toml`, then `imaplane verify --config migration.toml`.
+5. If a run stops with an *uncertain* message, do not delete anything: read
+   [Recovery and verification](#recovery-and-verification) (`recover`, `resolve`, `skip`).
+6. For Gmail/Microsoft 365 (XOAUTH2, **untested with live accounts**) see
+   [XOAUTH2](#xoauth2-and-mandatory-starttls) and the token helper
+   `/usr/share/doc/imaplane/tools/oauth_token.py`.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The recorded snapshot passed all required destination checks, or a read-only command (`inspect`, `--dry-run`) completed. |
+| `2` | Incomplete, interrupted, uncertain or mismatching work; a successful `recover`, `resolve`, `skip` or `unskip` (the job is not complete until the next `migrate`/`verify` says so); and `status` (which cannot establish completeness). Re-run or follow the operator steps; journal evidence is intact. |
+| `1` | Invocation, configuration, storage, authentication, transport or other operational error, including a `recover` that refuses (for example because a literal was already authorized). Fix the cause and re-run; journal evidence is intact. |
+
+Argument parsing and `--help` use Clap's conventions. Reports use `--json`.
+
 ## Build and checks
 
 Install stable Rust (1.85 or newer) and the platform build prerequisites. On
