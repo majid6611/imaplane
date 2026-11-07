@@ -15,7 +15,7 @@ microsoft (same flow, UNTESTED against the live service).
 
 Safety: tokens go only to 0600 files written atomically (tmp + rename, so IMAPLANE
 never reads a partial token); they are never printed, logged or placed in argv.
-Client-secret and token files must be regular, owned by you and mode 0600/0400.
+Client-secret and token files must be regular files (not symlinks), owned by you and mode 0600/0400.
 Endpoints must be https (plain http only for 127.0.0.1, used by the tests).
 Only an allowlisted OAuth `error` code is ever echoed from a failed response.
 """
@@ -61,10 +61,16 @@ class OAuthError(Exception):
 
 
 def read_private(path, label):
-    st = os.stat(path)
-    if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or st.st_uid != os.getuid():
-        raise OAuthError(f'{label} file must be a regular file owned by you with mode 0600 or 0400')
-    with open(path, 'rb') as f:
+    """Read a small credential file: a regular file (never a symlink) owned by you, mode 0600/0400.
+    The checks are made on the opened descriptor, so the file cannot be swapped between check and read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as exc:
+        raise OAuthError(f'{label} file must be a regular file (not a symlink) owned by you with mode 0600 or 0400') from exc
+    with os.fdopen(fd, 'rb') as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or st.st_uid != os.getuid():
+            raise OAuthError(f'{label} file must be a regular file (not a symlink) owned by you with mode 0600 or 0400')
         data = f.read(MAX_FILE + 1)
     if len(data) > MAX_FILE:
         raise OAuthError(f'{label} file is too large')
