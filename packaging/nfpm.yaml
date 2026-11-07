@@ -44,6 +44,54 @@ contents:
     dst: /usr/share/doc/imaplane/docs/RELIABILITY_AUDIT.md
     file_info:
       mode: 0644
+  - src: docs/WAL_JOURNAL.md
+    dst: /usr/share/doc/imaplane/docs/WAL_JOURNAL.md
+    file_info:
+      mode: 0644
+  - src: docs/INCREMENTAL_DESIGN.md
+    dst: /usr/share/doc/imaplane/docs/INCREMENTAL_DESIGN.md
+    file_info:
+      mode: 0644
+  - src: docs/SINGLE_EXCHANGE_READ.md
+    dst: /usr/share/doc/imaplane/docs/SINGLE_EXCHANGE_READ.md
+    file_info:
+      mode: 0644
+  - src: docs/STREAMING_DESIGN.md
+    dst: /usr/share/doc/imaplane/docs/STREAMING_DESIGN.md
+    file_info:
+      mode: 0644
+  - src: docs/SECOND_AUDIT_FOLLOWUP.md
+    dst: /usr/share/doc/imaplane/docs/SECOND_AUDIT_FOLLOWUP.md
+    file_info:
+      mode: 0644
+  - src: docs/H5_SAFETY_AND_RESULTS.md
+    dst: /usr/share/doc/imaplane/docs/H5_SAFETY_AND_RESULTS.md
+    file_info:
+      mode: 0644
+  - src: docs/GOOGLE_OAUTH_SETUP.md
+    dst: /usr/share/doc/imaplane/docs/GOOGLE_OAUTH_SETUP.md
+    file_info:
+      mode: 0644
+  - src: docs/PROVIDER_COMPATIBILITY_TESTING.md
+    dst: /usr/share/doc/imaplane/docs/PROVIDER_COMPATIBILITY_TESTING.md
+    file_info:
+      mode: 0644
+  - src: docs/PERFORMANCE_BASELINE.md
+    dst: /usr/share/doc/imaplane/docs/PERFORMANCE_BASELINE.md
+    file_info:
+      mode: 0644
+  - src: SECURITY.md
+    dst: /usr/share/doc/imaplane/SECURITY.md
+    file_info:
+      mode: 0644
+  - src: CHANGELOG.md
+    dst: /usr/share/doc/imaplane/CHANGELOG.md
+    file_info:
+      mode: 0644
+  - src: CONTRIBUTING.md
+    dst: /usr/share/doc/imaplane/CONTRIBUTING.md
+    file_info:
+      mode: 0644
   - src: examples/migration.toml
     dst: /usr/share/doc/imaplane/examples/migration.toml
     file_info:
