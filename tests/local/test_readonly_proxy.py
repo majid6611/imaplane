@@ -77,5 +77,112 @@ class Rewrite(unittest.TestCase):
         self.assertEqual(p.rewrite_auth(base64.b64encode(b'something else'), 'x'), base64.b64encode(b'something else'))
 
 
+
+
+class Confined(unittest.TestCase):
+    F = 'IMAPLANE-Test'
+
+    def c(self, text):
+        return p.guard(text.encode() + b'\r\n', 0, self.F)
+
+    def test_only_the_one_mailbox_can_be_created_selected_or_appended_to(self):
+        for ok in ['CREATE "IMAPLANE-Test"', 'SELECT "IMAPLANE-Test"', 'EXAMINE "IMAPLANE-Test"', 'STATUS "IMAPLANE-Test" (MESSAGES)',
+                   'APPEND "IMAPLANE-Test" (\\Seen) "02-Jan-2020 03:04:05 +0000" {120}', 'APPEND "IMAPLANE-Test" {5}', 'CLOSE',
+                   'LIST "" "*"', 'UID FETCH 1:* (UID)', 'UID FETCH 3 (UID FLAGS INTERNALDATE BODY.PEEK[])', 'UID SEARCH ALL', 'LOGOUT']:
+            self.assertTrue(self.c('a1 ' + ok)[0], ok)
+        for bad in ['CREATE "Other"', 'SELECT INBOX', 'EXAMINE "[Gmail]/All Mail"', 'STATUS INBOX (MESSAGES)', 'APPEND "INBOX" {5}',
+                    'APPEND "IMAPLANE-Test" {5+}', 'APPEND IMAPLANE-Test2 {5}', 'DELETE "IMAPLANE-Test"', 'RENAME "IMAPLANE-Test" X',
+                    'STORE 1 +FLAGS (\\Deleted)', 'UID STORE 1 +FLAGS (\\Deleted)', 'EXPUNGE', 'UID EXPUNGE 1', 'COPY 1 "IMAPLANE-Test"',
+                    'UID COPY 1 "IMAPLANE-Test"', 'MOVE 1 X', 'UID MOVE 1 X', 'LOGIN u p', 'SUBSCRIBE "IMAPLANE-Test"', 'SELECT {13}',
+                    'UID FETCH 1 (BODY[])', 'UID FETCH 1 (RFC822)', 'SETACL x y z', 'COMPRESS DEFLATE']:
+            self.assertFalse(self.c('a1 ' + bad)[0], bad)
+
+
+class ProxyEndToEnd(unittest.TestCase):
+    """The real proxy in confined-write mode against a fake TLS upstream: exact literal bytes, the APPEND cap, refused
+    commands that never reach the upstream, and the username substitution."""
+
+    def test_confined_proxy(self):
+        import os, shutil, socket, ssl, subprocess, tempfile, threading, json
+        if not shutil.which('openssl'):
+            self.skipTest('openssl is not available')
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(t / 'k.pem'), '-out', str(t / 'c.pem'),
+                            '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'],
+                           check=True, capture_output=True)
+            seen, appended = [], []
+            sctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            sctx.load_cert_chain(t / 'c.pem', t / 'k.pem')
+            lst = socket.socket(); lst.bind(('127.0.0.1', 0)); lst.listen(4)
+
+            def upstream():
+                while True:
+                    try:
+                        raw, _ = lst.accept()
+                    except OSError:
+                        return
+                    try:
+                        c = sctx.wrap_socket(raw, server_side=True); f = c.makefile('rb')
+                        c.sendall(b'* OK fake\r\n')
+                        while True:
+                            line = f.readline()
+                            if not line:
+                                break
+                            seen.append(line)
+                            tag, verb = (line.rstrip(b'\r\n').split(b' ') + [b''])[:2]
+                            if verb == b'APPEND':
+                                n = int(line.strip().rsplit(b'{', 1)[1][:-1])
+                                c.sendall(b'+ go\r\n')
+                                body = f.read(n); f.readline()
+                                appended.append(body)
+                                c.sendall(tag + b' OK [APPENDUID 1 %d] done\r\n' % len(appended))
+                            elif verb == b'LOGOUT':
+                                c.sendall(b'* BYE\r\n' + tag + b' OK bye\r\n'); break
+                            else:
+                                c.sendall(tag + b' OK done\r\n')
+                    except (OSError, ssl.SSLError):
+                        pass
+            threading.Thread(target=upstream, daemon=True).start()
+            os.environ['IMAP_PROXY_USER'] = 'real@example.test'
+            ready = t / 'ready'
+            argv = ['--upstream', 'localhost', '--upstream-port', str(lst.getsockname()[1]), '--upstream-ca', str(t / 'c.pem'), '--cert', str(t / 'c.pem'),
+                    '--key', str(t / 'k.pem'), '--confine-folder', 'IMAPLANE-Test', '--max-appends', '2', '--summary', str(t / 's.json'), '--ready-file', str(ready)]
+            threading.Thread(target=p.main, args=(argv,), daemon=True).start()
+            for _ in range(100):
+                if ready.exists() and ready.read_text():
+                    break
+                import time; time.sleep(0.05)
+            port = int(ready.read_text())
+            cctx = ssl.create_default_context(cafile=str(t / 'c.pem'))
+            c = cctx.wrap_socket(socket.create_connection(('127.0.0.1', port)), server_hostname='localhost'); f = c.makefile('rb')
+            f.readline()
+
+            def cmd(text):
+                c.sendall(text.encode() + b'\r\n'); return f.readline()
+
+            auth = base64.b64encode(b'user=placeholder\x01auth=Bearer T0K\x01\x01').decode()
+            self.assertIn(b'OK', cmd(f'a0 AUTHENTICATE XOAUTH2 {auth}'))
+            sent = [l for l in seen if l.startswith(b'a0 AUTHENTICATE')][0].split(b' ')[3]
+            self.assertEqual(base64.b64decode(sent), b'user=real@example.test\x01auth=Bearer T0K\x01\x01')
+            self.assertIn(b'OK', cmd('a1 CREATE "IMAPLANE-Test"'))
+            literal = b'Subject: x\r\n\r\nbinary \x00\xff\r\n\r\nend'
+            for i, tag in enumerate(['a2', 'a3']):
+                c.sendall(f'{tag} APPEND "IMAPLANE-Test" (\\Seen) "02-Jan-2020 03:04:05 +0000" {{{len(literal)}}}\r\n'.encode())
+                self.assertTrue(f.readline().startswith(b'+'))
+                c.sendall(literal + b'\r\n')
+                self.assertIn(b'APPENDUID', f.readline())
+            self.assertEqual(appended, [literal, literal])
+            # the third APPEND is over the cap; writes elsewhere and every destructive command are refused and never forwarded
+            before = len(seen)
+            for text in ['a4 APPEND "IMAPLANE-Test" {3}', 'a5 APPEND "INBOX" {3}', 'a6 STORE 1 +FLAGS (\\Deleted)', 'a7 EXPUNGE',
+                         'a8 DELETE "IMAPLANE-Test"', 'a9 SELECT INBOX', 'b1 UID STORE 1 +FLAGS (\\Seen)', 'b2 UID COPY 1 INBOX']:
+                self.assertIn(b'BAD proxy', cmd(text), text)
+            self.assertEqual(len(seen), before, 'a refused command reached the upstream')
+            self.assertEqual(len(appended), 2)
+            self.assertIn(b'BYE', cmd('z LOGOUT'))
+            c.close()
+
+
 if __name__ == '__main__':
     unittest.main()
