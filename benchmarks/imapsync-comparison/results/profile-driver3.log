@@ -1,0 +1,6 @@
+19:40:51 preflight: no stale containers, networks, run directories or measuring processes
+19:41:27 d-wal: wall 34.5s cpu 3.2s cmds 5025 verify_ok=True journal_mode=wal
+19:42:22 d-sync-normal: wall 52.2s cpu 5.3s cmds 5025 verify_ok=True journal_mode=delete
+19:42:44 d-wal-normal: wall 18.2s cpu 2.1s cmds 5025 verify_ok=True journal_mode=wal
+19:43:06 d-sync-off: wall 19.3s cpu 3.0s cmds 5025 verify_ok=True journal_mode=delete
+19:44:03 d-skip-readback: wall 53.7s cpu 4.4s cmds 3025 verify_ok=True journal_mode=delete

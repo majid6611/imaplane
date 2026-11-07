@@ -1,0 +1,4 @@
+19:44:25 preflight: no stale containers, networks, run directories or measuring processes
+19:45:48 d-truncate: wall 81.3s cpu 5.7s cmds 5025 verify_ok=True journal_mode=delete
+19:47:17 d-persist: wall 85.6s cpu 6.0s cmds 5025 verify_ok=True journal_mode=delete
+19:47:56 d-wal: wall 36.1s cpu 3.2s cmds 5025 verify_ok=True journal_mode=wal

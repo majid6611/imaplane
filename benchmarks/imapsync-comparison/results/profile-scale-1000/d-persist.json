@@ -1,0 +1,1 @@
+{"name": "d-persist", "command": ["env", "..."], "returncode": 0, "started_at": 1794019551.2868023, "wall_s": 85.5849519359981, "cpu_user_s": 2.343715, "cpu_sys_s": 3.699282, "peak_rss_kib": 16316, "rusage_block_in": 0, "rusage_block_out": 317304, "net_rx_bytes": 5481174, "net_tx_bytes": 2846557, "cgroup_read_bytes": 0, "cgroup_write_bytes": 162168832, "cgroup_cpu_s": 6.044504}

@@ -1,0 +1,9 @@
+{
+ "cmd": "run",
+ "profile": "mixed",
+ "reps": 3,
+ "seed": 1,
+ "configs": "imapsync,imapsync-tuned,imaplane,imaplane-stream",
+ "out": "main-mixed",
+ "no_newmail": false
+}

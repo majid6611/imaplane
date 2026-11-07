@@ -1,0 +1,336 @@
+16:40:36 golden mixed
+16:41:37   seeded 1000/3280
+16:42:32   seeded 2000/3280
+16:43:29   seeded 3000/3280
+16:43:44 seeded 3280 messages in 184s
+16:43:48 golden mixed: 3280 messages, 395 MB, 3280 on the server, mismatches 0
+16:43:48 stage main (mixed, 3 reps, 4 configs, interleaved)
+16:43:50 rep 1 order ['imaplane-stream', 'imapsync', 'imaplane', 'imapsync-tuned']
+16:48:02 mixed-imaplane-stream-r1 fresh: wall 236.2s rc=0 rss=17MiB cmds=16473 verify=ok
+16:48:08 mixed-imaplane-stream-r1 rerun-verify: wall 5.6s rc=0 rss=16MiB cmds=6579 verify=None
+16:48:15 mixed-imaplane-stream-r1 rerun-ordinary: wall 5.9s rc=0 rss=17MiB cmds=6614 verify=None
+16:48:17 mixed-imaplane-stream-r1 rerun-inc-existence: wall 0.4s rc=0 rss=18MiB cmds=73 verify=None
+16:48:18 mixed-imaplane-stream-r1 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=74 verify=None
+16:48:25 mixed-imaplane-stream-r1 rerun-inc-full: wall 6.2s rc=0 rss=17MiB cmds=6624 verify=None
+16:48:58 mixed-imaplane-stream-r1 newmail1: wall 14.1s rc=0 rss=17MiB cmds=1079 verify=ok
+16:49:39 mixed-imaplane-stream-r1 newmail2: wall 20.8s rc=0 rss=18MiB cmds=8029 verify=ok
+16:51:04 mixed-imapsync-r1 fresh: wall 64.1s rc=0 rss=196MiB cmds=6517 verify={'src': 3280, 'dst': 3120, 'exact': 3120, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+16:51:07 mixed-imapsync-r1 rerun: wall 2.1s rc=0 rss=179MiB cmds=301 verify=None
+16:51:32 mixed-imapsync-r1 newmail1: wall 5.8s rc=0 rss=185MiB cmds=698 verify={'src': 3480, 'dst': 3320, 'exact': 3320, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+16:51:57 mixed-imapsync-r1 newmail2: wall 6.1s rc=0 rss=186MiB cmds=698 verify={'src': 3680, 'dst': 3520, 'exact': 3520, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+16:56:22 mixed-imaplane-r1 fresh: wall 244.3s rc=0 rss=35MiB cmds=16473 verify=ok
+16:56:23 mixed-imaplane-r1 rerun-inc-existence: wall 0.4s rc=0 rss=19MiB cmds=81 verify=None
+16:56:32 mixed-imaplane-r1 rerun-inc-full: wall 7.9s rc=0 rss=35MiB cmds=6624 verify=None
+16:56:33 mixed-imaplane-r1 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=74 verify=None
+16:56:42 mixed-imaplane-r1 rerun-ordinary: wall 8.1s rc=0 rss=35MiB cmds=6614 verify=None
+16:56:51 mixed-imaplane-r1 rerun-verify: wall 7.8s rc=0 rss=34MiB cmds=6571 verify=None
+16:57:25 mixed-imaplane-r1 newmail1: wall 14.6s rc=0 rss=18MiB cmds=1079 verify=ok
+16:58:13 mixed-imaplane-r1 newmail2: wall 24.4s rc=0 rss=35MiB cmds=8029 verify=ok
+16:59:42 mixed-imapsync-tuned-r1 fresh: wall 65.4s rc=0 rss=194MiB cmds=6678 verify=ok
+17:00:48 mixed-imapsync-tuned-r1 rerun: wall 65.2s rc=0 rss=194MiB cmds=6665 verify=None
+17:02:26 mixed-imapsync-tuned-r1 newmail1: wall 70.6s rc=0 rss=195MiB cmds=7063 verify={'src': 3480, 'dst': 10040, 'exact': 3480, 'missing': 0, 'duplicates': 6560, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:04:10 mixed-imapsync-tuned-r1 newmail2: wall 74.8s rc=0 rss=196MiB cmds=7463 verify={'src': 3680, 'dst': 13720, 'exact': 3680, 'missing': 0, 'duplicates': 10040, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:04:29 rep 2 order ['imaplane', 'imapsync-tuned', 'imapsync', 'imaplane-stream']
+17:08:46 mixed-imaplane-r2 fresh: wall 244.5s rc=0 rss=35MiB cmds=16473 verify=ok
+17:08:55 mixed-imaplane-r2 rerun-ordinary: wall 7.7s rc=0 rss=34MiB cmds=6621 verify=None
+17:08:56 mixed-imaplane-r2 rerun-inc-existence: wall 0.4s rc=0 rss=18MiB cmds=73 verify=None
+17:09:05 mixed-imaplane-r2 rerun-inc-full: wall 8.1s rc=0 rss=35MiB cmds=6624 verify=None
+17:09:06 mixed-imaplane-r2 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=74 verify=None
+17:09:15 mixed-imaplane-r2 rerun-verify: wall 7.7s rc=0 rss=33MiB cmds=6571 verify=None
+17:09:49 mixed-imaplane-r2 newmail1: wall 15.4s rc=0 rss=18MiB cmds=1079 verify=ok
+17:10:32 mixed-imaplane-r2 newmail2: wall 22.9s rc=0 rss=35MiB cmds=8029 verify=ok
+17:12:00 mixed-imapsync-tuned-r2 fresh: wall 67.1s rc=0 rss=194MiB cmds=6678 verify=ok
+17:13:08 mixed-imapsync-tuned-r2 rerun: wall 66.8s rc=0 rss=194MiB cmds=6665 verify=None
+17:14:46 mixed-imapsync-tuned-r2 newmail1: wall 71.2s rc=0 rss=195MiB cmds=7063 verify={'src': 3480, 'dst': 10040, 'exact': 3480, 'missing': 0, 'duplicates': 6560, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:16:31 mixed-imapsync-tuned-r2 newmail2: wall 75.2s rc=0 rss=196MiB cmds=7463 verify={'src': 3680, 'dst': 13720, 'exact': 3680, 'missing': 0, 'duplicates': 10040, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:18:07 mixed-imapsync-r2 fresh: wall 64.7s rc=0 rss=195MiB cmds=6517 verify={'src': 3280, 'dst': 3120, 'exact': 3120, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:18:10 mixed-imapsync-r2 rerun: wall 2.2s rc=0 rss=179MiB cmds=300 verify=None
+17:18:35 mixed-imapsync-r2 newmail1: wall 6.0s rc=0 rss=185MiB cmds=698 verify={'src': 3480, 'dst': 3320, 'exact': 3320, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:19:00 mixed-imapsync-r2 newmail2: wall 6.0s rc=0 rss=186MiB cmds=698 verify={'src': 3680, 'dst': 3520, 'exact': 3520, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:23:20 mixed-imaplane-stream-r2 fresh: wall 239.5s rc=0 rss=17MiB cmds=16473 verify=ok
+17:23:26 mixed-imaplane-stream-r2 rerun-verify: wall 5.2s rc=0 rss=16MiB cmds=6578 verify=None
+17:23:28 mixed-imaplane-stream-r2 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=74 verify=None
+17:23:35 mixed-imaplane-stream-r2 rerun-ordinary: wall 6.0s rc=0 rss=17MiB cmds=6614 verify=None
+17:23:36 mixed-imaplane-stream-r2 rerun-inc-existence: wall 0.4s rc=0 rss=18MiB cmds=73 verify=None
+17:23:43 mixed-imaplane-stream-r2 rerun-inc-full: wall 5.9s rc=0 rss=17MiB cmds=6624 verify=None
+17:24:17 mixed-imaplane-stream-r2 newmail1: wall 15.2s rc=0 rss=16MiB cmds=1079 verify=ok
+17:24:57 mixed-imaplane-stream-r2 newmail2: wall 20.7s rc=0 rss=18MiB cmds=8029 verify=ok
+17:25:05 rep 3 order ['imapsync-tuned', 'imaplane-stream', 'imapsync', 'imaplane']
+17:26:25 mixed-imapsync-tuned-r3 fresh: wall 66.7s rc=0 rss=193MiB cmds=6678 verify=ok
+17:27:33 mixed-imapsync-tuned-r3 rerun: wall 66.9s rc=0 rss=194MiB cmds=6665 verify=None
+17:29:10 mixed-imapsync-tuned-r3 newmail1: wall 70.7s rc=0 rss=194MiB cmds=7063 verify={'src': 3480, 'dst': 10040, 'exact': 3480, 'missing': 0, 'duplicates': 6560, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:30:55 mixed-imapsync-tuned-r3 newmail2: wall 75.1s rc=0 rss=196MiB cmds=7463 verify={'src': 3680, 'dst': 13720, 'exact': 3680, 'missing': 0, 'duplicates': 10040, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:35:27 mixed-imaplane-stream-r3 fresh: wall 240.6s rc=0 rss=17MiB cmds=16473 verify=ok
+17:35:34 mixed-imaplane-stream-r3 rerun-inc-full: wall 6.0s rc=0 rss=18MiB cmds=6632 verify=None
+17:35:41 mixed-imaplane-stream-r3 rerun-verify: wall 5.7s rc=0 rss=16MiB cmds=6571 verify=None
+17:35:42 mixed-imaplane-stream-r3 rerun-inc-existence: wall 0.4s rc=0 rss=18MiB cmds=73 verify=None
+17:35:49 mixed-imaplane-stream-r3 rerun-ordinary: wall 5.9s rc=0 rss=17MiB cmds=6614 verify=None
+17:35:50 mixed-imaplane-stream-r3 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=74 verify=None
+17:36:24 mixed-imaplane-stream-r3 newmail1: wall 14.9s rc=0 rss=17MiB cmds=1079 verify=ok
+17:37:04 mixed-imaplane-stream-r3 newmail2: wall 20.7s rc=0 rss=18MiB cmds=8029 verify=ok
+17:38:29 mixed-imapsync-r3 fresh: wall 64.9s rc=0 rss=196MiB cmds=6517 verify={'src': 3280, 'dst': 3120, 'exact': 3120, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:38:32 mixed-imapsync-r3 rerun: wall 2.1s rc=0 rss=179MiB cmds=301 verify=None
+17:38:57 mixed-imapsync-r3 newmail1: wall 6.0s rc=0 rss=185MiB cmds=698 verify={'src': 3480, 'dst': 3320, 'exact': 3320, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:39:22 mixed-imapsync-r3 newmail2: wall 6.0s rc=0 rss=185MiB cmds=698 verify={'src': 3680, 'dst': 3520, 'exact': 3520, 'missing': 160, 'duplicates': 0, 'flag_diff_only_deleted': 0, 'flag_diff_other': 0, 'date_diff': 0, 'foreign': 0}
+17:43:46 mixed-imaplane-r3 fresh: wall 244.0s rc=0 rss=35MiB cmds=16473 verify=ok
+17:43:47 mixed-imaplane-r3 rerun-inc-existence: wall 0.4s rc=0 rss=18MiB cmds=81 verify=None
+17:43:56 mixed-imaplane-r3 rerun-ordinary: wall 7.9s rc=0 rss=35MiB cmds=6614 verify=None
+17:44:05 mixed-imaplane-r3 rerun-inc-full: wall 7.9s rc=0 rss=35MiB cmds=6624 verify=None
+17:44:06 mixed-imaplane-r3 rerun-inc-metadata: wall 0.4s rc=0 rss=17MiB cmds=74 verify=None
+17:44:15 mixed-imaplane-r3 rerun-verify: wall 7.7s rc=0 rss=34MiB cmds=6571 verify=None
+17:44:49 mixed-imaplane-r3 newmail1: wall 15.2s rc=0 rss=18MiB cmds=1079 verify=ok
+17:45:31 mixed-imaplane-r3 newmail2: wall 22.8s rc=0 rss=35MiB cmds=8029 verify=ok
+17:45:39 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/main-mixed
+fresh medians {'imaplane-stream': 239.5, 'imapsync': 64.7, 'imaplane': 244.3, 'imapsync-tuned': 66.7}
+17:45:39 stage kill (mixed)
+17:50:03 mixed-imaplane-stream-k1: killed at 107.2s with 1473 in destination; resume 134.6s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=None
+17:51:27 mixed-imapsync-k1: killed at 17.7s with 882 in destination; resume 46.3s; one-rerun ok=False 0 dup 160 missing; final ok=False ops=None
+17:55:53 mixed-imaplane-k1: killed at 161.4s with 2211 in destination; resume 82.7s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=None
+18:00:35 mixed-imaplane-stream-k2: killed at 129.7s with 1784 in destination; resume 111.4s; one-rerun ok=False 0 dup 1 missing; final ok=True ops=1
+18:05:31 mixed-imaplane-k2: killed at 172.2s with 2315 in destination; resume 77.4s; one-rerun ok=False 0 dup 1 missing; final ok=True ops=1
+18:06:56 mixed-imapsync-k2: killed at 23.1s with 1123 in destination; resume 42.5s; one-rerun ok=False 0 dup 160 missing; final ok=False ops=None
+18:11:39 mixed-imaplane-stream-k3: killed at 110.0s with 1516 in destination; resume 130.8s; one-rerun ok=False 0 dup 1 missing; final ok=True ops=1
+18:16:05 mixed-imaplane-k3: killed at 90.5s with 1216 in destination; resume 156.0s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=None
+18:17:31 mixed-imapsync-k3: killed at 34.0s with 1618 in destination; resume 31.7s; one-rerun ok=False 0 dup 160 missing; final ok=False ops=None
+18:22:28 mixed-imaplane-k4: killed at 176.8s with 2358 in destination; resume 73.5s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=1
+18:26:52 mixed-imaplane-stream-k4: killed at 135.4s with 1845 in destination; resume 107.0s; one-rerun ok=True 0 dup 0 missing; final ok=True ops=None
+18:28:18 mixed-imapsync-k4: killed at 35.0s with 1712 in destination; resume 30.1s; one-rerun ok=False 0 dup 160 missing; final ok=False ops=None
+18:28:19 kill run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/kill-mixed
+18:28:19 golden scale-1000
+18:29:14   seeded 1000/1000
+18:29:14 seeded 1000 messages in 54s
+18:29:14 golden scale-1000: 1000 messages, 2 MB, 1000 on the server, mismatches 0
+18:29:14 stage scale-1000
+18:29:16 rep 1 order ['imaplane-stream', 'imapsync', 'imaplane', 'imapsync-tuned']
+18:30:11 kill stage finished (observed by stage2)
+18:30:11 golden scale-1000
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/imaplib.py", line 1047, in _command_complete
+    typ, data = self._get_tagged_response(tag, expect_bye=logout)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1173, in _get_tagged_response
+    self._get_response()
+  File "/usr/lib/python3.12/imaplib.py", line 1075, in _get_response
+    resp = self._get_line()
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1185, in _get_line
+    raise self.abort('socket error: EOF')
+imaplib.IMAP4.abort: socket error: EOF
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 378, in <module>
+    main()
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 370, in main
+    cmd_golden(a)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 189, in cmd_golden
+    common.seed(d, records, folders, batch_log=log)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/common.py", line 125, in seed
+    typ, data = c.append(quoted(utf7(r['folder'])), flags, '"' + imap_date(r['date']) + '"', r['body'])
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 417, in append
+    return self._simple_command(name, mailbox, flags, date_time)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1230, in _simple_command
+    return self._command_complete(name, self._command(name, *args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1049, in _command_complete
+    raise self.abort('command: %s => %s' % (name, val))
+imaplib.IMAP4.abort: command: APPEND => socket error: EOF
+18:30:13 stage scale-1000
+Traceback (most recent call last):
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 378, in <module>
+    main()
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 372, in main
+    cmd_run(a)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 269, in cmd_run
+    chain(args.profile, cfg, rep, out, rng, args.seed * 100 + rep, newmail=not args.no_newmail)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 238, in chain
+    step('fresh', 'fresh')
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 233, in step
+    row['verify'] = run.check()
+                    ^^^^^^^^^^^
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 137, in check
+    s, d = self.snapshots()
+           ^^^^^^^^^^^^^^^^
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 133, in snapshots
+    return common.snapshot(self.src, names), common.snapshot(self.dst, names)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/common.py", line 155, in snapshot
+    c = dovecot.connect(); out = {}
+        ^^^^^^^^^^^^^^^^^
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/common.py", line 76, in connect
+    c = imaplib.IMAP4_SSL('127.0.0.1', self.port, ssl_context=ctx)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1306, in __init__
+    IMAP4.__init__(self, host, port, timeout)
+  File "/usr/lib/python3.12/imaplib.py", line 202, in __init__
+    self.open(host, port, timeout)
+  File "/usr/lib/python3.12/imaplib.py", line 1319, in open
+    IMAP4.open(self, host, port, timeout)
+  File "/usr/lib/python3.12/imaplib.py", line 312, in open
+    self.sock = self._create_socket(timeout)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1309, in _create_socket
+    sock = IMAP4._create_socket(self, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 302, in _create_socket
+    return socket.create_connection(address)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 852, in create_connection
+    raise exceptions[0]
+  File "/usr/lib/python3.12/socket.py", line 837, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+18:30:15 rep 1 order ['imaplane-stream', 'imapsync', 'imaplane', 'imapsync-tuned']
+Traceback (most recent call last):
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 378, in <module>
+    main()
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 372, in main
+    cmd_run(a)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 269, in cmd_run
+    chain(args.profile, cfg, rep, out, rng, args.seed * 100 + rep, newmail=not args.no_newmail)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 224, in chain
+    info = json.load(open(WORK / 'golden' / profile / 'info.json'))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/majid/imaplane-bench-work/golden/scale-1000/info.json'
+18:30:35 scale-1000 finished (observed by stage2)
+18:30:35 golden scale-5000
+Traceback (most recent call last):
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 378, in <module>
+    main()
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 370, in main
+    cmd_golden(a)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/bench.py", line 189, in cmd_golden
+    common.seed(d, records, folders, batch_log=log)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/common.py", line 125, in seed
+    typ, data = c.append(quoted(utf7(r['folder'])), flags, '"' + imap_date(r['date']) + '"', r['body'])
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 417, in append
+    return self._simple_command(name, mailbox, flags, date_time)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1230, in _simple_command
+    return self._command_complete(name, self._command(name, *args))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1016, in _command
+    while self._get_response():
+          ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1075, in _get_response
+    resp = self._get_line()
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/imaplib.py", line 1185, in _get_line
+    raise self.abort('socket error: EOF')
+imaplib.IMAP4.abort: socket error: EOF
+18:30:49 NOTE: stage 2 restarted cleanly (a duplicate launch rebuilt golden scale-1000 under a running stage and crashed it; harness defect, no tool involved)
+18:30:49 golden scale-1000
+18:31:44   seeded 1000/1000
+18:31:44 seeded 1000 messages in 54s
+18:31:44 golden scale-1000: 1000 messages, 2 MB, 1000 on the server, mismatches 0
+18:31:44 stage scale-1000
+18:31:46 rep 1 order ['imaplane-stream', 'imapsync', 'imaplane', 'imapsync-tuned']
+18:35:54 hardened harness: execution lock, per-run network/container names/dirs, golden tree-hash checks, stale-state preflight. Restarting stage 2 as a single locked command.
+18:35:54 preflight: no stale containers, networks, run directories or measuring processes
+18:36:54   seeded 1000/3280
+18:37:50   seeded 2000/3280
+18:38:47   seeded 3000/3280
+18:39:03 seeded 3280 messages in 184s
+18:39:07 golden mixed: 3280 messages, 395 MB, 3280 on the server, mismatches 0
+18:39:07 mixed dataset identity: manifest UNCHANGED
+18:40:02   seeded 1000/1000
+18:40:02 seeded 1000 messages in 55s
+18:40:03 golden scale-1000: 1000 messages, 2 MB, 1000 on the server, mismatches 0
+18:40:05 rep 1 order ['imaplane-stream', 'imapsync', 'imaplane', 'imapsync-tuned']
+18:41:16 scale-1000-imaplane-stream-r1 fresh: wall 68.7s rc=0 rss=16MiB cmds=5025 verify=ok
+18:41:16 scale-1000-imaplane-stream-r1 rerun-inc-existence: wall 0.3s rc=0 rss=16MiB cmds=49 verify=None
+18:41:17 scale-1000-imaplane-stream-r1 rerun-inc-metadata: wall 0.2s rc=0 rss=16MiB cmds=28 verify=None
+18:41:19 scale-1000-imaplane-stream-r1 rerun-ordinary: wall 0.9s rc=0 rss=16MiB cmds=2020 verify=None
+18:41:20 scale-1000-imaplane-stream-r1 rerun-verify: wall 0.7s rc=0 rss=15MiB cmds=2004 verify=None
+18:41:22 scale-1000-imaplane-stream-r1 rerun-inc-full: wall 0.8s rc=0 rss=16MiB cmds=2024 verify=None
+18:41:43 scale-1000-imapsync-r1 fresh: wall 17.7s rc=0 rss=176MiB cmds=2082 verify=ok
+18:41:44 scale-1000-imapsync-r1 rerun: wall 1.1s rc=0 rss=177MiB cmds=109 verify=None
+18:42:56 scale-1000-imaplane-r1 fresh: wall 68.7s rc=0 rss=16MiB cmds=5025 verify=ok
+18:42:58 scale-1000-imaplane-r1 rerun-verify: wall 0.7s rc=0 rss=14MiB cmds=2026 verify=None
+18:42:59 scale-1000-imaplane-r1 rerun-inc-full: wall 0.9s rc=0 rss=16MiB cmds=2024 verify=None
+18:43:00 scale-1000-imaplane-r1 rerun-inc-existence: wall 0.2s rc=0 rss=16MiB cmds=27 verify=None
+18:43:01 scale-1000-imaplane-r1 rerun-inc-metadata: wall 0.2s rc=0 rss=16MiB cmds=28 verify=None
+18:43:03 scale-1000-imaplane-r1 rerun-ordinary: wall 0.8s rc=0 rss=16MiB cmds=2020 verify=None
+18:43:23 scale-1000-imapsync-tuned-r1 fresh: wall 17.4s rc=0 rss=175MiB cmds=2049 verify=ok
+18:43:25 scale-1000-imapsync-tuned-r1 rerun: wall 0.8s rc=0 rss=175MiB cmds=66 verify=None
+18:43:26 rep 2 order ['imaplane', 'imaplane-stream', 'imapsync', 'imapsync-tuned']
+18:44:37 scale-1000-imaplane-r2 fresh: wall 68.6s rc=0 rss=16MiB cmds=5025 verify=ok
+18:44:38 scale-1000-imaplane-r2 rerun-inc-full: wall 0.9s rc=0 rss=16MiB cmds=2046 verify=None
+18:44:39 scale-1000-imaplane-r2 rerun-inc-metadata: wall 0.2s rc=0 rss=16MiB cmds=28 verify=None
+18:44:40 scale-1000-imaplane-r2 rerun-inc-existence: wall 0.2s rc=0 rss=16MiB cmds=27 verify=None
+18:44:41 scale-1000-imaplane-r2 rerun-verify: wall 0.7s rc=0 rss=15MiB cmds=2004 verify=None
+18:44:43 scale-1000-imaplane-r2 rerun-ordinary: wall 0.8s rc=0 rss=16MiB cmds=2020 verify=None
+18:45:55 scale-1000-imaplane-stream-r2 fresh: wall 68.8s rc=0 rss=16MiB cmds=5025 verify=ok
+18:45:56 scale-1000-imaplane-stream-r2 rerun-inc-metadata: wall 0.3s rc=0 rss=16MiB cmds=50 verify=None
+18:45:57 scale-1000-imaplane-stream-r2 rerun-verify: wall 0.7s rc=0 rss=15MiB cmds=2004 verify=None
+18:45:59 scale-1000-imaplane-stream-r2 rerun-inc-full: wall 0.8s rc=0 rss=16MiB cmds=2024 verify=None
+18:46:00 scale-1000-imaplane-stream-r2 rerun-ordinary: wall 0.8s rc=0 rss=16MiB cmds=2020 verify=None
+18:46:01 scale-1000-imaplane-stream-r2 rerun-inc-existence: wall 0.2s rc=0 rss=17MiB cmds=27 verify=None
+18:46:22 scale-1000-imapsync-r2 fresh: wall 17.9s rc=0 rss=176MiB cmds=2082 verify=ok
+18:46:24 scale-1000-imapsync-r2 rerun: wall 1.1s rc=0 rss=178MiB cmds=109 verify=None
+18:46:44 scale-1000-imapsync-tuned-r2 fresh: wall 17.4s rc=0 rss=175MiB cmds=2049 verify=ok
+18:46:46 scale-1000-imapsync-tuned-r2 rerun: wall 0.8s rc=0 rss=175MiB cmds=66 verify=None
+18:46:47 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/scale-1000
+18:47:43   seeded 1000/5000
+18:48:37   seeded 2000/5000
+18:49:32   seeded 3000/5000
+18:50:28   seeded 4000/5000
+18:51:24   seeded 5000/5000
+18:51:24 seeded 5000 messages in 276s
+18:51:25 golden scale-5000: 5000 messages, 9 MB, 5000 on the server, mismatches 0
+18:51:27 rep 1 order ['imaplane-stream', 'imapsync', 'imaplane', 'imapsync-tuned']
+18:57:15 scale-5000-imaplane-stream-r1 fresh: wall 344.1s rc=0 rss=21MiB cmds=25025 verify=ok
+18:57:16 scale-5000-imaplane-stream-r1 rerun-inc-existence: wall 0.3s rc=0 rss=24MiB cmds=36 verify=None
+18:57:18 scale-5000-imaplane-stream-r1 rerun-inc-metadata: wall 0.3s rc=0 rss=21MiB cmds=34 verify=None
+18:57:22 scale-5000-imaplane-stream-r1 rerun-ordinary: wall 3.5s rc=0 rss=21MiB cmds=10020 verify=None
+18:57:26 scale-5000-imaplane-stream-r1 rerun-verify: wall 3.1s rc=0 rss=18MiB cmds=10004 verify=None
+18:57:31 scale-5000-imaplane-stream-r1 rerun-inc-full: wall 3.4s rc=0 rss=21MiB cmds=10024 verify=None
+18:59:03 scale-5000-imapsync-r1 fresh: wall 86.0s rc=0 rss=184MiB cmds=10082 verify=ok
+18:59:06 scale-5000-imapsync-r1 rerun: wall 2.5s rc=0 rss=193MiB cmds=96 verify=None
+19:04:59 scale-5000-imaplane-r1 fresh: wall 346.1s rc=0 rss=21MiB cmds=25025 verify=ok
+19:05:02 scale-5000-imaplane-r1 rerun-verify: wall 2.8s rc=0 rss=17MiB cmds=10013 verify=None
+19:05:07 scale-5000-imaplane-r1 rerun-inc-full: wall 3.7s rc=0 rss=21MiB cmds=10024 verify=None
+19:05:08 scale-5000-imaplane-r1 rerun-inc-existence: wall 0.3s rc=0 rss=24MiB cmds=27 verify=None
+19:05:10 scale-5000-imaplane-r1 rerun-inc-metadata: wall 0.3s rc=0 rss=21MiB cmds=34 verify=None
+19:05:14 scale-5000-imaplane-r1 rerun-ordinary: wall 3.5s rc=0 rss=21MiB cmds=10020 verify=None
+19:06:45 scale-5000-imapsync-tuned-r1 fresh: wall 84.7s rc=0 rss=178MiB cmds=10049 verify=ok
+19:06:47 scale-5000-imapsync-tuned-r1 rerun: wall 1.3s rc=0 rss=181MiB cmds=53 verify=None
+19:06:49 rep 2 order ['imaplane', 'imaplane-stream', 'imapsync', 'imapsync-tuned']
+19:12:34 scale-5000-imaplane-r2 fresh: wall 340.5s rc=0 rss=21MiB cmds=25025 verify=ok
+19:12:39 scale-5000-imaplane-r2 rerun-inc-full: wall 3.7s rc=0 rss=21MiB cmds=10033 verify=None
+19:12:40 scale-5000-imaplane-r2 rerun-inc-metadata: wall 0.3s rc=0 rss=21MiB cmds=34 verify=None
+19:12:41 scale-5000-imaplane-r2 rerun-inc-existence: wall 0.3s rc=0 rss=24MiB cmds=27 verify=None
+19:12:46 scale-5000-imaplane-r2 rerun-verify: wall 3.2s rc=0 rss=18MiB cmds=10004 verify=None
+19:12:51 scale-5000-imaplane-r2 rerun-ordinary: wall 3.8s rc=0 rss=21MiB cmds=10020 verify=None
+19:18:43 scale-5000-imaplane-stream-r2 fresh: wall 345.5s rc=0 rss=21MiB cmds=25025 verify=ok
+19:18:44 scale-5000-imaplane-stream-r2 rerun-inc-metadata: wall 0.4s rc=0 rss=21MiB cmds=43 verify=None
+19:18:48 scale-5000-imaplane-stream-r2 rerun-verify: wall 3.2s rc=0 rss=18MiB cmds=10004 verify=None
+19:18:53 scale-5000-imaplane-stream-r2 rerun-inc-full: wall 3.5s rc=0 rss=21MiB cmds=10024 verify=None
+19:18:57 scale-5000-imaplane-stream-r2 rerun-ordinary: wall 3.5s rc=0 rss=21MiB cmds=10020 verify=None
+19:18:59 scale-5000-imaplane-stream-r2 rerun-inc-existence: wall 0.3s rc=0 rss=25MiB cmds=27 verify=None
+19:20:32 scale-5000-imapsync-r2 fresh: wall 86.8s rc=0 rss=184MiB cmds=10082 verify=ok
+19:20:35 scale-5000-imapsync-r2 rerun: wall 2.5s rc=0 rss=192MiB cmds=96 verify=None
+19:22:05 scale-5000-imapsync-tuned-r2 fresh: wall 84.7s rc=0 rss=177MiB cmds=10049 verify=ok
+19:22:07 scale-5000-imapsync-tuned-r2 rerun: wall 1.3s rc=0 rss=180MiB cmds=53 verify=None
+19:22:10 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/scale-5000
+19:22:11 rep 1 order ['imapsync-tuned']
+19:23:31 mixed-imapsync-tuned-r1 fresh: wall 65.9s rc=0 rss=193MiB cmds=6678 verify=ok
+19:23:33 mixed-imapsync-tuned-r1 rerun: wall 1.2s rc=0 rss=176MiB cmds=106 verify=None
+19:23:57 mixed-imapsync-tuned-r1 newmail1: wall 4.9s rc=0 rss=183MiB cmds=503 verify=ok
+19:24:20 mixed-imapsync-tuned-r1 newmail2: wall 4.9s rc=0 rss=182MiB cmds=504 verify=ok
+19:24:29 rep 2 order ['imapsync-tuned']
+19:25:49 mixed-imapsync-tuned-r2 fresh: wall 66.2s rc=0 rss=193MiB cmds=6678 verify=ok
+19:25:51 mixed-imapsync-tuned-r2 rerun: wall 1.2s rc=0 rss=176MiB cmds=106 verify=None
+19:26:14 mixed-imapsync-tuned-r2 newmail1: wall 4.9s rc=0 rss=182MiB cmds=503 verify=ok
+19:26:39 mixed-imapsync-tuned-r2 newmail2: wall 4.8s rc=0 rss=182MiB cmds=503 verify=ok
+19:26:48 rep 3 order ['imapsync-tuned']
+19:28:08 mixed-imapsync-tuned-r3 fresh: wall 65.2s rc=0 rss=193MiB cmds=6678 verify=ok
+19:28:10 mixed-imapsync-tuned-r3 rerun: wall 1.2s rc=0 rss=176MiB cmds=105 verify=None
+19:28:33 mixed-imapsync-tuned-r3 newmail1: wall 4.9s rc=0 rss=182MiB cmds=503 verify=ok
+19:28:57 mixed-imapsync-tuned-r3 newmail2: wall 5.0s rc=0 rss=183MiB cmds=503 verify=ok
+19:29:07 run complete: /home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/results/main-mixed-tuned-fixed
+19:29:07 STAGE2 DONE (scale-20000 deferred)

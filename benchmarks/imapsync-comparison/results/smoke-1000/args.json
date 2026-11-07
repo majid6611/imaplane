@@ -1,0 +1,8 @@
+{
+ "cmd": "run",
+ "profile": "scale-1000",
+ "reps": 1,
+ "seed": 1,
+ "configs": "imaplane,imaplane-stream",
+ "out": "smoke-1000"
+}

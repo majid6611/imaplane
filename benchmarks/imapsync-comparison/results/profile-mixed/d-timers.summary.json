@@ -1,0 +1,110 @@
+{
+ "name": "d-timers",
+ "command": [
+  "imaplane",
+  "..."
+ ],
+ "returncode": 0,
+ "started_at": 1794021471.2235222,
+ "wall_s": 205.17639031999715,
+ "cpu_user_s": 24.742345,
+ "cpu_sys_s": 15.532474,
+ "peak_rss_kib": 35184,
+ "rusage_block_in": 3096,
+ "rusage_block_out": 947704,
+ "net_rx_bytes": 819223672,
+ "net_tx_bytes": 407449421,
+ "cgroup_read_bytes": 1585152,
+ "cgroup_write_bytes": 484319232,
+ "cgroup_cpu_s": 40.276074,
+ "dovecot_src": {
+  "commands": 6601,
+  "by_verb": {
+   "CAPABILITY": 1,
+   "LIST": 1,
+   "EXAMINE": 30,
+   "UID FETCH": 6569
+  },
+  "server_s_by_verb": {
+   "CAPABILITY": 0.0,
+   "LIST": 0.014,
+   "EXAMINE": 0.0573,
+   "UID FETCH": 3.2635
+  },
+  "failed_commands": 0,
+  "server_command_s": 3.334875,
+  "sessions": 1,
+  "app_bytes_client_to_server": 316265,
+  "app_bytes_server_to_client": 395907343
+ },
+ "dovecot_dst": {
+  "commands": 9872,
+  "by_verb": {
+   "LOGOUT": 1,
+   "CAPABILITY": 1,
+   "LIST": 11,
+   "CREATE": 9,
+   "SELECT": 10,
+   "APPEND": 3280,
+   "UID FETCH": 6560
+  },
+  "server_s_by_verb": {
+   "LOGOUT": 0.0,
+   "CAPABILITY": 0.0,
+   "LIST": 0.0117,
+   "CREATE": 0.1016,
+   "SELECT": 0.0498,
+   "APPEND": 48.5188,
+   "UID FETCH": 3.3598
+  },
+  "failed_commands": 0,
+  "server_command_s": 52.041773,
+  "sessions": 2,
+  "app_bytes_client_to_server": 395593114,
+  "app_bytes_server_to_client": 396220219
+ },
+ "imap_commands": 16473,
+ "imap_sessions": 3,
+ "app_bytes": 1188036941,
+ "tool_report": {
+  "complete": true,
+  "results": {
+   "confirmed": 3280
+  },
+  "verification": {
+   "fully_verified_this_run": 3280,
+   "metadata_checked_only": 0,
+   "existence_checked_only": 0,
+   "flag_drift": 0,
+   "uncertain": 0,
+   "blocked_by_uncertain": 0,
+   "problems": 0,
+   "statement": "3280 message(s) proven by a full SHA-256 read-back in this run; 0 checked by metadata only and 0 by existence only (content NOT re-read); 0 flag-drift, 0 uncertain, 0 blocked by an uncertain transfer, 0 problem(s)"
+  },
+  "warnings": []
+ },
+ "wall_clock_total_s": 207.86726427078247,
+ "verify_ok": true,
+ "journal_info": {
+  "journal_mode": "delete",
+  "synchronous_default_note": "synchronous is a per-connection setting; the product sets FULL",
+  "page_size": 4096,
+  "page_count": 232,
+  "journal_bytes": 950272,
+  "tables": {
+   "job": 1,
+   "transfers": 3280,
+   "snapshots": 10,
+   "resolutions": 0,
+   "append_attempts": 3280,
+   "recovery_events": 0,
+   "append_rejections": 0,
+   "operator_skip_events": 0
+  },
+  "state_dir_files": [
+   "imapsync-tmp",
+   "job.lock",
+   "journal.sqlite3"
+  ]
+ }
+}

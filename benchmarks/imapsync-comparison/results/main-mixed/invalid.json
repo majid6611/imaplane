@@ -1,0 +1,3 @@
+{"imapsync-tuned:rerun": "UID cache lost between throwaway containers; imapsync re-copied everything (harness defect)",
+ "imapsync-tuned:newmail1": "same cause; destination accumulated duplicates (harness defect)",
+ "imapsync-tuned:newmail2": "same cause; destination accumulated duplicates (harness defect)"}

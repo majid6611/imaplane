@@ -1,0 +1,8 @@
+{
+ "profile": "mixed",
+ "reps": 3,
+ "seed": 11,
+ "no_newmail": false,
+ "configs": "imapsync-tuned",
+ "out": "main-mixed-tuned-fixed"
+}

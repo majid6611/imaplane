@@ -1,0 +1,1 @@
+{"name": "shim", "command": ["env", "..."], "returncode": 0, "started_at": 1794019020.1402757, "wall_s": 68.61960985399492, "cpu_user_s": 2.286006, "cpu_sys_s": 3.519742, "peak_rss_kib": 16104, "rusage_block_in": 80, "rusage_block_out": 285272, "net_rx_bytes": 5482374, "net_tx_bytes": 2842795, "cgroup_read_bytes": 40960, "cgroup_write_bytes": 145776640, "cgroup_cpu_s": 5.806625}

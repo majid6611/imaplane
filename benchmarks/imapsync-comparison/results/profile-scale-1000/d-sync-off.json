@@ -1,0 +1,1 @@
+{"name": "d-sync-off", "command": ["env", "..."], "returncode": 0, "started_at": 1794019366.6946003, "wall_s": 19.30518406900228, "cpu_user_s": 1.518042, "cpu_sys_s": 1.440922, "peak_rss_kib": 16180, "rusage_block_in": 0, "rusage_block_out": 143344, "net_rx_bytes": 5479792, "net_tx_bytes": 2765641, "cgroup_read_bytes": 0, "cgroup_write_bytes": 94208, "cgroup_cpu_s": 2.960201}

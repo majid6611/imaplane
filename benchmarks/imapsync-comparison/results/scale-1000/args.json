@@ -1,0 +1,8 @@
+{
+ "profile": "scale-1000",
+ "reps": 2,
+ "seed": 3,
+ "no_newmail": true,
+ "configs": "imapsync,imapsync-tuned,imaplane,imaplane-stream",
+ "out": "scale-1000"
+}

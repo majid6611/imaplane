@@ -1,0 +1,19 @@
+{
+ "profile": "mixed",
+ "messages": 3280,
+ "bytes": 395026858,
+ "folders": [
+  "INBOX",
+  "Sent",
+  "Drafts",
+  "Work",
+  "Work/Projects",
+  "Work/Projects/2023/Q1",
+  "Archive/2019",
+  "Archive/2020",
+  "Archive/R\u00e9sum\u00e9",
+  "Empty"
+ ],
+ "manifest_sha256": "6a0b2d588335e3d5d674d26f8f22883f5ab90b25716102ce8524e108080caa81",
+ "note": "regenerated deterministically from dataset.py; the golden directory was rebuilt read-only for the hardened harness"
+}

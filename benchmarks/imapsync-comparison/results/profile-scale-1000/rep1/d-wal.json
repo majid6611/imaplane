@@ -1,0 +1,1 @@
+{"name": "d-wal", "command": ["env", "..."], "returncode": 0, "started_at": 1794019252.5690112, "wall_s": 34.540119855999365, "cpu_user_s": 2.000339, "cpu_sys_s": 1.24021, "peak_rss_kib": 16088, "rusage_block_in": 0, "rusage_block_out": 113888, "net_rx_bytes": 5476898, "net_tx_bytes": 2765971, "cgroup_read_bytes": 0, "cgroup_write_bytes": 57958400, "cgroup_cpu_s": 3.241028}

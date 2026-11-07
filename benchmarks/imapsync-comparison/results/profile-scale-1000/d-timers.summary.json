@@ -1,0 +1,110 @@
+{
+ "name": "d-timers",
+ "command": [
+  "imaplane",
+  "..."
+ ],
+ "returncode": 0,
+ "started_at": 1794019163.1325643,
+ "wall_s": 68.51784618999955,
+ "cpu_user_s": 2.191679,
+ "cpu_sys_s": 3.56455,
+ "peak_rss_kib": 16204,
+ "rusage_block_in": 0,
+ "rusage_block_out": 285272,
+ "net_rx_bytes": 5481366,
+ "net_tx_bytes": 2843059,
+ "cgroup_read_bytes": 0,
+ "cgroup_write_bytes": 145776640,
+ "cgroup_cpu_s": 5.757798,
+ "dovecot_src": {
+  "commands": 2014,
+  "by_verb": {
+   "CAPABILITY": 1,
+   "LIST": 1,
+   "EXAMINE": 9,
+   "UID FETCH": 2003
+  },
+  "server_s_by_verb": {
+   "CAPABILITY": 0.0,
+   "LIST": 0.0005,
+   "EXAMINE": 0.0273,
+   "UID FETCH": 0.4888
+  },
+  "failed_commands": 0,
+  "server_command_s": 0.51657,
+  "sessions": 1,
+  "app_bytes_client_to_server": 95597,
+  "app_bytes_server_to_client": 2117249
+ },
+ "dovecot_dst": {
+  "commands": 3011,
+  "by_verb": {
+   "LOGOUT": 1,
+   "CAPABILITY": 1,
+   "LIST": 4,
+   "CREATE": 2,
+   "SELECT": 3,
+   "APPEND": 1000,
+   "UID FETCH": 2000
+  },
+  "server_s_by_verb": {
+   "LOGOUT": 0.0,
+   "CAPABILITY": 0.0,
+   "LIST": 0.0099,
+   "CREATE": 0.0208,
+   "SELECT": 0.0138,
+   "APPEND": 13.4705,
+   "UID FETCH": 0.6383
+  },
+  "failed_commands": 0,
+  "server_command_s": 14.15338,
+  "sessions": 2,
+  "app_bytes_client_to_server": 2018656,
+  "app_bytes_server_to_client": 2212544
+ },
+ "imap_commands": 5025,
+ "imap_sessions": 3,
+ "app_bytes": 6444046,
+ "tool_report": {
+  "complete": true,
+  "results": {
+   "confirmed": 1000
+  },
+  "verification": {
+   "fully_verified_this_run": 1000,
+   "metadata_checked_only": 0,
+   "existence_checked_only": 0,
+   "flag_drift": 0,
+   "uncertain": 0,
+   "blocked_by_uncertain": 0,
+   "problems": 0,
+   "statement": "1000 message(s) proven by a full SHA-256 read-back in this run; 0 checked by metadata only and 0 by existence only (content NOT re-read); 0 flag-drift, 0 uncertain, 0 blocked by an uncertain transfer, 0 problem(s)"
+  },
+  "warnings": []
+ },
+ "wall_clock_total_s": 69.16631078720093,
+ "verify_ok": true,
+ "journal_info": {
+  "journal_mode": "delete",
+  "synchronous_default_note": "synchronous is a per-connection setting; the product sets FULL",
+  "page_size": 4096,
+  "page_count": 75,
+  "journal_bytes": 307200,
+  "tables": {
+   "job": 1,
+   "transfers": 1000,
+   "snapshots": 3,
+   "resolutions": 0,
+   "append_attempts": 1000,
+   "recovery_events": 0,
+   "append_rejections": 0,
+   "operator_skip_events": 0
+  },
+  "state_dir_files": [
+   "imapsync-tmp",
+   "job.lock",
+   "journal.sqlite3"
+  ]
+ }
+}

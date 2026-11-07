@@ -1,0 +1,4 @@
+19:36:58 preflight: no stale containers, networks, run directories or measuring processes
+19:38:09 shim: wall 68.6s cpu 5.8s cmds 5025 verify_ok=True journal_mode=delete
+19:39:20 diag-file: wall 68.3s cpu 5.7s cmds 5025 verify_ok=True journal_mode=delete
+19:40:32 d-timers: wall 68.5s cpu 5.8s cmds 5025 verify_ok=True journal_mode=delete

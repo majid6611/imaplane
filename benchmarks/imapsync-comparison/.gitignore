@@ -1,0 +1,4 @@
+# large raw tool output stays on disk next to the summaries but is not committed
+results/*/raw/
+__pycache__/
+profiling/shim.so

@@ -1,0 +1,45 @@
+{
+  "report_version": 1,
+  "observed_at": "2026-11-07T02:43:09.334536545+00:00",
+  "scope": "live destination content, INTERNALDATE and supported flags against the durable source UID snapshot",
+  "complete": true,
+  "interrupted": false,
+  "halt_reason": null,
+  "verification": {
+    "fully_verified_this_run": 0,
+    "metadata_checked_only": 0,
+    "existence_checked_only": 0,
+    "flag_drift": 0,
+    "uncertain": 0,
+    "blocked_by_uncertain": 0,
+    "problems": 0,
+    "statement": "0 message(s) proven by a full SHA-256 read-back in this run; 0 checked by metadata only and 0 by existence only (content NOT re-read); 0 flag-drift, 0 uncertain, 0 blocked by an uncertain transfer, 0 problem(s)",
+    "folders": [
+      {
+        "folder": "Archive/Old",
+        "confirmed": 0,
+        "full_verification_recorded": 0,
+        "full_verification_unknown": 0,
+        "oldest_full_verification": null,
+        "newest_full_verification": null
+      },
+      {
+        "folder": "INBOX",
+        "confirmed": 0,
+        "full_verification_recorded": 0,
+        "full_verification_unknown": 0,
+        "oldest_full_verification": null,
+        "newest_full_verification": null
+      },
+      {
+        "folder": "Work",
+        "confirmed": 0,
+        "full_verification_recorded": 0,
+        "full_verification_unknown": 0,
+        "oldest_full_verification": null,
+        "newest_full_verification": null
+      }
+    ]
+  },
+  "entries": []
+}

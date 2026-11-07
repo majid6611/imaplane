@@ -1,0 +1,3 @@
+19:49:49 preflight: no stale containers, networks, run directories or measuring processes
+19:50:44 f-delete: wall 52.9s cpu 5.4s cmds 5025 verify_ok=True journal_mode=delete
+19:51:16 f-wal: wall 28.3s cpu 2.9s cmds 5025 verify_ok=True journal_mode=wal

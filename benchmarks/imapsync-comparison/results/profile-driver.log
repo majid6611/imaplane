@@ -1,0 +1,11 @@
+19:34:10 preflight: no stale containers, networks, run directories or measuring processes
+19:35:20 base: wall 67.2s cpu 5.6s cmds 5025 verify_ok=True journal_mode=delete
+Traceback (most recent call last):
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/profiling/profile.py", line 90, in <module>
+    main()
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/profiling/profile.py", line 86, in main
+    run_variant(n, out)
+  File "/home/majid/Desktop/imaplane/benchmarks/imapsync-comparison/profiling/profile.py", line 74, in run_variant
+    log(f'{name}: wall {res["wall_s"]:.1f}s cpu {res["cpu_user_s"] + res["cpu_sys_s"]:.1f}s cmds {res["imap_commands"]} verify_ok={v_["ok"]} journal_mode={info.get("journal_mode")}')
+                        ~~~^^^^^^^^^^
+KeyError: 'wall_s'

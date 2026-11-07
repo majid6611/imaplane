@@ -1,0 +1,19 @@
+# Runner image for the IMAPLANE vs imapsync benchmark: both tools execute inside this same image,
+# on the same Docker network, under the same limits, wrapped by the same measuring script.
+# imapsync is the upstream release script at a pinned tag; its Perl dependencies come from the
+# distribution (Debian bookworm has no imapsync package, so the prerequisites are installed by name,
+# following upstream's documented Debian prerequisite list).
+FROM debian:bookworm-slim
+ARG IMAPSYNC_TAG=imapsync-2.314
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl python3 procps make \
+      libauthen-ntlm-perl libcgi-pm-perl libcrypt-openssl-rsa-perl libdata-uniqid-perl libencode-imaputf7-perl \
+      libfile-copy-recursive-perl libfile-tail-perl libio-socket-inet6-perl libio-socket-ssl-perl libio-tee-perl \
+      libhtml-parser-perl libjson-webtoken-perl libmail-imapclient-perl libparse-recdescent-perl libmodule-scandeps-perl \
+      libreadonly-perl libregexp-common-perl libsys-meminfo-perl libterm-readkey-perl libtest-mockobject-perl \
+      libtest-pod-perl libunicode-string-perl liburi-perl libwww-perl libnet-ssleay-perl libdigest-hmac-perl \
+      libclass-load-perl libdist-checkconflicts-perl libtest-nowarnings-perl libjson-perl \
+ && curl -fsSL "https://raw.githubusercontent.com/imapsync/imapsync/${IMAPSYNC_TAG}/imapsync" -o /usr/local/bin/imapsync \
+ && chmod 0755 /usr/local/bin/imapsync \
+ && sha256sum /usr/local/bin/imapsync > /usr/local/share/imapsync.sha256 \
+ && rm -rf /var/lib/apt/lists/*
