@@ -35,10 +35,18 @@ IMAPLANE_BIN = Path(os.environ.get('IMAPLANE_BIN', '/tmp/claude-1000/-home-majid
 # Configs named imaplane-wal* run the Phase 1 (write-ahead-log journal) binary; imaplane / imaplane-stream run IMAPLANE_BIN
 # (the original a6ec32f build). Both are release builds of committed sources; their hashes are recorded in env.json.
 IMAPLANE_WAL_BIN = Path(os.environ['IMAPLANE_WAL_BIN']) if 'IMAPLANE_WAL_BIN' in os.environ else None
+# imaplane-fd*: Phase 2 build (WAL + fdatasync); imaplane-rt*: Phase 3 build (adds the one-round-trip small-message read)
+IMAPLANE_FD_BIN = Path(os.environ['IMAPLANE_FD_BIN']) if 'IMAPLANE_FD_BIN' in os.environ else None
+IMAPLANE_RT_BIN = Path(os.environ['IMAPLANE_RT_BIN']) if 'IMAPLANE_RT_BIN' in os.environ else None
 
 
 def binary_for(cfg):
-    return IMAPLANE_WAL_BIN if cfg.startswith('imaplane-wal') else IMAPLANE_BIN
+    for prefix, binary in (('imaplane-rt', IMAPLANE_RT_BIN), ('imaplane-fd', IMAPLANE_FD_BIN), ('imaplane-wal', IMAPLANE_WAL_BIN)):
+        if cfg.startswith(prefix):
+            if binary is None:
+                sys.exit(f'{prefix}* needs its binary (environment variable not set)')
+            return binary
+    return IMAPLANE_BIN
 TOOL_LIMITS = ['--cpus', '2', '--memory', '2g']
 CONFIGS = ['imapsync', 'imapsync-tuned', 'imaplane', 'imaplane-stream']
 NEWMAIL = 200
@@ -250,6 +258,10 @@ def env_info():
     if IMAPLANE_WAL_BIN:
         info['imaplane_wal_binary_sha256'] = hashlib.sha256(IMAPLANE_WAL_BIN.read_bytes()).hexdigest()
         info['imaplane_wal_binary_path'] = str(IMAPLANE_WAL_BIN)
+    for name, b in (('fd', IMAPLANE_FD_BIN), ('rt', IMAPLANE_RT_BIN)):
+        if b:
+            info[f'imaplane_{name}_binary_sha256'] = hashlib.sha256(b.read_bytes()).hexdigest()
+            info[f'imaplane_{name}_binary_path'] = str(b)
     info['imaplane_baseline_binary_path'] = str(IMAPLANE_BIN)
     info['imaplane_commit'] = sh('git', '-C', str(HERE.parents[1]), 'rev-parse', 'HEAD').stdout.strip()
     info['imaplane_tree_clean'] = not sh('git', '-C', str(HERE.parents[1]), 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock').stdout.strip()
@@ -482,6 +494,25 @@ def cmd_stage_p1(_):
     log('PHASE 1 BENCHMARK DONE')
 
 
+def cmd_stage_p2(_):
+    """Phase 2 (WAL + fdatasync) comparison under ONE lock: original, Phase 1, Phase 2 and tuned imapsync interleaved
+    on the mixed dataset, SIGKILL tests for the Phase 2 build, and the 1k/5k scaling sets."""
+    if IMAPLANE_FD_BIN is None or IMAPLANE_WAL_BIN is None:
+        sys.exit('set IMAPLANE_WAL_BIN and IMAPLANE_FD_BIN')
+    cfgs = 'imaplane,imaplane-wal,imaplane-fd,imaplane-fd-stream,imapsync-tuned'
+    cmd_run(argparse.Namespace(profile='mixed', reps=3, seed=31, no_newmail=False, configs=cfgs, out='p2-main-mixed'))
+    med = {}
+    for l in open(HERE / 'results' / 'p2-main-mixed' / 'runs.jsonl'):
+        r = json.loads(l)
+        if r['step'] == 'fresh':
+            med.setdefault(r['cfg'], []).append(r['wall_s'])
+    json.dump({k: statistics.median(v) for k, v in med.items()}, open(HERE / 'results' / 'p2-fresh-medians-mixed.json', 'w'))
+    cmd_kill(argparse.Namespace(profile='mixed', kills=4, seed=19, configs='imaplane-fd,imaplane-fd-stream', fresh_medians=str(HERE / 'results' / 'p2-fresh-medians-mixed.json'), out='p2-kill-mixed'))
+    for n in (1000, 5000):
+        cmd_run(argparse.Namespace(profile=f'scale-{n}', reps=2, seed=33, no_newmail=True, configs='imaplane,imaplane-wal,imaplane-fd,imapsync-tuned', out=f'p2-scale-{n}'))
+    log('PHASE 2 BENCHMARK DONE')
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -491,7 +522,7 @@ def main():
     r.add_argument('--configs', default=','.join(CONFIGS)); r.add_argument('--out'); r.add_argument('--no-newmail', action='store_true')
     k = sub.add_parser('kill'); k.add_argument('--profile', default='mixed'); k.add_argument('--kills', type=int, default=4); k.add_argument('--seed', type=int, default=7)
     k.add_argument('--configs', default='imapsync,imaplane,imaplane-stream'); k.add_argument('--fresh-medians'); k.add_argument('--out')
-    sub.add_parser('stage2'); sub.add_parser('clean'); sub.add_parser('stage_p1')
+    sub.add_parser('stage2'); sub.add_parser('clean'); sub.add_parser('stage_p1'); sub.add_parser('stage_p2')
     a = ap.parse_args()
     if a.cmd == 'env':
         print(json.dumps(env_info(), indent=1)); return
@@ -499,7 +530,7 @@ def main():
         if a.cmd == 'clean':
             clean(); return
         preflight()
-        {'golden': cmd_golden, 'run': cmd_run, 'kill': cmd_kill, 'stage2': cmd_stage2, 'stage_p1': cmd_stage_p1}[a.cmd](a)
+        {'golden': cmd_golden, 'run': cmd_run, 'kill': cmd_kill, 'stage2': cmd_stage2, 'stage_p1': cmd_stage_p1, 'stage_p2': cmd_stage_p2}[a.cmd](a)
 
 
 if __name__ == '__main__':
