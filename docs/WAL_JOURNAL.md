@@ -98,3 +98,36 @@ cut at 20+ offsets always recovers a whole-commit prefix; conversion interrupted
 converges; upgrade of a legacy journal interrupted at seven points converges with old evidence intact; an already-WAL
 journal on a simulated NFS is refused and a legacy one stays legacy. Plus the existing 98+ Rust tests, both crash
 matrices, the randomized SIGKILL stresses and the incremental suites, run in normal and forced-spool modes.
+
+## 6. Phase 2: fdatasync instead of fsync
+
+What it is: the bundled SQLite is compiled with `-DHAVE_FDATASYNC=1`, the setting of the standard SQLite build for
+Linux. Without it SQLite maps `fdatasync` to `fsync`. With it, syncing the write-ahead log calls `fdatasync()`, which
+flushes the file's data and the metadata needed to read that data back (including its size) and skips unrelated
+metadata such as timestamps. SQLite's commit protocol needs exactly that; `synchronous=FULL`, the number of syncs per
+commit and the four commit boundaries per message are unchanged. Measured on the profiled machine: 3.9 ms -> 2.0 ms per sync.
+
+How it is applied, and how losing it is detected:
+
+* `.cargo/config.toml` sets `LIBSQLITE3_FLAGS=-DHAVE_FDATASYNC=1` (`force = true`) for every Cargo build in the repository.
+  `libsqlite3-sys`' build script appends it to its own flags.
+* The packaging build copies `.cargo/` into its container (`packaging/Dockerfile`, `.dockerignore`); the explicit copy list
+  there would otherwise have dropped it silently.
+* `scripts/check-elf.py` (run for every package) fails unless the binary imports `fdatasync` from libc, which it does
+  exactly when SQLite was built with the flag; CI runs it on the release binary as well.
+* `tests/local/wal_sync.py` fails unless the log is synced with `fdatasync` (at least once per durable commit) and never
+  with a plain `fsync`.
+
+What it does not change: directory syncs, file creation and removal, the WAL-reset guard, the filesystem refusals, backups,
+recovery behaviour. Losing the flag would never corrupt anything (SQLite falls back to `fsync`, as before Phase 2); it
+would only make commits slower, and the three checks above exist so that this cannot go unnoticed.
+
+Limits of the evidence: tested on ext4 on NVMe through Docker bind mounts. Behaviour on other local filesystems (xfs, btrfs,
+zfs) follows their `fdatasync` implementations, which the SQLite project relies on in its default Linux build; it was not
+tested here. A real power-loss test is not possible in this environment; the durability argument rests on SQLite's own
+commit protocol, the unchanged sync count per commit (asserted), and the kill/crash tests.
+
+Operational note (found while rehearsing the package build): Cargo does not rebuild an existing build directory's SQLite
+when `.cargo/config.toml` first appears or changes; after pulling this change run `cargo clean -p libsqlite3-sys` (per
+target directory) once. Fresh builds, CI and the packaging container are unaffected, and the three checks above would
+catch a stale build.

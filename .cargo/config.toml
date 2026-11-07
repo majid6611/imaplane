@@ -1,0 +1,12 @@
+# Build-time configuration that is part of the product's durability story.
+#
+# HAVE_FDATASYNC makes the bundled SQLite use fdatasync() instead of fsync() when it syncs the journal, as the
+# standard SQLite build for Linux does. fdatasync flushes the data and the file size needed to read it back, which
+# is all SQLite's commit protocol requires; it skips unrelated metadata (timestamps), roughly halving the cost of
+# each durable commit on journaling filesystems. `synchronous=FULL` and the commit boundaries are unchanged.
+#
+# `force = true` so a stray LIBSQLITE3_FLAGS in the environment cannot silently drop it. Losing the flag would
+# not corrupt anything (SQLite then uses fsync, as before), it would only make commits slower, and
+# tests/local/wal_sync.py fails if the built binary does not use fdatasync for the log.
+[env]
+LIBSQLITE3_FLAGS = { value = "-DHAVE_FDATASYNC=1", force = true }

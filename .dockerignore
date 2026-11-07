@@ -1,6 +1,8 @@
 *
 !Cargo.toml
 !Cargo.lock
+!.cargo/
+!.cargo/config.toml
 !src/
 !src/**
 !vendor/
@@ -9,6 +11,8 @@
 !tests/foundations.rs
 !tests/safety.rs
 !tests/*.rs
+!tests/support/
+!tests/support/**
 !packaging/
 !packaging/Dockerfile
 

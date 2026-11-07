@@ -9,7 +9,8 @@ fdatasync per journal file (tests/support/fsync_shim.c; it only observes), and a
   * the pre-literal fence is still ahead of the first literal byte (the journal row says literal_authorized before
     the message is confirmed, and an APPEND was never sent without it: checked by the existing crash matrices, here
     only the commit count is asserted);
-  * nothing is synced less than once per commit: syncs of the log >= commits.
+  * nothing is synced less than once per commit: syncs of the log >= commits;
+  * (phase 2) the log is synced with fdatasync only: the build carries -DHAVE_FDATASYNC=1.
 
   python3 tests/local/wal_sync.py target/release/imaplane
 Needs Docker (only to compile the shim with the dev image's gcc, as no compiler is installed on the host).
@@ -65,5 +66,8 @@ with tempfile.TemporaryDirectory(prefix='imaplane-walsync-') as tmp:
     # rollback journals; per-message commits must use none (the old configuration created one per commit).
     assert stats['rollback_journal']['opens'] < 2 * N, f'rollback journals in use per commit: {stats["rollback_journal"]["opens"]}'
     assert syncs('wal') >= commits, f'{syncs("wal")} syncs of the log for at least {commits} durable commits: a commit skipped its sync'
+    # Phase 2: the log is synced with fdatasync (SQLite built with -DHAVE_FDATASYNC=1 via .cargo/config.toml), never
+    # with a plain fsync, and every commit still reaches the disk: the count of syncs did not drop.
+    assert stats['wal']['fdatasyncs'] >= commits and stats['wal']['fsyncs'] == 0, f'log syncs: {stats["wal"]["fdatasyncs"]} fdatasync, {stats["wal"]["fsyncs"]} fsync (the build lost -DHAVE_FDATASYNC=1?)'
     assert syncs('wal') < commits * 3, 'unexpectedly many syncs of the log'
-    print(f'PASS WAL journal: {syncs("wal")} syncs of the log for {commits} durable commits ({N} messages), no rollback journal, clean exit removed the log')
+    print(f'PASS WAL journal: {stats["wal"]["fdatasyncs"]} fdatasyncs of the log for {commits} durable commits ({N} messages), no rollback journal, clean exit removed the log')

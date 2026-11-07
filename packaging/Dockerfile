@@ -13,9 +13,13 @@ RUN curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs -o /tmp/rustup.sh 
 WORKDIR /src
 ENV CARGO_BUILD_JOBS=2
 COPY Cargo.toml Cargo.lock ./
+# Build-time SQLite flags (fdatasync); scripts/check-elf.py verifies the resulting binary actually uses them.
+COPY .cargo .cargo
 COPY vendor vendor
 COPY src src
 COPY tests/*.rs tests/
+# Cargo.toml declares an example under tests/support (the schema-5 upgrade helper); the build fails without it.
+COPY tests/support tests/support
 RUN cargo test --locked && cargo build --release --locked && mkdir /output && \
     cp target/release/imaplane /output/imaplane && /output/imaplane --version
 COPY LICENSE /src/LICENSE
