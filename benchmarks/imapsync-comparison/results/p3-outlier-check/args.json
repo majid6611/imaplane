@@ -1,0 +1,9 @@
+{
+ "cmd": "run",
+ "profile": "scale-1000",
+ "reps": 4,
+ "seed": 77,
+ "configs": "imaplane-fd",
+ "out": "p3-outlier-check",
+ "no_newmail": true
+}

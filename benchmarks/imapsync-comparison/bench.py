@@ -380,10 +380,28 @@ def cmd_run(args):
     log('run complete:', out)
 
 
-def operator_loop(run, cfg, label, max_rounds=6):
+def journal_attempts(run):
+    """Phase evidence from a COPY of the run's journal (never touches the live state): append_attempts rows and
+    uncertain transfers."""
+    import sqlite3, shutil, tempfile
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            for n in ('journal.sqlite3', 'journal.sqlite3-wal'):
+                if (run.dir / 'state' / n).exists():
+                    shutil.copy(run.dir / 'state' / n, t)
+            db = sqlite3.connect(f'{t}/journal.sqlite3')
+            out = {'attempts': db.execute('select folder,uid,phase from append_attempts').fetchall(), 'uncertain': db.execute("select folder,uid from transfers where state='uncertain'").fetchall()}
+            db.close()
+            return out
+    except Exception as exc:
+        return {'error': repr(exc)}
+
+
+def operator_loop(run, cfg, label, max_rounds=6, decisions=None):
     """The documented operator procedure for uncertain IMAPLANE records: audited recover when nothing was
     sent, resolve when exactly one verified candidate exists. Returns (actions, remaining_uncertain)."""
     actions = 0
+    decisions = decisions if decisions is not None else []
     for round_ in range(max_rounds):
         res = run.measure(cfg, 'ordinary', f'{label}-op{round_}')
         try:
@@ -399,6 +417,8 @@ def operator_loop(run, cfg, label, max_rounds=6):
                     '-v', f'{WORK}/tls.crt:/work/tls.crt:ro', '-v', f'{WORK}/password:/work/password:ro', '-v', f'{run.dir}/state:/state', '-v', f'{run.cfg_binary or IMAPLANE_BIN}:/usr/local/bin/imaplane:ro', common.RUNNER_IMAGE, 'imaplane']
             a = ['--config', '/work/imaplane.toml', '--folder', e['source_folder'], '--uid', str(e['source_uid'])]
             p = sh(*base, 'recover', *a, '--json', check=False)
+            decisions.append({'uid': e['source_uid'], 'folder': e['source_folder'], 'recover_rc': p.returncode, 'recover_out': (p.stdout or '')[-600:], 'recover_err': (p.stderr or '')[-300:],
+                              'candidates': len(e.get('candidate_uids', [])), 'journal': journal_attempts(run)})
             if p.returncode == 2:
                 actions += 1; progressed = True; continue
             if len(e.get('candidate_uids', [])) == 1:
@@ -446,17 +466,18 @@ def cmd_kill(args):
                 c.logout()
                 landed = sum(v or 0 for v in mid.values())
                 mid_verify = run.check()
+                at_kill_journal = journal_attempts(run)
                 # resume with the SAME command; this is the recovery time
                 res = run.measure(cfg, 'resume' if cfg.startswith('imaplane') else 'fresh', f'{tag}-resume')
                 save_raw(run, out, f'{tag}-resume')
                 after_one = run.check()
-                actions = remaining = None
+                actions = remaining = None; decisions = []
                 final = after_one
                 if cfg.startswith('imaplane') and (res['tool_report'].get('results', {}).get('uncertain') or not res['tool_report'].get('complete')):
-                    actions, remaining = operator_loop(run, cfg, tag)
+                    actions, remaining = operator_loop(run, cfg, tag, decisions=decisions)
                     final = run.check()
                 row = {'profile': args.profile, 'cfg': cfg, 'kill': k, 'kill_after_s': delay, 'fraction_of_median_fresh': frac, 'messages_in_destination_at_kill': landed,
-                       'at_kill': mid_verify['total'], 'resume': res, 'after_one_rerun': after_one, 'operator_actions': actions, 'uncertain_remaining': remaining, 'final': final}
+                       'at_kill': mid_verify['total'], 'resume': res, 'after_one_rerun': after_one, 'operator_actions': actions, 'uncertain_remaining': remaining, 'journal_at_kill': at_kill_journal, 'operator_decisions': decisions, 'manual_review': bool(remaining), 'final': final}
                 record(out, row)
                 log(f'{tag}: killed at {delay:.1f}s with {landed} in destination; resume {res["wall_s"]:.1f}s; one-rerun ok={after_one["ok"]} {after_one["total"].get("duplicates")} dup {after_one["total"].get("missing")} missing; final ok={final["ok"]} ops={actions}')
             finally:
