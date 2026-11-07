@@ -93,10 +93,15 @@ class LeanServer:
         self.resume_source.set()
         self.listener.close()
 
-    def send_body(self, client, source_index, size, user):
+    def send_body(self, client, source_index, size, user, limit=None):
+        """Send the message body (or only its first `limit` bytes, for a partial fetch)."""
         sent = 0
         paused = False
         for data in blocks(source_index, size) if source_index is not None else (b'\0' * min(BLOCK, size - o) for o in range(0, size, BLOCK)):
+            if limit is not None:
+                if sent >= limit:
+                    break
+                data = data[:limit - sent]
             if self.pause_source_at is not None and user == 'source' and not paused and sent + len(data) > self.pause_source_at:
                 cut = self.pause_source_at - sent
                 client.sendall(data[:cut]); sent += cut
@@ -156,6 +161,13 @@ class LeanServer:
                                 size, index = found
                                 if request == b'(UID RFC822.SIZE)':
                                     client.sendall(b'* %d FETCH (UID %d RFC822.SIZE %d)\r\n' % (uid, uid, size))
+                                elif re.fullmatch(rb'\(UID FLAGS INTERNALDATE RFC822\.SIZE BODY\.PEEK\[\]<0\.\d+>\)', request):
+                                    # single-exchange read of a small message: size, flags, date and the first N bytes
+                                    n = min(int(re.search(rb'<0\.(\d+)>', request).group(1)), size)
+                                    client.sendall(b'* %d FETCH (UID %d FLAGS (\\Seen) INTERNALDATE "' % (uid, uid) + DATE + b'" RFC822.SIZE %d BODY[]<0> {%d}\r\n' % (size, n))
+                                    (self.fetch_started if user == 'source' else self.verify_started).set()
+                                    self.send_body(client, index, size, user, limit=n)
+                                    client.sendall(b')\r\n')
                                 else:
                                     assert request == b'(UID FLAGS INTERNALDATE BODY.PEEK[])', request
                                     client.sendall(b'* %d FETCH (UID %d FLAGS (\\Seen) INTERNALDATE "' % (uid, uid) + DATE + b'" BODY[] {%d}\r\n' % size)

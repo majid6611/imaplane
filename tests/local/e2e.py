@@ -350,7 +350,10 @@ class ProtocolServer:
                                 if request == b'(UID RFC822.SIZE)':
                                     client.sendall(prefix+b' RFC822.SIZE '+str(len(body) + (1 if self.bad_size and user == 'source' and uid == 1 else 0)).encode()+b')\r\n')
                                 else:
-                                    assert request == b'(UID FLAGS INTERNALDATE BODY.PEEK[])'
+                                    # The two-step path asks for the body alone; the single-exchange path (small messages)
+                                    # asks for size, flags, date and the first N body bytes together.
+                                    probe = re.fullmatch(rb'\(UID FLAGS INTERNALDATE RFC822\.SIZE BODY\.PEEK\[\]<0\.(\d+)>\)', request)
+                                    assert probe or request == b'(UID FLAGS INTERNALDATE BODY.PEEK[])', request
                                     self.body_fetches[user] += 1
                                     if (not self.failed_body and mode.endswith('source-fault') and user == 'source') or (mode.endswith('destination-fault') and user == 'destination'):
                                         self.failed_body = True
@@ -373,7 +376,12 @@ class ProtocolServer:
                                         return
                                     flags = self.dest_flags.get(uid, b'\\Seen') if user == 'destination' else b'\\Seen'
                                     date = self.dest_dates.get(uid, b'02-Jan-2020 03:04:05 +0000') if user == 'destination' else b'02-Jan-2020 03:04:05 +0000'
-                                    payload = prefix+b' FLAGS ('+flags+b') INTERNALDATE "'+date+b'" BODY[] {'+str(len(body)).encode()+b'}\r\n'+body+b')\r\n'
+                                    if probe:
+                                        part = body[:int(probe.group(1))]
+                                        size_field = len(body) + (1 if self.bad_size and user == 'source' and uid == 1 else 0)
+                                        payload = prefix+b' FLAGS ('+flags+b') INTERNALDATE "'+date+b'" RFC822.SIZE '+str(size_field).encode()+b' BODY[]<0> {'+str(len(part)).encode()+b'}\r\n'+part+b')\r\n'
+                                    else:
+                                        payload = prefix+b' FLAGS ('+flags+b') INTERNALDATE "'+date+b'" BODY[] {'+str(len(body)).encode()+b'}\r\n'+body+b')\r\n'
                                     if user == 'source' and self.stall_source_fetch_at is not None and len(payload) > self.stall_source_fetch_at:
                                         client.sendall(payload[:self.stall_source_fetch_at]); time.sleep(30); return
                                     if user == 'source' and self.truncate_source_fetch_at is not None and len(payload) > self.truncate_source_fetch_at:

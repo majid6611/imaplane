@@ -77,7 +77,7 @@ with tempfile.TemporaryDirectory(prefix='imaplane-stream-transfer-') as tmp:
         return json.loads(p.stdout) if p.stdout.strip().startswith('{') else None
 
     def appends(s): return sum(v == b'APPEND' for _, v, _ in s.events)
-    def source_body_fetches(s): return sum(v == b'UID' and b'BODY.PEEK[]' in a[0] for u, v, a in s.events if u == 'source')
+    def source_body_fetches(s): return sum(v == b'UID' and b'BODY.PEEK[]' in a[0] and b'<0.' not in a[0] for u, v, a in s.events if u == 'source')   # whole-body reads; the small partial probe is not one
     def results(r): return [e['result'] for e in r['entries']]
     def states(state): return [r[0] for r in sqlite3.connect(state / 'journal.sqlite3').execute('select state from transfers order by uid')]
     def rows(state): return sqlite3.connect(state / 'journal.sqlite3').execute('select count(*) from transfers').fetchone()[0]

@@ -86,7 +86,7 @@ with tempfile.TemporaryDirectory(prefix='imaplane-enospc-') as tmp:
         docker('rm', '-f', name, check=False)
         return code, json.loads(out)
 
-    def body_fetches(s): return sum(v == b'UID' and b'BODY.PEEK[]' in a[0] for u, v, a in s.events if u == 'source')
+    def body_fetches(s): return sum(v == b'UID' and b'BODY.PEEK[]' in a[0] and b'<0.' not in a[0] for u, v, a in s.events if u == 'source')   # whole-body reads, not the small partial probe
     def appends(s): return sum(v == b'APPEND' for _, v, _ in s.events)
     def rows(work):
         db = work / 'state' / 'journal.sqlite3'

@@ -20,6 +20,10 @@ use std::{
 };
 
 const OVERHEAD: usize = 1024 * 1024;
+/// Messages up to this size are read with ONE FETCH that carries the size, the flags, the date and the body
+/// (a partial fetch of the first `SMALL_FETCH_BYTES`); larger ones continue with the established size-first
+/// path, using the size that same response already reported.
+const SMALL_FETCH_BYTES: usize = 128 * 1024;
 #[derive(Clone, Debug)]
 struct Control(Arc<Mutex<(usize, Instant)>>, Duration);
 impl Control {
@@ -859,10 +863,38 @@ impl Connection {
         }
         Ok(Some(expected))
     }
+    /// Size of one message and, when it is small, the message itself, in a single exchange. With streaming forced
+    /// (threshold 0) this is exactly the size-first query. The memory bound is the probe limit plus the fixed
+    /// overhead. A message that arrived whole but is above the streaming threshold is reported by size only, so
+    /// the streaming decision is the same as it has always been and the request text does not depend on it.
+    fn locate(&mut self, uid: u32, stream_above: Option<usize>) -> Result<Located> {
+        let Some(limit) = probe_limit_for(self.limit, stream_above) else {
+            return Ok(match self.size_of(uid)? {
+                Some(size) => Located::Size(size),
+                None => Located::Absent,
+            });
+        };
+        self.reset(limit.saturating_add(OVERHEAD));
+        let (data, _) = self
+            .session
+            .run(format!(
+                "UID FETCH {uid} (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]<0.{limit}>)"
+            ))
+            .safe()?;
+        Ok(above_threshold_by_size(
+            parse_probe(&data, uid, limit, self.limit)?,
+            stream_above,
+        ))
+    }
     fn message(&mut self, uid: u32) -> Result<Option<Message>> {
-        match self.size_of(uid)? {
-            None => Ok(None),
-            Some(expected) => self.fetch_buffered(uid, expected),
+        match self.locate(uid, None)? {
+            Located::Absent => Ok(None),
+            Located::Whole(parsed) => Ok(Some(Message {
+                body: parsed.body,
+                date: parsed.date,
+                flags: parsed.flags,
+            })),
+            Located::Size(expected) => self.fetch_buffered(uid, expected),
         }
     }
     fn fetch_buffered(&mut self, uid: u32, expected: usize) -> Result<Option<Message>> {
@@ -884,8 +916,19 @@ impl Connection {
         stream_above: Option<usize>,
         spool: &SpoolConfig,
     ) -> Result<(Option<Transfer>, bool)> {
-        let Some(expected) = self.size_of(uid)? else {
-            return Ok((None, false));
+        let expected = match self.locate(uid, stream_above)? {
+            Located::Absent => return Ok((None, false)),
+            Located::Whole(parsed) => {
+                return Ok((
+                    Some(Transfer::Buffered(Message {
+                        body: parsed.body,
+                        date: parsed.date,
+                        flags: parsed.flags,
+                    })),
+                    false,
+                ));
+            }
+            Located::Size(expected) => expected,
         };
         if stream_above.is_some_and(|threshold| expected > threshold) {
             // Directory, filesystem and free-space checks happen before anything is read.
@@ -921,8 +964,17 @@ impl Connection {
         stream_above: Option<usize>,
         chunk_point: &'static str,
     ) -> Result<(Option<MessageDigest>, bool)> {
-        let Some(expected) = self.size_of(uid)? else {
-            return Ok((None, false));
+        let expected = match self.locate(uid, stream_above)? {
+            Located::Absent => return Ok((None, false)),
+            Located::Whole(parsed) => {
+                let message = Message {
+                    body: parsed.body,
+                    date: parsed.date,
+                    flags: parsed.flags,
+                };
+                return Ok((Some(message.digest()), false));
+            }
+            Located::Size(expected) => expected,
         };
         if stream_above.is_some_and(|threshold| expected > threshold) {
             self.reset(expected.saturating_add(OVERHEAD));
@@ -1636,6 +1688,145 @@ pub fn valid_flag(flag: &str) -> bool {
 }
 
 /// What one FETCH response says about one message, after every structural check.
+/// The probe size for a message cap: small and never above the cap, whatever the streaming threshold is (so the
+/// request does not depend on it). `None` (no probe) when streaming is forced for every message (threshold 0).
+fn probe_limit_for(cap: usize, stream_above: Option<usize>) -> Option<usize> {
+    if stream_above == Some(0) {
+        return None;
+    }
+    let limit = SMALL_FETCH_BYTES.min(cap);
+    (limit > 0).then_some(limit)
+}
+
+/// A message that came back whole but is larger than the streaming threshold must still be streamed: report
+/// only its size and let the established path read it. Its probe bytes (at most `SMALL_FETCH_BYTES`) are dropped.
+fn above_threshold_by_size(located: Located, stream_above: Option<usize>) -> Located {
+    match located {
+        Located::Whole(p) if stream_above.is_some_and(|t| p.body.len() > t) => {
+            Located::Size(p.body.len())
+        }
+        other => other,
+    }
+}
+
+/// What the single-exchange read established.
+enum Located {
+    /// No message with this UID (or no size / no body for it): "no longer available", as before.
+    Absent,
+    /// The message is larger than the probe: continue with the size-first path, using this size.
+    Size(usize),
+    /// The whole message arrived in the probe, validated like a body fetch.
+    Whole(ParsedFetch),
+}
+
+/// Validate the response to `UID FETCH uid (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]<0.limit>)`.
+/// Outcomes mirror the two-step path exactly: no size means absent; two sizes are ambiguous; a size above the
+/// configured cap is the same permanent condition; for a message that fits the probe the body must be present
+/// and have exactly RFC822.SIZE bytes (otherwise the same permanent mismatch); date and flags exactly once.
+fn parse_probe(response: &[u8], uid: u32, limit: usize, max_message: usize) -> Result<Located> {
+    use imap_proto::AttributeValue as A;
+    let mut rest = response;
+    let mut size = None;
+    let mut found = None;
+    while !rest.is_empty() {
+        let (next, r) = Response::from_bytes(rest)
+            .map_err(|_| anyhow::anyhow!("invalid message FETCH response"))?;
+        if let Response::Fetch(_, attributes) = r {
+            let ids: Vec<_> = attributes
+                .iter()
+                .filter_map(|a| if let A::Uid(u) = a { Some(*u) } else { None })
+                .collect();
+            let sizes: Vec<_> = attributes
+                .iter()
+                .filter_map(|a| {
+                    if let A::Rfc822Size(n) = a {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if ids.contains(&uid) && !sizes.is_empty() {
+                if size.is_some() || sizes.len() != 1 || ids.len() != 1 {
+                    bail!("ambiguous RFC822.SIZE for requested UID");
+                }
+                size = Some(sizes[0] as usize);
+                let bodies: Vec<_> = attributes
+                    .iter()
+                    .filter_map(|a| {
+                        if let A::BodySection {
+                            section: None,
+                            index: Some(0),
+                            data,
+                        } = a
+                        {
+                            Some(data.as_ref())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let dates: Vec<_> = attributes
+                    .iter()
+                    .filter_map(|a| {
+                        if let A::InternalDate(d) = a {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let flags: Vec<_> = attributes
+                    .iter()
+                    .filter_map(|a| if let A::Flags(f) = a { Some(f) } else { None })
+                    .collect();
+                found = Some((
+                    bodies.len(),
+                    bodies.first().copied().flatten().map(|b| b.to_vec()),
+                    dates.len(),
+                    dates.first().map(|d| d.to_string()),
+                    flags.len(),
+                    flags
+                        .first()
+                        .map(|f| f.iter().map(ToString::to_string).collect::<Vec<_>>()),
+                ));
+            }
+        }
+        rest = next;
+    }
+    let Some(size) = size else {
+        return Ok(Located::Absent);
+    };
+    if size > max_message {
+        return Err(PermanentMessageError("message exceeds configured max_message_bytes").into());
+    }
+    if size > limit {
+        return Ok(Located::Size(size));
+    }
+    let (body_attrs, body, date_attrs, date, flag_attrs, flags) =
+        found.expect("size implies a matching response");
+    if body_attrs > 1 {
+        bail!("ambiguous or duplicate UID FETCH content");
+    }
+    let Some(body) = body else {
+        // NIL or absent body section for a message the server says exists: not available, as in the two-step path.
+        return Ok(Located::Absent);
+    };
+    if date_attrs != 1 || flag_attrs != 1 {
+        bail!("FETCH omitted or duplicated INTERNALDATE/FLAGS");
+    }
+    if body.len() != size {
+        return Err(PermanentMessageError("message size differs from RFC822.SIZE").into());
+    }
+    let date = DateTime::parse_from_str(&date.expect("counted"), "%d-%b-%Y %H:%M:%S %z")
+        .context("invalid INTERNALDATE")?;
+    Ok(Located::Whole(ParsedFetch {
+        body,
+        date,
+        flags: flags.expect("counted"),
+    }))
+}
+
 /// `body` is empty when the body literal was streamed out of the response.
 struct ParsedFetch {
     body: Vec<u8>,
@@ -2093,6 +2284,176 @@ mod tests {
         }
     }
     const D: &str = "INTERNALDATE \"02-Jan-2020 03:04:05 +0000\"";
+
+    fn probe_response(uid: u32, size: u32, body: &str, extra: &str) -> String {
+        format!(
+            "* 1 FETCH (UID {uid} FLAGS (\\Seen) {D} RFC822.SIZE {size} BODY[]<0> {body}{extra})\r\n"
+        )
+    }
+    fn located(r: &str, uid: u32, limit: usize, cap: usize) -> String {
+        match parse_probe(r.as_bytes(), uid, limit, cap) {
+            Ok(Located::Absent) => "absent".into(),
+            Ok(Located::Size(n)) => format!("size {n}"),
+            Ok(Located::Whole(p)) => format!(
+                "whole {} flags={:?}",
+                String::from_utf8_lossy(&p.body),
+                p.flags
+            ),
+            Err(e) if e.is::<PermanentMessageError>() => format!("permanent: {e}"),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+    #[test]
+    fn the_single_exchange_read_gives_exactly_what_the_two_step_read_gives() {
+        // same message through the old decoder (body-only fetch) and the new one (probe)
+        let old = decode_outcome(
+            format!("* 1 FETCH (UID 7 FLAGS (\\Seen) {D} BODY[] {{3}}\r\nabc)\r\n").as_bytes(),
+            7,
+            3,
+        );
+        assert_eq!(old, "ok body=abc date=1577934245 flags=[\"\\\\Seen\"]");
+        assert_eq!(
+            located(&probe_response(7, 3, "{3}\r\nabc", ""), 7, 1024, 1 << 20),
+            "whole abc flags=[\"\\\\Seen\"]"
+        );
+        // attribute order does not matter
+        let reordered = format!(
+            "* 1 FETCH (RFC822.SIZE 3 BODY[]<0> {{3}}\r\nabc UID 7 FLAGS (\\Seen) {D})\r\n"
+        );
+        assert_eq!(
+            located(&reordered, 7, 1024, 1 << 20),
+            "whole abc flags=[\"\\\\Seen\"]"
+        );
+        // a message exactly at the limit is whole, one byte over is only a size
+        assert_eq!(
+            located(&probe_response(7, 3, "{3}\r\nabc", ""), 7, 3, 1 << 20),
+            "whole abc flags=[\"\\\\Seen\"]"
+        );
+        assert_eq!(
+            located(&probe_response(7, 4, "{3}\r\nabc", ""), 7, 3, 1 << 20),
+            "size 4"
+        );
+        // a large message returns only its first bytes; the size alone is what continues the old path
+        assert_eq!(
+            located(
+                &probe_response(7, 9_000_000, "{3}\r\nabc", ""),
+                7,
+                3,
+                64 << 20
+            ),
+            "size 9000000"
+        );
+    }
+    #[test]
+    fn the_single_exchange_read_keeps_the_error_classes_of_the_two_step_read() {
+        // empty message: a zero-length body is a whole (empty) message
+        assert_eq!(
+            located(&probe_response(7, 0, "{0}\r\n", ""), 7, 1024, 1 << 20),
+            "whole  flags=[\"\\\\Seen\"]"
+        );
+        // over the configured cap: the same permanent condition, before anything is trusted
+        assert!(
+            located(&probe_response(7, 5000, "{3}\r\nabc", ""), 7, 1024, 4096)
+                .starts_with("permanent: message exceeds configured max_message_bytes")
+        );
+        // a lying size (shorter or longer than the body) for a message that fits is the same permanent mismatch
+        assert!(
+            located(&probe_response(7, 5, "{3}\r\nabc", ""), 7, 1024, 1 << 20)
+                .starts_with("permanent: message size differs from RFC822.SIZE")
+        );
+        assert!(
+            located(&probe_response(7, 2, "{3}\r\nabc", ""), 7, 1024, 1 << 20)
+                .starts_with("permanent: message size differs from RFC822.SIZE")
+        );
+        // NIL body, no size, another UID, no response at all: absent, never an error
+        assert_eq!(
+            located(&probe_response(7, 3, "NIL", ""), 7, 1024, 1 << 20),
+            "absent"
+        );
+        assert_eq!(
+            located(
+                &format!("* 1 FETCH (UID 7 FLAGS () {D})\r\n"),
+                7,
+                1024,
+                1 << 20
+            ),
+            "absent"
+        );
+        assert_eq!(
+            located(&probe_response(8, 3, "{3}\r\nabc", ""), 7, 1024, 1 << 20),
+            "absent"
+        );
+        assert_eq!(located("", 7, 1024, 1 << 20), "absent");
+        // unsolicited updates for other messages around the answer are ignored
+        let noisy = format!(
+            "* 2 FETCH (UID 9 FLAGS (\\Seen))\r\n{}* 3 FETCH (FLAGS ())\r\n",
+            probe_response(7, 3, "{3}\r\nabc", "")
+        );
+        assert_eq!(
+            located(&noisy, 7, 1024, 1 << 20),
+            "whole abc flags=[\"\\\\Seen\"]"
+        );
+        // ambiguity and missing metadata fail rather than guess
+        let twice = format!(
+            "{}{}",
+            probe_response(7, 3, "{3}\r\nabc", ""),
+            probe_response(7, 3, "{3}\r\nabc", "")
+        );
+        assert!(located(&twice, 7, 1024, 1 << 20).starts_with("error: ambiguous RFC822.SIZE"));
+        assert!(
+            located(
+                "* 1 FETCH (UID 7 RFC822.SIZE 3 BODY[]<0> {3}\r\nabc)\r\n",
+                7,
+                1024,
+                1 << 20
+            )
+            .starts_with("error: FETCH omitted or duplicated INTERNALDATE/FLAGS")
+        );
+    }
+    #[test]
+    fn the_probe_size_rules_never_exceed_the_cap_and_never_depend_on_the_streaming_threshold() {
+        assert_eq!(probe_limit_for(64 << 20, None), Some(SMALL_FETCH_BYTES));
+        assert_eq!(
+            probe_limit_for(1000, None),
+            Some(1000),
+            "never above the message cap"
+        );
+        // the request does not depend on the streaming threshold (except that forcing streaming disables it)
+        assert_eq!(
+            probe_limit_for(64 << 20, Some(50_000)),
+            Some(SMALL_FETCH_BYTES)
+        );
+        assert_eq!(
+            probe_limit_for(64 << 20, Some(1 << 30)),
+            Some(SMALL_FETCH_BYTES)
+        );
+        assert_eq!(
+            probe_limit_for(64 << 20, Some(0)),
+            None,
+            "forced streaming keeps the streaming path for every message"
+        );
+        assert_eq!(probe_limit_for(0, None), None);
+        // a message that arrived whole but is above the streaming threshold is reported by size, so it streams
+        let whole = || {
+            Located::Whole(ParsedFetch {
+                body: b"0123456789".to_vec(),
+                date: DateTime::parse_from_rfc3339("2020-01-02T03:04:05+00:00").unwrap(),
+                flags: vec![],
+            })
+        };
+        assert!(matches!(
+            above_threshold_by_size(whole(), Some(5)),
+            Located::Size(10)
+        ));
+        assert!(matches!(
+            above_threshold_by_size(whole(), Some(10)),
+            Located::Whole(_)
+        ));
+        assert!(matches!(
+            above_threshold_by_size(whole(), None),
+            Located::Whole(_)
+        ));
+    }
     #[test]
     fn uid_sets_are_compact_sorted_and_unique() {
         assert_eq!(uid_set(&[1, 2, 3, 7, 9, 10, 11]), "1:3,7,9:11");
