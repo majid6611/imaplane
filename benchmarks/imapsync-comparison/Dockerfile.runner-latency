@@ -1,0 +1,4 @@
+# The runner image plus iproute2, so a run can add network latency (tc netem) on the tool container's own interface.
+# Only the tool's traffic is delayed (egress of the tool container = +N ms round trip); the Dovecot servers are untouched.
+FROM imaplane-bench-runner:1
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 && rm -rf /var/lib/apt/lists/*

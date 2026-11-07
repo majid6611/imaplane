@@ -1,0 +1,8 @@
+{
+ "profile": "scale-5000",
+ "reps": 2,
+ "seed": 33,
+ "no_newmail": true,
+ "configs": "imaplane,imaplane-wal,imaplane-fd,imapsync-tuned",
+ "out": "p2-scale-5000"
+}

@@ -1,0 +1,8 @@
+{
+ "profile": "mixed",
+ "reps": 3,
+ "seed": 31,
+ "no_newmail": false,
+ "configs": "imaplane,imaplane-wal,imaplane-fd,imaplane-fd-stream,imapsync-tuned",
+ "out": "p2-main-mixed"
+}

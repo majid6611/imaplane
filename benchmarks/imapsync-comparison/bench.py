@@ -48,6 +48,9 @@ def binary_for(cfg):
             return binary
     return IMAPLANE_BIN
 TOOL_LIMITS = ['--cpus', '2', '--memory', '2g']
+# LATENCY_MS=N adds N ms to every round trip of the TOOL (tc netem on its own interface; the servers are untouched).
+# The tool still runs as the unprivileged user: the container starts as root only to configure the interface.
+LATENCY_MS = int(os.environ.get('LATENCY_MS', '0'))
 CONFIGS = ['imapsync', 'imapsync-tuned', 'imaplane', 'imaplane-stream']
 NEWMAIL = 200
 
@@ -190,15 +193,19 @@ class Run:
 
     def docker_args(self, name, outname, detach=False):
         env = [x for k, v in self.extra_env.items() for x in ('-e', f'{k}={v}')]
-        return (['docker', 'run'] + (['-d'] if detach else []) + ['--rm', '--name', name, '--network', self.net] + TOOL_LIMITS + ['--user', f'{common.UID}:{common.UID}', '-e', 'HOME=/tmp'] + env + [
+        user, image = (f'{common.UID}:{common.UID}', common.RUNNER_IMAGE) if not LATENCY_MS else ('0:0', 'imaplane-bench-runner:2')
+        caps = ['--cap-add', 'NET_ADMIN'] if LATENCY_MS else []
+        return (['docker', 'run'] + (['-d'] if detach else []) + ['--rm', '--name', name, '--network', self.net] + TOOL_LIMITS + caps + ['--user', user, '-e', 'HOME=/tmp'] + env + [
                 '-v', f'{self.dir}/imaplane.toml:/work/imaplane.toml:ro', '-v', f'{WORK}/tls.crt:/work/tls.crt:ro', '-v', f'{WORK}/password:/work/password:ro',
-                '-v', f'{self.dir}/state:/state', '-v', f'{self.dir}/out:/out', '-v', f'{HERE}:/bench:ro', '-v', f'{self.binary or self.cfg_binary or IMAPLANE_BIN}:/usr/local/bin/imaplane:ro', common.RUNNER_IMAGE,
+                '-v', f'{self.dir}/state:/state', '-v', f'{self.dir}/out:/out', '-v', f'{HERE}:/bench:ro', '-v', f'{self.binary or self.cfg_binary or IMAPLANE_BIN}:/usr/local/bin/imaplane:ro', image,
                 'python3', '/bench/measure.py', '/out', outname, '--'])
 
     # ---- measured execution -------------------------------------------------------------------
     def measure(self, cfg, step, label, timeout=14400):
         self.cfg_binary = binary_for(cfg) if cfg.startswith('imaplane') else None
         cmd = self.cmd_prefix + self.command(cfg, step)
+        if LATENCY_MS:
+            cmd = ['sh', '-c', f'tc qdisc add dev eth0 root netem delay {LATENCY_MS}ms && exec setpriv --reuid={common.UID} --regid={common.UID} --clear-groups "$@"', 'sh'] + cmd
         t = time.time()
         sh(*self.docker_args(self.tool_name, label), *cmd, check=False, timeout=timeout)
         t_end = time.time() + 0.3
@@ -265,6 +272,7 @@ def env_info():
     info['imaplane_baseline_binary_path'] = str(IMAPLANE_BIN)
     info['imaplane_commit'] = sh('git', '-C', str(HERE.parents[1]), 'rev-parse', 'HEAD').stdout.strip()
     info['imaplane_tree_clean'] = not sh('git', '-C', str(HERE.parents[1]), 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock').stdout.strip()
+    info['injected_latency_ms'] = LATENCY_MS
     info['limits'] = {'tool_container': TOOL_LIMITS, 'dovecot_containers': '--cpus 2 --memory 2g each'}
     info['scripts_sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(HERE.glob('*.py')) + [HERE / 'dovecot-bench.conf', HERE / 'Dockerfile.runner']}
     return info
@@ -513,6 +521,30 @@ def cmd_stage_p2(_):
     log('PHASE 2 BENCHMARK DONE')
 
 
+def cmd_stage_p3(_):
+    """Phase 3 (one exchange for small messages): the same copy at 0, 20 and 60 ms of added round-trip latency
+    (Phase 2 build vs Phase 3 build vs tuned imapsync), then the mixed dataset and SIGKILL tests at 0 ms."""
+    global LATENCY_MS
+    if IMAPLANE_FD_BIN is None or IMAPLANE_RT_BIN is None:
+        sys.exit('set IMAPLANE_FD_BIN and IMAPLANE_RT_BIN')
+    for lat in (0, 20, 60):
+        LATENCY_MS = lat
+        cmd_run(argparse.Namespace(profile='scale-1000', reps=2, seed=41 + lat, no_newmail=True, configs='imaplane-fd,imaplane-rt,imapsync-tuned', out=f'p3-lat{lat}-scale-1000'))
+    LATENCY_MS = 0
+    cfgs = 'imaplane-fd,imaplane-rt,imaplane-rt-stream,imapsync-tuned'
+    cmd_run(argparse.Namespace(profile='mixed', reps=3, seed=51, no_newmail=False, configs=cfgs, out='p3-main-mixed'))
+    med = {}
+    for l in open(HERE / 'results' / 'p3-main-mixed' / 'runs.jsonl'):
+        r = json.loads(l)
+        if r['step'] == 'fresh':
+            med.setdefault(r['cfg'], []).append(r['wall_s'])
+    json.dump({k: statistics.median(v) for k, v in med.items()}, open(HERE / 'results' / 'p3-fresh-medians-mixed.json', 'w'))
+    cmd_kill(argparse.Namespace(profile='mixed', kills=4, seed=29, configs='imaplane-rt,imaplane-rt-stream', fresh_medians=str(HERE / 'results' / 'p3-fresh-medians-mixed.json'), out='p3-kill-mixed'))
+    for n in (1000, 5000):
+        cmd_run(argparse.Namespace(profile=f'scale-{n}', reps=2, seed=53, no_newmail=True, configs='imaplane-fd,imaplane-rt,imapsync-tuned', out=f'p3-scale-{n}'))
+    log('PHASE 3 BENCHMARK DONE')
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -522,7 +554,7 @@ def main():
     r.add_argument('--configs', default=','.join(CONFIGS)); r.add_argument('--out'); r.add_argument('--no-newmail', action='store_true')
     k = sub.add_parser('kill'); k.add_argument('--profile', default='mixed'); k.add_argument('--kills', type=int, default=4); k.add_argument('--seed', type=int, default=7)
     k.add_argument('--configs', default='imapsync,imaplane,imaplane-stream'); k.add_argument('--fresh-medians'); k.add_argument('--out')
-    sub.add_parser('stage2'); sub.add_parser('clean'); sub.add_parser('stage_p1'); sub.add_parser('stage_p2')
+    sub.add_parser('stage2'); sub.add_parser('clean'); sub.add_parser('stage_p1'); sub.add_parser('stage_p2'); sub.add_parser('stage_p3')
     a = ap.parse_args()
     if a.cmd == 'env':
         print(json.dumps(env_info(), indent=1)); return
@@ -530,7 +562,7 @@ def main():
         if a.cmd == 'clean':
             clean(); return
         preflight()
-        {'golden': cmd_golden, 'run': cmd_run, 'kill': cmd_kill, 'stage2': cmd_stage2, 'stage_p1': cmd_stage_p1, 'stage_p2': cmd_stage_p2}[a.cmd](a)
+        {'golden': cmd_golden, 'run': cmd_run, 'kill': cmd_kill, 'stage2': cmd_stage2, 'stage_p1': cmd_stage_p1, 'stage_p2': cmd_stage_p2, 'stage_p3': cmd_stage_p3}[a.cmd](a)
 
 
 if __name__ == '__main__':
