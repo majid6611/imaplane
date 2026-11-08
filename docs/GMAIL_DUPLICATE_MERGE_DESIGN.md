@@ -1,7 +1,7 @@
 # Gmail duplicate merging: revised design (for review, nothing implemented)
 
-> **Updated 2026-11-07 after experiments E0-E7 (sections 10-12).** The experiments disproved the assumption in sections 1-3 that
-> Gmail merges on Message-ID alone, and changed the recommended policy. Where sections 1-8 conflict with 10-12, 10-12 win.
+> **Updated 2026-11-07 after experiments E0-E7 and a read-only search-cost measurement (sections 10-13).** The experiments disproved the assumption in sections 1-3 that
+> Gmail merges on Message-ID alone, and changed the recommended policy. Where sections 1-8 conflict with 10-13, 10-13 win. Section 13 is the final design for review.
 
 Status: **design only.** No production code changed, nothing written to Gmail for this document. It replaces the
 first proposal (a new "held" state). Written for the project owner, who decides what gets built.
@@ -207,53 +207,198 @@ second APPEND's, date retained. Consistent with E1.
 * Two identical messages with **no** Message-ID.
 * Trash and Spam (not touched, by decision).
 
-## 11. The two design risks, reassessed
+## 11. Measured cost of destination searches (read-only, 2026-11-07)
 
-1. **A missing Message-ID, or an unavailable search, must not become a permanent rejection.** Agreed. Policy, to be confirmed in review:
-   * A missing or malformed Message-ID is **not a hold**. The Message-ID search is skipped for it; the in-run and journal checks on identical
-     content still apply, and post-APPEND verification decides. E4d shows Gmail stores such messages separately.
-   * A search that fails or times out is a **transient condition**: bounded retries with backoff, **no durable evidence written**. If it
-     still fails, that message is not appended in this run (fail-closed for the run), the report says why, and the next run tries again.
-     Only a positive finding of a risky duplicate produces a durable hold.
-2. **A clean search cannot guarantee that Gmail will not merge, so post-APPEND verification stays mandatory and unchanged.** The experiments
-   support this: E7 was invisible to the APPEND response and would be caught only by the read-back. Every merge class seen here (E1, E7, the
-   earlier test) is caught by the existing read-back (content, INTERNALDATE, flags) or by `verify` (vanished UID). No relaxation is proposed.
+Measured against the live Gmail test account through the guard proxy, with zero writes (about 40 single searches and 10 batched ones):
 
-## 12. Recommended minimal implementation (for review; nothing built)
+| Operation | Time |
+| --- | --- |
+| `NOOP` round trip | about 100 ms |
+| One `X-GM-RAW "rfc822msgid:<id>"` search, id absent | **about 407 ms** (p90 413 ms); present: 612 ms |
+| One batched search, `rfc822msgid:a OR rfc822msgid:b OR ...`, 10 / 50 / 100 / 200 / 400 ids | 204 / 394 / 246 / 411 / **615 ms** |
+| Batched search, brace syntax `{a b c}` | returned **no hits** for ids that exist: unusable |
 
-Applies only when the destination advertises `X-GM-EXT-1`. Default on. No change to the four commit boundaries, the pre-literal fence,
-read-back, or recovery.
+* The batched `OR` form **returned the correct hits** (9 expected, 9 found, including the upper-case and bracket-less variants of one id,
+  so it is a case- and bracket-insensitive superset, which is the safe direction). It scales to about 1.5 ms per id.
+* **A per-message search would add about 407 ms to every message.** The 1,000-message Gmail copy took 302 s, so that is **about +135%.** My
+  earlier "+30%" estimate was wrong. A per-message search is therefore rejected as the design.
+* **Batching by 100 ids** costs about 250 to 400 ms per 100 messages, so about 3 to 5 s per 1,000 messages (under 2%).
+* Not measured, so still hypotheses: behavior beyond 400 ids per search, correctness at scale, any Gmail quota that counts searches.
 
-**Before APPEND (read-only):**
-1. **In-run index**: keep, in memory per run, `(Message-ID, SHA-256 of the body part)` and the full-content fingerprint of every message appended or
-   in doubt. A candidate with the same pair, or the same fingerprint, is a risky duplicate. This closes the 2 to 5 s search blind spot.
-2. **Journal fingerprint** (free): another transfer to the same destination account with the same full-content fingerprint in
-   `accepted`, `confirmed` or `uncertain` (covers earlier runs of the job).
-3. **Destination search** for pre-existing mail and earlier jobs: `X-GM-RAW "rfc822msgid:<id>"` in All Mail; for each hit compare the **body
-   part** (read via `BODY.PEEK`, size-capped) with the candidate's body. **Same body means risky; a different body is safe** (E2, E3).
-   Messages without a Message-ID skip this step.
+## 12. Confirmed patterns and untested cases
 
-**Hold only a positive finding**, never a missing signal. A hold does not APPEND, keeps the message `planned`, and is reported. Differences from
-the first design: the Message-ID-collision-with-different-body class is **removed**; "unverifiable" is **removed** (see section 11).
+| Pattern | Gmail behavior | Status |
+| --- | --- | --- |
+| Identical bytes, same label | merged; first copy's UID vanishes; flags/date effects as in section 10 | CONFIRMED (twice) |
+| Identical bytes, different label | one message, two labels; other view's flags altered | CONFIRMED |
+| Same Message-ID **and** body, any header differs (E7) | merged; **appended bytes silently discarded**, APPEND reports success | CONFIRMED (once) |
+| Same Message-ID, different body | separate messages | CONFIRMED (same label and different label) |
+| No Message-ID | stored separately; no Message-ID added | CONFIRMED (one message only) |
+| Same body, **different** Message-ID | unknown | UNTESTED |
+| Same Message-ID and body, changed Subject/Date | unknown (E7 changed an unrelated header only) | UNTESTED |
+| Message-ID case/bracket variants with identical bodies | unknown (the search is insensitive; the store may not be) | UNTESTED |
+| Two identical messages with no Message-ID | unknown | UNTESTED |
+| Sibling in Trash or Spam | unknown; All Mail search does not see it | UNTESTED, out of scope by decision |
+| Sibling appended less than about 5 s ago | not visible to search | CONFIRMED (E5) |
+| Messages added to the account by another client during the run | not covered | UNTESTED |
 
-**Open design question for the hold's evidence (decision 2, not finalized).** Reusing `append_rejections` works for `skip` (it needs a
-planned, unattributed transfer plus one evidence row), but the engine's rejection handling was built for server answers: consecutive
-identical rejections trip a run-stopping breaker (`append_rejection_limit`, default 3), and the report text says "APPEND ... rejection".
-A run with several duplicates in a row would stop. So either (a) write the same table through a **separate code path** that bypasses the
-breaker and says "client-side check", or (b) add a small **additive evidence table** (`client_precheck_events`, schema bump with the usual
-verified backup) and let `skip` accept either source. Option (a) avoids a schema change but couples two meanings in one table, and each rerun
-appends another row; (b) is cleaner for audit. To be decided in the design review, after the report/`status`/`skip` interactions are checked.
+**Consequence (your point 2): the key is not known.** The check below is a *risk reducer built on observed patterns*, not a predictor. It
+is deliberately broader than the proven pattern where that is cheap (same Message-ID and same body, whatever the headers), and it never replaces
+the SHA-256 read-back, which stays mandatory and unchanged. An unknown merge pattern is caught afterward, not prevented.
 
-**Performance, honest estimate:** the in-run and journal checks are free. The destination search adds one round trip per message with a
-Message-ID, plus a fetch only when it finds a hit. On Gmail, whose copies run at about 3 messages/s (latency-bound), that is roughly +30% for a
-destination that holds nothing. Batching several Message-IDs in one `X-GM-RAW` search with `OR` is untested and may cut this; it needs its own
-experiment.
+## 13. Final design (for review; nothing implemented)
 
-**Safety trade-offs:** (+) every merge we observed is either prevented before the APPEND (in-run, journal, search), or caught afterward by
-the unchanged read-back. (-) a duplicate that differs in a way we have not tested (different Message-ID, same body) could still merge and is
-caught only afterward. (-) a hold needs an operator `skip` to finish a job, so a mailbox with many true duplicates ends "complete except N
-operator-skipped". (-) the search relies on an undocumented-in-our-tests Gmail extension; if Gmail changes, the check fails closed for the run.
+### 13.1 Scope and defaults
+Applies only when the destination advertises `X-GM-EXT-1` (seen before and after login). **Default on** for those destinations; every other
+server behaves exactly as today. No change to: the four commit boundaries, the pre-literal fence, SHA-256 read-back, `recover`, `resolve`,
+`skip` semantics, the rejection circuit breaker, or the transfer states (`planned`, `uncertain`, `accepted`, `confirmed`).
 
-**What I would test next if you approve more Gmail writes** (small, one new label): different Message-ID with the same body; same
-Message-ID and body with changed Subject or Date; Message-ID case and bracket variants with identical bodies; two identical messages with no
-Message-ID; a batched `OR` search; and the same checks with an old (days-old) sibling to confirm the search sees it.
+### 13.2 Detection: three sources, ordered by cost
+1. **In-run index (memory, free).** `(Message-ID, SHA-256 of the body part)` and the full-content fingerprint of every message this run appended or
+   left in doubt. It covers the 2 to 5 s window in which a just-appended sibling is invisible to search.
+2. **Journal (free).** Another transfer to the same destination account with the same full-content fingerprint in `accepted`, `confirmed` or
+   `uncertain` (earlier runs of the job). An `uncertain` sibling holds the later copy ("sibling uncertain"), because the destination state is unknown.
+3. **Destination prescan, batched (bounded cost).** For existing Gmail mail.
+   * **When:** per folder, in windows of at most 1,000 planned messages, before transferring the window.
+   * **Source side:** read each planned message's `Message-ID` header with batched `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` (source stays read-only).
+   * **Destination side:** a **second, read-only destination connection** (`EXAMINE` of the `\All` mailbox once, not by name, so localization does not
+     matter; Gmail allows many connections). One `UID SEARCH X-GM-RAW "rfc822msgid:a OR rfc822msgid:b ..."` per **at most 100 ids** (command length bounded).
+   * **Hits only:** for each hit, `BODY.PEEK` fetch of the Message-ID header and the body part (size-capped by `max_message_bytes`), keyed into an index of
+     `(Message-ID, body hash) -> X-GM-MSGID, labels, size`. Different body means no risk (E2, E3); same body means risk (E1, E7).
+   * **A message without a Message-ID skips this source;** the in-run and journal checks still apply. Not a hold (E4d: Gmail stores it).
+   * **Cost:** about 3 to 5 s per 1,000 messages for searches plus a source header pass; per hit about two round trips. Memory is bounded by the window
+     and by the number of hits.
+   * **Retries:** at most 2 retries per batch with 1 s and 2 s backoff and one reconnect (existing destination reconnect), then failure (13.6).
+
+A message is **held** only on a **positive** finding: same full-content fingerprint, or same Message-ID and same body, in the in-run index, in the journal
+or among the prescan hits, or an uncertain sibling. An unknown or unverifiable situation is never a hold (see 13.6).
+
+### 13.3 Evidence table (separate, additive, append-only)
+```sql
+CREATE TABLE IF NOT EXISTS client_hold_events (
+  folder TEXT NOT NULL, validity INTEGER NOT NULL, uid INTEGER NOT NULL,
+  observed_at TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('hold','release')),
+  reason TEXT NOT NULL CHECK(reason IN ('SAME_CONTENT_THIS_JOB','SAME_CONTENT_EXISTING','SAME_ID_AND_BODY_EXISTING','SIBLING_UNCERTAIN','RELEASED')),
+  fingerprint TEXT NOT NULL,          -- full-content SHA-256 of the held message (already in the journal)
+  detail TEXT NOT NULL                -- bounded text: sibling source UID, existing X-GM-MSGID, label names, body-hash prefix; no message text
+);
+-- plus no-update / no-delete triggers, like the other evidence tables
+```
+* **Not a state:** a hold is evidence next to a `planned` transfer. No transfer state is added, no existing row or column changes.
+* **No schema version change.** The table is created with `CREATE TABLE IF NOT EXISTS` inside the first hold's own transaction, so it appears only
+  in journals that need it, atomically, for both schema 4 and schema 5 journals; `user_version` and the supported-schema list stay as they are.
+  Cost: an older binary ignores the table and has none of this protection, so **do not mix versions on one job** (to be documented). An explicit
+  schema bump with a verified backup is the alternative; it adds an upgrade step for little gain, and I do not recommend it.
+* **No growth per rerun:** a row is added only when the latest event for the message differs in `(kind, reason, detail)`.
+* **Independent of the rejection machinery:** it never touches `append_rejections`, the rejection circuit, `append_rejection_limit` or the
+  rejection scope table. Test: any number of consecutive holds must not stop a run.
+
+### 13.4 Transitions (all before `prepare_append`; nothing is ever sent for a held message)
+Where it runs: after the source body is read and the flags computed, **immediately before `prepare_append`** (the first durable commit). It reads only.
+
+| From | Event | To | Durable effect |
+| --- | --- | --- | --- |
+| `planned`, no hold | check finds a positive risk | `planned` + hold | one `client_hold_events` row (one commit) |
+| `planned` + hold | rerun, same risk | unchanged | none (deduplicated) |
+| `planned` + hold | rerun, risk changed | `planned` + hold | new row with the new reason/detail |
+| `planned` + hold | rerun, risk gone (for example the existing message was removed by its owner) | normal path | one `release` row, then `prepare_append` as usual |
+| `planned` + hold | `skip --reason` | `planned`, skipped | existing `operator_skip_events` row (see 13.7) |
+| skipped | `unskip` | normal path, re-checked | existing `unskip` row; a fresh check follows |
+| `uncertain` | existing recovery | unchanged | none; held messages are never `uncertain`, so `recover` has nothing to do for them |
+
+A held message **never** enters `uncertain`, never gets an `append_attempts` row (no fence is needed because no literal is ever authorized), and
+never becomes `confirmed`.
+
+### 13.5 Crash recovery
+* Crash before the hold commit: nothing was written; the next run re-checks.
+* Crash after the hold commit: evidence only; the next run re-evaluates before `prepare_append` anyway, so the hold lasts only while the risk does.
+* Crash between a `release` row and `prepare_append`: the row is audit only; the next run re-checks and proceeds or holds again.
+* Crash during an APPEND (existing behavior): unchanged. While such a sibling is `uncertain`, later duplicates are held (`SIBLING_UNCERTAIN`).
+* `resolve` cannot attribute one destination UID to two sources in the same folder (`UNIQUE(folder, destination_validity, destination_uid)`).
+* Fault points to add for tests: `hold_before_commit`, `after_hold`, `release_before_commit`, `after_release`.
+
+### 13.6 Failures of the check itself (your risk 1)
+* **Missing or malformed Message-ID:** no prescan lookup, no hold, no rejection. In-run and journal checks and the read-back apply.
+* **Search or fetch failure** (timeout, dropped connection, `NO`/`BAD`, capability disappears): bounded retries, then **fail closed for this run
+  and fail open for the journal**: the message is **not** appended, **nothing durable is written**, the report entry is `failed` with
+  "duplicate check unavailable; nothing was sent", the run stops (it would fail the same way for the rest), exit code 2. The next run tries again.
+  A transient condition is never recorded as a hold, a rejection or a skip.
+* **Capability absent or not Gmail:** feature off; no change in behavior.
+
+### 13.7 Operator decisions: `skip` and `unskip`
+`skip` today requires a planned, unattributed transfer with a durable rejection row. Change (small): accept a **hold event** as well, copying its text
+into `operator_skip_events.rejection_evidence`. All other checks and the audit log stay the same. Reason required. `unskip` is unchanged.
+A skipped message is reported `skipped_by_operator`, is **not** counted as migrated, and keeps `complete` false (existing rule).
+There is **no force-append** for a held message.
+
+### 13.8 Reporting: held messages can never count as migrated or disappear
+* **Run report:** entry result `held` (additive value) with the reason and the sibling, in every run for as long as the hold stands; counters
+  `results.held` and a `warnings` line "N message(s) held; see entries". `complete` is false; exit code 2.
+* **Status (offline):** "Held (client-side duplicate checks): N", derived from the journal (latest event per message is a `hold`, not skipped).
+* **`confirmed` counts** only verified-delivered messages. A held message is never confirmed, so it cannot inflate any success count.
+* **Accounting invariant** (tested): every message in the job is exactly one of `confirmed`, `accepted`, `uncertain`, `held`, `skipped`, `rejected`,
+  `planned` (not yet attempted). The report totals equal the journal totals.
+* **Human output** ends with a held/skipped line, so it cannot scroll past unnoticed.
+
+### 13.9 Existing messages in the Gmail destination (your point 8)
+IMAPLANE never changes destination mail: it uses only `EXAMINE`, searches and `BODY.PEEK` reads on existing messages, and no `STORE`, `EXPUNGE`,
+`COPY` or `MOVE`.
+* Same Message-ID **and** same body already present: **held**, never appended (an APPEND would reset its UID and flags, E1 and E7).
+* Same Message-ID, **different** body: appended normally; Gmail stores it separately and leaves the existing one untouched (E2, E3).
+* **Residual risk, documented, not removable:** a merge pattern we have not seen (section 12), a sibling in Trash or Spam, or mail added by another
+  client during the run can still alter an existing message before the read-back sees it. Recommendation in the docs: migrate into a fresh account
+  where possible.
+
+### 13.10 What stays exactly as it is (your point 7)
+`prepare_append` (commit 1), `authorize_literal` and the pre-literal fence (commit 2), `acknowledge` (commit 3), `confirm` (commit 4),
+exact SHA-256 read-back of content, INTERNALDATE and supported flags, the rejection circuit breaker, `recover`/`resolve`, the single job lock,
+WAL with `synchronous=FULL` and `fdatasync`, source read-only. After a merge that slips through, the read-back or `verify` still reports
+`mismatch` or `missing` as today; an additive `classification` (section 6) explains it ("appended bytes were discarded by the provider",
+"UID vanished after a duplicate APPEND").
+
+## 14. Implementation plan
+
+Small commits, each green before the next, none touching the commit sequence.
+
+| Step | Content | Tests |
+| --- | --- | --- |
+| P0 | Pure module: `Message-ID` and body-part extraction (first header, unfolding, comments, angle-addr, case, absence, malformed, multiple headers) and body hash | unit and property tests; fuzz for panics; fixtures from E1-E7 messages |
+| P1 | Journal: lazy `client_hold_events`, `record_hold`, `latest_hold`, `record_release`, summary and `status` counts, `skip` precondition extension | unit tests; schema 4 and 5 journals; WAL and rollback modes; append-only triggers; deduplication; crash matrix with the four new fault points; a journal without the table is unaffected |
+| P2 | Transport (read-only): capability detection, `\All` discovery, second read-only destination connection, batched OR search (<=100 ids, command length bound), hit resolution with caps, retry and reconnect | scripted-server tests for responses, `NO`/`BAD`, truncation, huge hit lists, case/bracket-insensitive hits, brace-syntax absence; no write verb ever sent (asserted) |
+| P3 | Engine: per-window prescan, in-run index, journal check, hold path before `prepare_append`, fail-closed search failure, report, human summary | scripted **Gmail-like** server that reproduces E1, E2, E7 (merge, discard bytes, reissue UID); Dovecot regressions unchanged (feature off); forced-spool mode; all existing suites and crash matrices; randomized SIGKILL stress with duplicates; mutation checks |
+| P4 | Post-hoc `classification` for read-back mismatch and `verify` | scripted merge scenarios; no change to results or exit codes |
+| P5 | Documentation (README provider note, operator guide, version-mixing warning), changelog | doc review |
+| P6 | Live acceptance (**needs your approval and Gmail writes**) on a fresh test label | see acceptance below |
+
+Mutation checks to include: remove the in-run index (a duplicate pair gets through), count a hold as confirmed (accounting test fails), let a hold
+reach `prepare_append`, write a hold on a search failure, let holds trip the rejection breaker, skip the dedupe (row growth), drop the `skip`
+extension (skip is refused).
+
+## 15. Acceptance criteria
+
+1. **No bytes for a held message:** with a Gmail-like server that merges, a duplicate pair yields exactly one APPEND; the first copy's UID, flags and date are
+   unchanged; the second is `held`; zero APPENDs reach the server for it (asserted at the wire).
+2. **Never counted, never lost:** held messages are never `confirmed`; `complete` is false; the accounting invariant holds in every run, after every crash
+   point, and after resume; the report and `status` agree.
+3. **Skip and unskip:** `skip` works on a hold with a reason, is audited, keeps `complete` false; `unskip` re-checks and holds again if the risk remains.
+4. **Crash safety:** SIGKILL at each new fault point and at random points of a duplicate-heavy job ends duplicate-free, with no message both held and
+   delivered, and no state other than the four existing ones.
+5. **No breaker coupling:** 50 consecutive holds do not stop a run; `append_rejection_limit` is untouched.
+6. **Failures fail closed and leave no trace:** search timeouts, drops and `NO`/`BAD` produce no evidence rows, no append, exit 2; the next run succeeds.
+7. **Different bodies are not held** (E2, E3 pattern), and a missing Message-ID is not held.
+8. **Read-back unchanged:** a scripted E7-style merge that slips past the check is reported by the existing read-back as a mismatch, and `verify`
+   reports a vanished UID, exactly as today, plus the additive classification.
+9. **Existing destination messages untouched:** the destination script log shows no `STORE`, `EXPUNGE`, `COPY` or `MOVE` and no APPEND for a message
+   whose Message-ID and body already exist.
+10. **Performance:** on a 1,000-message Gmail-like run with latency injected like the measured values (about 100 ms round trip, 250 to 400 ms per 100-id search), the
+    check adds **at most 3% of wall time** (about 5 s), and at most one extra connection; peak RSS stays within the existing ceilings.
+11. **Non-Gmail unchanged:** every existing suite, crash matrix and the benchmark behave identically (byte-identical protocol conversation for Dovecot).
+12. **Live (P6, approved separately):** IMAPLANE copies a duplicate pair into a fresh label as one message plus one held entry, leaves the first copy
+    untouched, reruns idempotently, and reports a skip correctly.
+
+## 16. Open items before implementation
+* Confirm **13.3 (lazy additive table, no schema bump)** versus a schema bump.
+* Confirm that a **search failure stops the run** (fail closed) rather than deferring just that message.
+* Approve the **live untested-pattern experiments** (section 12) before or after implementation; they do not block P0-P3.
+* The batched search was verified only up to 400 ids and on a small account; P2 keeps a 100-id bound and the live acceptance run checks it on more data.
