@@ -34,6 +34,18 @@ pub struct Entry {
     /// `unknown` when the journal holds no such record (anything confirmed before schema 5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_full_verification: Option<String>,
+    /// Additive diagnostic only: present when a `missing` or `mismatch` result is proven to be the effect of a
+    /// provider (Gmail) merge of identical messages. It never changes `result`, `detail`, the exit code or the journal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<Classification>,
+}
+
+/// An evidence-backed explanation attached to a failed read-back. Absent whenever the evidence is not conclusive.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct Classification {
+    /// `provider_merge_new_bytes_discarded` or `provider_merge_identical_copy_kept`.
+    pub kind: &'static str,
+    pub explanation: String,
 }
 
 /// How much of the already-confirmed history an incremental run re-checks. Only `full` reads
@@ -112,11 +124,17 @@ pub struct VerificationSummary {
     pub blocked_by_uncertain: u64,
     /// Messages the duplicate check is holding back in this run: NOT migrated, nothing was sent for them.
     pub held: u64,
+    /// `missing`/`mismatch` results explained by a provider merge (see `Entry::classification`). They remain problems.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub provider_merges: u64,
     /// Missing, changed or unreadable destination messages (demoted or still unconfirmed).
     pub problems: u64,
     pub statement: String,
     /// Oldest and newest recorded full verification per folder (from the journal, after the run).
     pub folders: Vec<crate::journal::FolderVerification>,
+}
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 /// A folder added to an existing job, with the baseline that was recorded for it.
 #[derive(Debug, Serialize, Clone)]
@@ -182,6 +200,7 @@ impl Report {
             uncertain: count(&|e| e.result == "uncertain"),
             blocked_by_uncertain: count(&|e| e.result == "blocked_by_uncertain"),
             held: count(&|e| e.result == "held"),
+            provider_merges: count(&|e| e.classification.is_some()),
             problems: count(&|e| {
                 matches!(
                     e.result.as_str(),
@@ -217,6 +236,12 @@ impl Report {
                 v.held
             ));
         }
+        if v.provider_merges > 0 {
+            v.statement.push_str(&format!(
+                "; {} of the problems classified as a provider (Gmail) merge of identical messages (diagnostic only; still NOT confirmed)",
+                v.provider_merges
+            ));
+        }
         self.verification = Some(v);
     }
     /// Attach the journal's recorded full-verification times (oldest/newest per folder), read through the
@@ -247,6 +272,7 @@ fn entry(
         candidate_uids: Vec::new(),
         level: None,
         last_full_verification: None,
+        classification: None,
     }
 }
 fn skipped_entry(key: &MessageKey, record: &Record, reason: &str) -> Entry {
@@ -1564,6 +1590,56 @@ fn verification_failure(
     j.demote(&r.key, level, result, &detail, size)?;
     Ok(entry(&r.key, Some(r), result, detail))
 }
+/// P4: explain a failed read-back, never decide it. Only on a Gmail-like destination and only with proof from the
+/// journal and from messages this job itself sent; anything less yields no classification. Read-only, one
+/// bounded read, no retry of anything that writes; a failure here is silently "no classification".
+fn classify_merge(
+    j: &Journal,
+    r: &Record,
+    d: &mut DestinationReader<'_>,
+    validity: u32,
+    outcome: &str,
+    found: Option<&crate::transport::MessageDigest>,
+) -> Option<Classification> {
+    if !d.destination.is_gmail() {
+        return None;
+    }
+    let uid_of = |k: &MessageKey| format!("{:?} UID {}", k.folder, k.uid);
+    match (outcome, found) {
+        // The bytes now behind this destination UID are exactly the bytes this job sent earlier for another source
+        // message: the provider kept that message and discarded the new upload while still acknowledging it.
+        ("mismatch", Some(m)) if m.sha256 != r.hash => {
+            let (sibling, _) = j.sibling_with_fingerprint(&m.sha256, &r.key).ok()??;
+            let sr = j.record(&sibling).ok()??;
+            sr.destination?;
+            Some(Classification {
+                kind: "provider_merge_new_bytes_discarded",
+                explanation: format!(
+                    "the destination message behind the APPENDUID holds exactly the bytes sent earlier for {}, not the bytes sent for this message: the provider merged the upload into the existing message and discarded the new bytes",
+                    uid_of(&sibling)
+                ),
+            })
+        }
+        // This message's UID is gone, but an identical copy sent for another source message is intact at the destination.
+        ("missing", None) => {
+            let (sibling, _) = j.sibling_with_fingerprint(&r.hash, &r.key).ok()??;
+            let sr = j.record(&sibling).ok()??;
+            let (sv, su) = sr.destination?;
+            if sv != validity {
+                return None;
+            }
+            let m = d.digest(su, "verification_stream_chunk").ok()??;
+            (m.sha256 == r.hash).then(|| Classification {
+                kind: "provider_merge_identical_copy_kept",
+                explanation: format!(
+                    "an identical copy sent for {} is intact at destination UID {su}; the provider kept one message for the identical uploads and re-issued the other UID",
+                    uid_of(&sibling)
+                ),
+            })
+        }
+        _ => None,
+    }
+}
 fn verify_record(
     j: &mut Journal,
     r: &Record,
@@ -1587,14 +1663,16 @@ fn verify_record(
     let m = match d.digest(du, "verification_stream_chunk") {
         Ok(Some(m)) => m,
         Ok(None) => {
-            return verification_failure(
+            let mut e = verification_failure(
                 j,
                 r,
                 "full",
                 "missing",
                 None,
                 "destination UID no longer exists",
-            );
+            )?;
+            e.classification = classify_merge(j, r, d, validity, "missing", None);
+            return Ok(e);
         }
         Err(e) => {
             return verification_failure(
@@ -1613,7 +1691,10 @@ fn verify_record(
     };
     crate::fault::point("after_verification_fetch");
     if let Err(e) = compare_content(r, &m) {
-        return verification_failure(j, r, "full", "mismatch", Some(m.size), e.to_string());
+        let mut entry =
+            verification_failure(j, r, "full", "mismatch", Some(m.size), e.to_string())?;
+        entry.classification = classify_merge(j, r, d, validity, "mismatch", Some(&m));
+        return Ok(entry);
     }
     let flags_match = match flags_equal(r, &m.flags) {
         Ok(v) => v,

@@ -229,6 +229,77 @@ with tempfile.TemporaryDirectory(prefix='imaplane-gmaildup-') as tmp:
         assert p.returncode == 2 and 'confirmed' in results(r) and any(x in ('mismatch', 'missing', 'failed', 'uncertain') for x in results(r)), results(r)
         assert journal(state).execute('PRAGMA user_version').fetchone()[0] == 4, 'off never upgrades the journal'
 
+    OFF = 'gmail_duplicate_protection = "off"\n'
+
+    def strip_class(report):
+        r = json.loads(json.dumps(report))
+        for e in r['entries']: e.pop('classification', None)
+        r['verification'].pop('provider_merges', None)
+        r['verification']['statement'] = r['verification']['statement'].split('; 1 of the problems')[0]
+        for k in ('folders',): r['verification'].pop(k, None)
+        return r
+
+    @check('23 P4: a merge that slips through (E7 pair, protection off) keeps result/detail/exit code and gains an additive classification')
+    def _():
+        a, b = msg('<p4a@x>', 'body'), msg('<p4a@x>', 'body', 'X-Dup-Test: 1\r\n')
+        s, cfg, state = fixture([a, b], extra_cfg=OFF)
+        p, r = migrate(cfg, code=2)
+        bad = [e for e in r['entries'] if e['result'] == 'mismatch']
+        assert results(r) == ['confirmed', 'mismatch'] and len(bad) == 1, results(r)
+        assert bad[0]['detail'] == 'content hash mismatch', bad[0]['detail']
+        c = bad[0]['classification']
+        assert c['kind'] == 'provider_merge_new_bytes_discarded' and 'UID 1' in c['explanation'], c
+        assert r['verification']['provider_merges'] == 1 and not r['complete']
+        assert all('classification' not in e for e in r['entries'] if e['result'] != 'mismatch')
+        no_writes_besides_append(s)
+        old = os.environ.get('IMAPLANE_OLD_BIN', '')
+        if old and Path(old).is_file():
+            s2, cfg2, _ = fixture([a, b])   # the previous release has no option; same inputs, merge unprevented there
+            q = subprocess.run([old, 'migrate', '--config', str(cfg2), '--json'], capture_output=True, text=True, timeout=120)
+            assert q.returncode == 2
+            ro = json.loads(q.stdout)
+            assert [(e['result'], e['detail']) for e in ro['entries']] == [(e['result'], e['detail']) for e in r['entries']]
+            assert ro['complete'] == r['complete']
+        else:
+            print('   (IMAPLANE_OLD_BIN not set: old-vs-new result comparison NOT TESTED here)')
+
+    @check('24 P4: verify explains a vanished UID when an identical copy sent for another source message is intact (Gmail only)')
+    def _():
+        a = msg('<p4b@x>', 'twin body')
+        s, cfg, state = fixture([a, a], extra_cfg=OFF)
+        migrate(cfg)        # merge unprevented: identical bytes, the first UID is re-issued
+        p, r = cli('verify', '--config', cfg, '--json', code=2)
+        by = {e['source_uid']: e for e in r['entries']}
+        assert by[1]['result'] == 'missing' and by[2]['result'] == 'confirmed', by
+        assert by[1]['detail'] == 'destination UID no longer exists'
+        assert by[1]['classification']['kind'] == 'provider_merge_identical_copy_kept' and 'UID 2' in by[1]['classification']['explanation']
+        assert 'classification' not in by[2] and r['verification']['provider_merges'] == 1 and not r['complete']
+        no_writes_besides_append(s)
+
+    @check('25 P4: no classification without proof (vanished UID with no identical sibling) and none on a non-Gmail destination')
+    def _():
+        s, cfg, _ = fixture([msg('<p4c@x>', 'lonely')])
+        migrate(cfg, code=0)
+        s.messages['destination'][0] = None
+        p, r = cli('verify', '--config', cfg, '--json', code=2)
+        assert results(r) == ['missing'] and 'classification' not in r['entries'][0] and 'provider_merges' not in r['verification']
+        a = msg('<p4d@x>', 'plain twin')
+        s, cfg, _ = fixture([a, a], gmail=False, merge=False)
+        migrate(cfg, code=0)
+        s.messages['destination'][0] = None      # an identical sibling IS intact, but this is not Gmail
+        p, r = cli('verify', '--config', cfg, '--json', code=2)
+        assert results(r) == ['confirmed', 'missing'] and all('classification' not in e for e in r['entries'])
+
+    @check('26 P4: the human report prints the classification line; status and journal are unchanged by it')
+    def _():
+        a = msg('<p4e@x>', 'twin text')
+        s, cfg, state = fixture([a, a], extra_cfg=OFF)
+        migrate(cfg)
+        before = journal(state).execute('select count(*) from transfers').fetchone()[0]
+        p, _ = cli('verify', '--config', cfg, code=2)
+        assert 'classification: provider_merge_identical_copy_kept' in p.stdout, p.stdout
+        assert journal(state).execute('PRAGMA user_version').fetchone()[0] == 4 and before == 2
+
     @check('16 not Gmail: no X-GM-EXT-1, no extra connections or commands, journal stays schema 4')
     def _():
         a = msg('<ng@x>', 'same')

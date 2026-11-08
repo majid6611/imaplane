@@ -176,6 +176,9 @@ fn print_report(report: &engine::Report, json: bool) -> anyhow::Result<ExitCode>
                     e.omitted_flags,
                     e.candidate_uids
                 );
+                if let Some(c) = &e.classification {
+                    println!("    classification: {} — {}", c.kind, c.explanation);
+                }
             }
         }
         if let Some(reason) = &report.halt_reason {
