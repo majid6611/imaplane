@@ -73,6 +73,10 @@ CONFINED_EXTRA = {'CREATE', 'SELECT', 'APPEND', 'CLOSE'}
 APPEND_RE = re.compile(r'^(?P<name>"[^"]*"|[^ ]+)(?: \([^)]*\))?(?: "[^"]*")? \{(?P<n>\d+)(?P<plus>\+?)\}$')
 
 
+def confined_set(confine):
+    return {confine} if isinstance(confine, str) else set(confine)
+
+
 def mailbox_name(text):
     text = text.strip()
     return text[1:-1] if len(text) >= 2 and text[0] == text[-1] == '"' else text
@@ -92,13 +96,13 @@ def guard(line, cut, confine=None, extra_ro=()):
             return False, f'{verb} is not allowed (confined proxy)'
         if verb in ('CREATE', 'SELECT', 'EXAMINE', 'STATUS'):
             name = (re.match(r'"[^"]*"|\S+', rest) or re.match('', '')).group(0) if verb == 'STATUS' else rest
-            allowed = {confine} | (set(extra_ro) if verb in ('EXAMINE', 'STATUS') else set())
+            allowed = confined_set(confine) | (set(extra_ro) if verb in ('EXAMINE', 'STATUS') else set())
             if name.strip().startswith('{') or mailbox_name(name) not in allowed:
-                return False, f'{verb} is only allowed on {confine}'
+                return False, f'{verb} is only allowed on {sorted(confined_set(confine))}'
         elif verb == 'APPEND':
             m = APPEND_RE.match(rest)
-            if not m or mailbox_name(m.group('name')) != confine:
-                return False, f'APPEND is only allowed into {confine} with a synchronizing literal'
+            if not m or mailbox_name(m.group('name')) not in confined_set(confine):
+                return False, f'APPEND is only allowed into {sorted(confined_set(confine))} with a synchronizing literal'
             if m.group('plus'):
                 return False, 'non-synchronizing literals are not allowed'
         elif verb == 'AUTHENTICATE':
@@ -407,7 +411,7 @@ def main(argv=None):
     ap.add_argument('--key', required=True)
     ap.add_argument('--token-file', help='access token file (0600), used only by the preflight (read-only mode)')
     ap.add_argument('--count', type=int, help='read-only mode: expose only the oldest N INBOX messages')
-    ap.add_argument('--confine-folder', help='confined-write mode: allow CREATE/SELECT/APPEND only for this one mailbox')
+    ap.add_argument('--confine-folder', action='append', help='confined-write mode: allow CREATE/SELECT/APPEND only for this mailbox (repeatable)')
     ap.add_argument('--readonly-folder', action='append', help='confined mode: an additional mailbox that may only be EXAMINEd (repeatable)')
     ap.add_argument('--max-appends', type=int, default=0, help='confined mode: hard cap on APPENDs over the proxy lifetime')
     ap.add_argument('--max-append-bytes', type=int, default=10 << 20)

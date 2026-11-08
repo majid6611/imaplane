@@ -1,5 +1,8 @@
 # Gmail duplicate merging: revised design (for review, nothing implemented)
 
+> **Updated 2026-11-07 after experiments E0-E7 (sections 10-12).** The experiments disproved the assumption in sections 1-3 that
+> Gmail merges on Message-ID alone, and changed the recommended policy. Where sections 1-8 conflict with 10-12, 10-12 win.
+
 Status: **design only.** No production code changed, nothing written to Gmail for this document. It replaces the
 first proposal (a new "held" state). Written for the project owner, who decides what gets built.
 
@@ -159,3 +162,98 @@ APPENDs in total, none deleted afterwards, guard proxy with a hard APPEND cap, n
 4. Decide whether holds are on by default for Gmail destinations (recommended) or opt-in.
 
 Nothing will be implemented until these are answered.
+
+
+## 10. Experimental results (live Gmail test account, 2026-11-07; labels `IMAPLANE-Exp-A` and `IMAPLANE-Exp-B`)
+
+12 synthetic APPENDs in total (hard cap enforced by the guard proxy; 11 in the main run, 1 follow-up). Nothing existing was
+touched, nothing deleted, no flags changed by us. Raw per-step snapshots (UID, UIDVALIDITY, UIDNEXT, X-GM-MSGID, flags, INTERNALDATE,
+labels, SHA-256, counts, before and after every step) are in `~/.config/imaplane/gmail-dest/exp/steps.jsonl` (outside the repository).
+Message-IDs are `<exp-N@example.invalid>`; everything is synthetic.
+
+### Observed behavior (CONFIRMED)
+| # | What was appended | What Gmail did |
+| --- | --- | --- |
+| E0 | one message into A | stored; A UID 1; All Mail +1. Control. |
+| E1a/b | **identical bytes** into A, then into B (other flags, other date) | **One message.** Same X-GM-MSGID in both labels; All Mail count unchanged; B got UID 1 and the message now carries both labels. INTERNALDATE stayed the first copy's. **The first copy's `\Seen` was cleared** (flags changed from `\Flagged \Seen` to `\Flagged`); `\Answered` appears on the B view only. |
+| E2a/b | **same Message-ID, different body**, same label | **Two separate messages** (two X-GM-MSGIDs, All Mail +2), both bodies kept intact, each with its own flags and date. **No merge.** |
+| E3a/b | same Message-ID, different body, **different labels** | **Two separate messages**, no merge. |
+| E4b | Message-ID in upper case, different body | separate message |
+| E4c | Message-ID without angle brackets, different body | separate message |
+| E4d | **no Message-ID header** | stored; Gmail added no Message-ID to the fetched bytes; separate message |
+| E7 | **same Message-ID, same body, one extra header**, into A (the label that already had it) | **Merged into the existing message, and the new bytes were discarded**: A's count and All Mail did not change; the existing message got a new UID in A (UID 2 vanished, UID 10 now); the stored bytes are still the **original** (SHA-256 unchanged, no `X-Dup-Test` header); the flags did **not** take the APPEND's `\Seen`; INTERNALDATE unchanged. APPEND reported success with `APPENDUID 14 10`. |
+| E5 | search latency | `X-GM-RAW "rfc822msgid:..."` found a just-appended message only **2.0 to 5.0 s** later (never immediately). |
+
+Earlier test (first account, `IMAPLANE-Test`): identical bytes, same label: merged, the first copy's UID vanished, flags replaced by the
+second APPEND's, date retained. Consistent with E1.
+
+### What this means
+* **Case 2 (different bodies, same Message-ID) does NOT merge** (E2, E3). The first design's "Message-ID collision" hold would have
+  held messages that Gmail stores correctly. The hold on case 2 should be dropped.
+* **What merges is a message whose Message-ID and body match an existing one** (E1, E7), **even when a header differs, and then the new
+  bytes are silently lost** (E7). This is the dangerous case: the APPEND succeeds, `APPENDUID` points at a message that is not what
+  was sent. Only the read-back (content SHA-256) reveals it; the old UID may vanish.
+* **Cross-label duplicates (case 3) are one message with several labels** (E1b), with the other copy's flags altered. This is Gmail's model,
+  not a failure, but it breaks per-folder exactness (shared flags and date).
+* **A pre-APPEND search cannot be the only defence**: it cannot see a sibling appended in the last 2 to 5 s, and Gmail copies run at about
+  3 messages/s, so a sibling in the same run is usually not yet visible.
+
+### Still UNKNOWN (not tested; the 12-APPEND budget is spent)
+* Whether the key is Message-ID plus the body, the body alone, or something wider. E7 used the same Message-ID and body; a **different**
+  Message-ID with the **same** body was not tested, nor changed Subject/Date headers, nor Message-ID case or bracket differences with
+  identical bodies (E4b and E4c changed the body too, so they say nothing about normalization).
+* Why `\Seen` clears on a re-APPEND (E1b) but the APPEND's `\Seen` is not applied (E7). Flag results after a merge are not predictable;
+  treat them as unreliable.
+* Two identical messages with **no** Message-ID.
+* Trash and Spam (not touched, by decision).
+
+## 11. The two design risks, reassessed
+
+1. **A missing Message-ID, or an unavailable search, must not become a permanent rejection.** Agreed. Policy, to be confirmed in review:
+   * A missing or malformed Message-ID is **not a hold**. The Message-ID search is skipped for it; the in-run and journal checks on identical
+     content still apply, and post-APPEND verification decides. E4d shows Gmail stores such messages separately.
+   * A search that fails or times out is a **transient condition**: bounded retries with backoff, **no durable evidence written**. If it
+     still fails, that message is not appended in this run (fail-closed for the run), the report says why, and the next run tries again.
+     Only a positive finding of a risky duplicate produces a durable hold.
+2. **A clean search cannot guarantee that Gmail will not merge, so post-APPEND verification stays mandatory and unchanged.** The experiments
+   support this: E7 was invisible to the APPEND response and would be caught only by the read-back. Every merge class seen here (E1, E7, the
+   earlier test) is caught by the existing read-back (content, INTERNALDATE, flags) or by `verify` (vanished UID). No relaxation is proposed.
+
+## 12. Recommended minimal implementation (for review; nothing built)
+
+Applies only when the destination advertises `X-GM-EXT-1`. Default on. No change to the four commit boundaries, the pre-literal fence,
+read-back, or recovery.
+
+**Before APPEND (read-only):**
+1. **In-run index**: keep, in memory per run, `(Message-ID, SHA-256 of the body part)` and the full-content fingerprint of every message appended or
+   in doubt. A candidate with the same pair, or the same fingerprint, is a risky duplicate. This closes the 2 to 5 s search blind spot.
+2. **Journal fingerprint** (free): another transfer to the same destination account with the same full-content fingerprint in
+   `accepted`, `confirmed` or `uncertain` (covers earlier runs of the job).
+3. **Destination search** for pre-existing mail and earlier jobs: `X-GM-RAW "rfc822msgid:<id>"` in All Mail; for each hit compare the **body
+   part** (read via `BODY.PEEK`, size-capped) with the candidate's body. **Same body means risky; a different body is safe** (E2, E3).
+   Messages without a Message-ID skip this step.
+
+**Hold only a positive finding**, never a missing signal. A hold does not APPEND, keeps the message `planned`, and is reported. Differences from
+the first design: the Message-ID-collision-with-different-body class is **removed**; "unverifiable" is **removed** (see section 11).
+
+**Open design question for the hold's evidence (decision 2, not finalized).** Reusing `append_rejections` works for `skip` (it needs a
+planned, unattributed transfer plus one evidence row), but the engine's rejection handling was built for server answers: consecutive
+identical rejections trip a run-stopping breaker (`append_rejection_limit`, default 3), and the report text says "APPEND ... rejection".
+A run with several duplicates in a row would stop. So either (a) write the same table through a **separate code path** that bypasses the
+breaker and says "client-side check", or (b) add a small **additive evidence table** (`client_precheck_events`, schema bump with the usual
+verified backup) and let `skip` accept either source. Option (a) avoids a schema change but couples two meanings in one table, and each rerun
+appends another row; (b) is cleaner for audit. To be decided in the design review, after the report/`status`/`skip` interactions are checked.
+
+**Performance, honest estimate:** the in-run and journal checks are free. The destination search adds one round trip per message with a
+Message-ID, plus a fetch only when it finds a hit. On Gmail, whose copies run at about 3 messages/s (latency-bound), that is roughly +30% for a
+destination that holds nothing. Batching several Message-IDs in one `X-GM-RAW` search with `OR` is untested and may cut this; it needs its own
+experiment.
+
+**Safety trade-offs:** (+) every merge we observed is either prevented before the APPEND (in-run, journal, search), or caught afterward by
+the unchanged read-back. (-) a duplicate that differs in a way we have not tested (different Message-ID, same body) could still merge and is
+caught only afterward. (-) a hold needs an operator `skip` to finish a job, so a mailbox with many true duplicates ends "complete except N
+operator-skipped". (-) the search relies on an undocumented-in-our-tests Gmail extension; if Gmail changes, the check fails closed for the run.
+
+**What I would test next if you approve more Gmail writes** (small, one new label): different Message-ID with the same body; same
+Message-ID and body with changed Subject or Date; Message-ID case and bracket variants with identical bodies; two identical messages with no
+Message-ID; a batched `OR` search; and the same checks with an old (days-old) sibling to confirm the search sees it.

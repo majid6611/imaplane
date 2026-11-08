@@ -98,6 +98,15 @@ class Confined(unittest.TestCase):
             self.assertFalse(self.c('a1 ' + bad)[0], bad)
 
 
+class ConfinedTwoFolders(unittest.TestCase):
+    def test_two_confined_folders(self):
+        g = lambda t: p.guard(t.encode() + b'\r\n', 0, ['Exp-A', 'Exp-B'])
+        for ok in ['CREATE "Exp-A"', 'CREATE "Exp-B"', 'APPEND "Exp-B" {5}', 'EXAMINE "Exp-A"']:
+            self.assertTrue(g('a1 ' + ok)[0], ok)
+        for bad in ['CREATE "Exp-C"', 'APPEND "IMAPLANE-Test" {5}', 'APPEND "INBOX" {5}', 'EXAMINE INBOX']:
+            self.assertFalse(g('a1 ' + bad)[0], bad)
+
+
 class ConfinedReadOnlyExtras(unittest.TestCase):
     def test_extra_readonly_folders_can_only_be_examined(self):
         g = lambda t: p.guard(t.encode() + b'\r\n', 0, 'IMAPLANE-Test', ['[Gmail]/All Mail'])
