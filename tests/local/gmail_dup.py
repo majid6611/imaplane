@@ -275,6 +275,61 @@ with tempfile.TemporaryDirectory(prefix='imaplane-gmaildup-') as tmp:
         assert js['confirmed'] + js['held'] + js['skipped'] + js['uncertain'] + js['accepted'] == 5 - 0 or js['planned'] == js['held']
         assert js['confirmed'] == results(r).count('confirmed') and js['held'] == results(r).count('held') == 2
 
+    FAULT = os.environ.get('IMAPLANE_FAULT_BIN')
+
+    def killed(cfg, point, nth=None):
+        env = dict(os.environ, IMAPLANE_FAULT_POINT=point)
+        if nth: env['IMAPLANE_FAULT_NTH'] = str(nth)
+        p = subprocess.run([FAULT, 'migrate', '--config', str(cfg), '--json'], capture_output=True, text=True, timeout=120, env=env)
+        assert p.returncode == -9, (point, p.returncode, p.stderr[-500:])
+
+    if FAULT:
+        for point in ['hold_before_commit', 'after_hold']:
+            @check(f'20 SIGKILL at {point} then rerun: still one APPEND, the duplicate held, nothing delivered twice')
+            def _(point=point):
+                a = msg('<c1@x>', 'same')
+                s, cfg, state = fixture([a, a])
+                killed(cfg, point)
+                assert len(stored(s)) == 1
+                c = journal(state)
+                assert c.execute('select count(*) from append_attempts where uid=2').fetchone()[0] == 0
+                p, r = migrate(cfg, code=2)
+                assert results(r).count('held') == 1 and len(stored(s)) == 1
+                assert journal(state).execute('select count(*) from client_hold_events').fetchone()[0] == 1
+                assert journal(state).execute("select count(*) from transfers where state='confirmed'").fetchone()[0] == 1
+
+        for point in ['after_append_reply', 'begin_append_before_commit', 'after_append_continuation', 'before_literal_send']:
+            @check(f'21 SIGKILL during the first APPEND at {point}: duplicates are never delivered twice after recovery')
+            def _(point=point):
+                a = msg('<c2@x>', 'same')
+                s, cfg, state = fixture([a, a])
+                killed(cfg, point)
+                n_after_kill = len(stored(s))
+                assert n_after_kill <= 1
+                for _ in range(3):
+                    p, r = migrate(cfg)
+                    assert len(stored(s)) <= 1, 'a duplicate was delivered'
+                    if p.returncode == 0: break
+                c = journal(state)
+                states = dict(c.execute('select uid,state from transfers').fetchall())
+                assert states.get(2, 'planned') in ('planned',), states   # the duplicate is never appended
+                held = c.execute('select count(*) from client_hold_events').fetchone()[0]
+                assert not (held and states.get(2) in ('confirmed', 'accepted')), 'both held and delivered'
+
+        for point in ['release_before_commit', 'after_release']:
+            @check(f'22 hold released when the existing copy disappears; SIGKILL at {point} loses nothing')
+            def _(point=point):
+                a = msg('<rel@x>', 'body')
+                s, cfg, state = fixture([a], existing=[msg('<rel@x>', 'body', 'X-Other: 1\r\n')])
+                migrate(cfg, code=2)
+                assert journal(state).execute("select kind from client_hold_events").fetchall() == [('hold',)]
+                s.messages['destination'][0] = None   # the owner removed the existing message
+                killed(cfg, point)
+                p, r = migrate(cfg, code=0)
+                assert results(r) == ['confirmed'] and len(stored(s)) == 1
+                kinds = [k for (k,) in journal(state).execute("select kind from client_hold_events order by rowid")]
+                assert kinds[0] == 'hold' and kinds[-1] == 'release' and kinds.count('release') == 1, kinds
+
 print()
 if FAILED:
     print('FAILED:', FAILED); sys.exit(1)
