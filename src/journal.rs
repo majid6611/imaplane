@@ -10,7 +10,10 @@ use std::path::Path;
 /// migration keep a schema-4 file.
 const SCHEMA_VERSION: i64 = 4;
 const SCHEMA_V5: i64 = 5;
-const SUPPORTED_SCHEMAS: [i64; 5] = [1, 2, 3, SCHEMA_VERSION, SCHEMA_V5];
+/// Schema 6 adds the client-side duplicate-hold evidence table. Like schema 5 it is entered only by an
+/// explicit, backed-up upgrade; an older binary refuses it (it is not in ITS supported list).
+const SCHEMA_V6: i64 = 6;
+const SUPPORTED_SCHEMAS: [i64; 6] = [1, 2, 3, SCHEMA_VERSION, SCHEMA_V5, SCHEMA_V6];
 
 /// First SQLite release without the "WAL-reset bug" (a data race that can corrupt a WAL database when two
 /// connections write or checkpoint at the same instant; present in 3.7.0 through 3.51.2). Write-ahead logging is
@@ -126,6 +129,43 @@ CREATE TRIGGER verification_runs_no_update BEFORE UPDATE ON verification_runs BE
 CREATE TRIGGER verification_runs_no_delete BEFORE DELETE ON verification_runs BEGIN SELECT RAISE(ABORT, 'verification runs are append-only'); END;
 ";
 
+const V6_SCHEMA: &str = "
+CREATE TABLE client_hold_events (
+    folder TEXT NOT NULL,
+    validity INTEGER NOT NULL,
+    uid INTEGER NOT NULL,
+    observed_at TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('hold','release')),
+    reason TEXT NOT NULL CHECK(reason IN ('SAME_CONTENT_THIS_JOB','SAME_CONTENT_EXISTING','SAME_ID_AND_BODY_EXISTING','SIBLING_UNCERTAIN','RELEASED')),
+    fingerprint TEXT NOT NULL,
+    detail TEXT NOT NULL CHECK(length(detail) <= 1000)
+);
+CREATE INDEX client_hold_events_key ON client_hold_events(folder, validity, uid);
+CREATE TRIGGER client_hold_events_no_update BEFORE UPDATE ON client_hold_events BEGIN SELECT RAISE(ABORT, 'client hold events are append-only'); END;
+CREATE TRIGGER client_hold_events_no_delete BEFORE DELETE ON client_hold_events BEGIN SELECT RAISE(ABORT, 'client hold events are append-only'); END;
+";
+
+/// Why a message is held back by the client-side duplicate check (evidence only; never a transfer state).
+pub const HOLD_REASONS: [&str; 4] = [
+    "SAME_CONTENT_THIS_JOB",
+    "SAME_CONTENT_EXISTING",
+    "SAME_ID_AND_BODY_EXISTING",
+    "SIBLING_UNCERTAIN",
+];
+
+/// One row of the append-only hold log.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HoldEvent {
+    pub folder: String,
+    pub uid_validity: u32,
+    pub uid: u32,
+    pub observed_at: String,
+    pub kind: String,
+    pub reason: String,
+    pub fingerprint: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageKey {
     pub folder: String,
@@ -143,6 +183,9 @@ pub struct Summary {
     pub confirmed: u64,
     /// Planned messages an operator has explicitly skipped. They are NOT migrated.
     pub skipped: u64,
+    /// Planned messages the client-side duplicate check is holding back (not skipped). They are NOT migrated
+    /// and nothing was sent for them. Counted within `planned`.
+    pub held: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -402,8 +445,10 @@ impl Journal {
             tx.pragma_update(None, "user_version", 2)?;
             crate::fault::point("v1_upgrade_before_commit");
             tx.commit()?;
-        } else if !(2..=SCHEMA_V5).contains(&version) {
-            bail!("unsupported journal schema {version}; expected {SCHEMA_VERSION} or {SCHEMA_V5}");
+        } else if !(2..=SCHEMA_V6).contains(&version) {
+            bail!(
+                "unsupported journal schema {version}; expected {SCHEMA_VERSION}, {SCHEMA_V5} or {SCHEMA_V6}"
+            );
         }
         conn.pragma_update(None, "synchronous", "FULL")?;
         if version < 3 {
@@ -477,7 +522,7 @@ impl Journal {
         let version: i64 = self
             .0
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version == SCHEMA_V5 {
+        if version >= SCHEMA_V5 {
             return Ok(false);
         }
         if version != SCHEMA_VERSION {
@@ -505,6 +550,236 @@ impl Journal {
         tx.commit()?;
         crate::fault::point("after_v5_upgrade");
         Ok(true)
+    }
+
+    /// Explicit, additive, crash-safe upgrade to schema 6 (client-side duplicate-hold evidence). A schema 4
+    /// journal is first taken through the schema 5 upgrade (its own backup and transaction), then a second
+    /// verified backup is written and ONE transaction adds the append-only `client_hold_events` table and
+    /// sets the version. A crash leaves schema 4/5 untouched. Returns false when already at schema 6.
+    /// An older binary refuses a schema 6 journal; the backups are the way back (see docs).
+    pub fn upgrade_to_v6(&mut self, path: &Path) -> Result<bool> {
+        self.1.ready.set(None);
+        let version = self.schema_version()?;
+        if version >= SCHEMA_V6 {
+            return Ok(false);
+        }
+        if version == SCHEMA_VERSION {
+            self.upgrade_to_v5(path)?;
+        } else if version != SCHEMA_V5 {
+            bail!(
+                "only a schema {SCHEMA_VERSION} or {SCHEMA_V5} journal can be upgraded to schema {SCHEMA_V6} (found {version})"
+            );
+        }
+        crate::fault::point("before_v6_backup");
+        backup_before_upgrade(&self.0, path, &format!("v{SCHEMA_V5}"))?;
+        crate::fault::point("after_v6_backup");
+        crate::fault::point("before_v6_upgrade");
+        let tx = self.0.transaction()?;
+        tx.execute_batch(V6_SCHEMA)?;
+        tx.pragma_update(None, "user_version", SCHEMA_V6)?;
+        crate::fault::point("v6_upgrade_before_commit");
+        tx.commit()?;
+        crate::fault::point("after_v6_upgrade");
+        Ok(true)
+    }
+
+    fn require_v6(&self, what: &str) -> Result<()> {
+        if self.schema_version()? < SCHEMA_V6 {
+            bail!("{what} requires a schema 6 journal");
+        }
+        Ok(())
+    }
+
+    /// Record that the client-side duplicate check is holding this message back. EVIDENCE ONLY: the message
+    /// stays `planned` (a planned row is created if none exists yet, in the same transaction), no attempt
+    /// row is written and nothing is ever sent. Refused unless the transfer is a planned, never-attributed
+    /// record (a hold can never describe a message that was, or may have been, appended).
+    /// Returns false (nothing written) when the latest event already says exactly this.
+    pub fn record_hold(
+        &mut self,
+        key: &MessageKey,
+        reason: &str,
+        fingerprint: &str,
+        detail: &str,
+    ) -> Result<bool> {
+        self.require_v6("recording a duplicate hold")?;
+        if !HOLD_REASONS.contains(&reason) {
+            bail!("unknown hold reason");
+        }
+        if key.uid == 0 || key.uid_validity == 0 {
+            bail!("UID and UIDVALIDITY must be nonzero");
+        }
+        let detail = bounded_detail(detail);
+        crate::fault::point("hold_before_tx");
+        let tx = self.0.transaction()?;
+        let existing: Option<(String, String, Option<i64>)> = tx
+            .query_row(
+                "SELECT fingerprint,state,destination_uid FROM transfers WHERE folder=?1 AND uid_validity=?2 AND uid=?3",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        match existing {
+            Some((stored, state, destination)) => {
+                if stored != fingerprint {
+                    bail!(
+                        "source content changed for an existing UID; refusing to replace evidence"
+                    );
+                }
+                if state != "planned" || destination.is_some() {
+                    bail!(
+                        "a duplicate hold requires a planned, never-attributed transfer (found {state})"
+                    );
+                }
+            }
+            None => {
+                let other: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM transfers WHERE folder=?1 AND uid_validity<>?2)",
+                    params![key.folder, key.uid_validity],
+                    |r| r.get(0),
+                )?;
+                if other {
+                    bail!("source UIDVALIDITY changed; re-planning required");
+                }
+                tx.execute(
+                    "INSERT INTO transfers (folder,uid_validity,uid,fingerprint,state) VALUES (?1,?2,?3,?4,'planned')",
+                    params![key.folder, key.uid_validity, key.uid, fingerprint],
+                )?;
+            }
+        }
+        let latest: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT kind,reason,detail FROM client_hold_events WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if latest
+            .as_ref()
+            .is_some_and(|(k, r, d)| k == "hold" && r == reason && *d == detail)
+        {
+            // Nothing new to say; the planned row (if it was just created) is committed with no event.
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO client_hold_events VALUES (?1,?2,?3,?4,'hold',?5,?6,?7)",
+            params![
+                key.folder,
+                key.uid_validity,
+                key.uid,
+                chrono::Utc::now().to_rfc3339(),
+                reason,
+                fingerprint,
+                detail
+            ],
+        )?;
+        crate::fault::point("hold_before_commit");
+        tx.commit()?;
+        crate::fault::point("after_hold");
+        Ok(true)
+    }
+
+    /// The hold is no longer justified: append a `release` row (audit only) so the message follows the
+    /// normal path again. A no-op returning false when the latest event is not a hold.
+    pub fn record_release(&mut self, key: &MessageKey) -> Result<bool> {
+        if self.schema_version()? < SCHEMA_V6 {
+            return Ok(false);
+        }
+        let tx = self.0.transaction()?;
+        let latest: Option<(String, String)> = tx
+            .query_row(
+                "SELECT kind,fingerprint FROM client_hold_events WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((kind, fingerprint)) = latest else {
+            return Ok(false);
+        };
+        if kind != "hold" {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO client_hold_events VALUES (?1,?2,?3,?4,'release','RELEASED',?5,'the duplicate risk no longer exists')",
+            params![
+                key.folder,
+                key.uid_validity,
+                key.uid,
+                chrono::Utc::now().to_rfc3339(),
+                fingerprint
+            ],
+        )?;
+        crate::fault::point("release_before_commit");
+        tx.commit()?;
+        crate::fault::point("after_release");
+        Ok(true)
+    }
+
+    /// The latest hold event for this message, if the latest event is a hold.
+    pub fn latest_hold(&self, key: &MessageKey) -> Result<Option<HoldEvent>> {
+        if !self.has_table("client_hold_events")? {
+            return Ok(None);
+        }
+        Ok(self
+            .0
+            .query_row(
+                "SELECT folder,validity,uid,observed_at,kind,reason,fingerprint,detail FROM client_hold_events WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
+                params![key.folder, key.uid_validity, key.uid],
+                hold_row,
+            )
+            .optional()?
+            .filter(|e| e.kind == "hold"))
+    }
+
+    /// Every message that is currently held: the latest event is a hold, the transfer is still a planned,
+    /// never-attributed record, and the operator has not skipped it. Read-only; valid on any journal.
+    pub fn held_events(&self) -> Result<Vec<HoldEvent>> {
+        if !self.has_table("client_hold_events")? {
+            return Ok(Vec::new());
+        }
+        let has_skips = self.has_table("operator_skip_events")?;
+        let not_skipped = if has_skips {
+            " AND COALESCE((SELECT action FROM operator_skip_events s WHERE s.folder=e.folder AND s.validity=e.validity AND s.uid=e.uid ORDER BY s.rowid DESC LIMIT 1),'unskip')<>'skip'"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT e.folder,e.validity,e.uid,e.observed_at,e.kind,e.reason,e.fingerprint,e.detail FROM client_hold_events e \
+             WHERE e.kind='hold' AND e.rowid=(SELECT max(rowid) FROM client_hold_events x WHERE x.folder=e.folder AND x.validity=e.validity AND x.uid=e.uid) \
+             AND EXISTS(SELECT 1 FROM transfers t WHERE t.folder=e.folder AND t.uid_validity=e.validity AND t.uid=e.uid AND t.state='planned' AND t.destination_uid IS NULL){not_skipped} \
+             ORDER BY e.folder,e.uid"
+        );
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map([], hold_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Fingerprints of messages that already have (or may have) a destination copy in this job, with the
+    /// state: used to find an earlier sibling of identical content. `uncertain` siblings matter because
+    /// the destination state is unknown.
+    pub fn sibling_with_fingerprint(
+        &self,
+        fingerprint: &str,
+        except: &MessageKey,
+    ) -> Result<Option<(MessageKey, String)>> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT folder,uid_validity,uid,state FROM transfers WHERE fingerprint=?1 AND state IN ('uncertain','accepted','confirmed') AND NOT (folder=?2 AND uid_validity=?3 AND uid=?4) ORDER BY rowid LIMIT 1",
+                params![fingerprint, except.folder, except.uid_validity, except.uid],
+                |r| {
+                    Ok((
+                        MessageKey {
+                            folder: r.get(0)?,
+                            uid_validity: r.get(1)?,
+                            uid: r.get(2)?,
+                        },
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?)
     }
 
     /// The folder mappings recorded in the (never rewritten) job binding.
@@ -660,7 +935,7 @@ impl Journal {
         observed_uidnext: u32,
         uids: &[u32],
     ) -> Result<u32> {
-        if self.schema_version()? != SCHEMA_V5 {
+        if self.schema_version()? < SCHEMA_V5 {
             bail!("recording a scan requires a schema 5 journal");
         }
         if uids.is_empty() || uids.windows(2).any(|w| w[0] >= w[1]) {
@@ -873,7 +1148,7 @@ impl Journal {
         observed_uidnext: u32,
         uids: &[u32],
     ) -> Result<()> {
-        if self.schema_version()? != SCHEMA_V5 {
+        if self.schema_version()? < SCHEMA_V5 {
             bail!("adding a folder requires a schema 5 journal");
         }
         if validity == 0 || observed_uidnext == 0 {
@@ -1602,6 +1877,7 @@ impl Journal {
             accepted: 0,
             confirmed: 0,
             skipped: 0,
+            held: 0,
         };
         let mut stmt = self
             .0
@@ -1631,6 +1907,7 @@ impl Journal {
             )?;
             result.skipped = u64::try_from(skipped).context("invalid skip count")?;
         }
+        result.held = u64::try_from(self.held_events()?.len()).context("invalid hold count")?;
         Ok(result)
     }
 
@@ -1655,6 +1932,7 @@ impl Journal {
     /// of delivery, and it changes no transfer state.
     pub fn skip_rejected(&mut self, key: &MessageKey, reason: &str) -> Result<()> {
         let reason = checked_reason(reason)?;
+        let has_holds = self.has_table("client_hold_events")?;
         let tx = self.0.transaction()?;
         let fingerprint: String = tx
             .query_row(
@@ -1664,14 +1942,33 @@ impl Journal {
             )
             .optional()?
             .context("skip refused: only a planned, never-attributed transfer (not uncertain, accepted or confirmed) can be skipped")?;
-        let evidence: String = tx
+        let rejection: Option<String> = tx
             .query_row(
                 "SELECT evidence FROM append_rejections WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
                 params![key.folder, key.uid_validity, key.uid],
                 |r| r.get(0),
             )
+            .optional()?;
+        // A durable client-side duplicate hold is equally valid evidence for a skip. It never was a
+        // server rejection and is recorded as what it is.
+        let hold: Option<(String, String)> = if has_holds {
+            tx.query_row(
+                "SELECT kind||' '||reason, detail FROM client_hold_events WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
+                params![key.folder, key.uid_validity, key.uid],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
             .optional()?
-            .context("skip refused: no durable tagged APPEND rejection exists for this message")?;
+            .filter(|(kind, _)| kind.starts_with("hold "))
+        } else {
+            None
+        };
+        let evidence: String = match (rejection, hold) {
+            (_, Some((what, detail))) => format!("client-side duplicate {what}: {detail}"),
+            (Some(rejection), None) => rejection,
+            (None, None) => bail!(
+                "skip refused: no durable tagged APPEND rejection or client-side duplicate hold exists for this message"
+            ),
+        };
         let latest: Option<String> = tx
             .query_row(
                 "SELECT action FROM operator_skip_events WHERE folder=?1 AND validity=?2 AND uid=?3 ORDER BY rowid DESC LIMIT 1",
@@ -1732,6 +2029,28 @@ impl Journal {
         crate::fault::point("after_unskip");
         Ok(())
     }
+}
+
+fn hold_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<HoldEvent> {
+    Ok(HoldEvent {
+        folder: r.get(0)?,
+        uid_validity: r.get(1)?,
+        uid: r.get(2)?,
+        observed_at: r.get(3)?,
+        kind: r.get(4)?,
+        reason: r.get(5)?,
+        fingerprint: r.get(6)?,
+        detail: r.get(7)?,
+    })
+}
+
+/// Hold detail is bounded, single-line text built from identifiers and counts, never message text.
+fn bounded_detail(detail: &str) -> String {
+    detail
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(1000)
+        .collect()
 }
 
 /// Operator text is echoed in reports: bounded, non-empty, and free of control

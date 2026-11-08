@@ -219,7 +219,7 @@ fn only_schema_four_upgrades_and_unknown_schemas_are_refused() {
     let path = v4(temp.path());
     Connection::open(&path)
         .unwrap()
-        .pragma_update(None, "user_version", 6)
+        .pragma_update(None, "user_version", 7)
         .unwrap();
     assert!(Journal::open(&path).is_err());
     assert!(Journal::open_read_only(&path).is_err());
