@@ -19,6 +19,11 @@ may change (journal upgrades keep a verified backup and never discard evidence).
 - DEB and RPM packages (amd64; arm64 build scripts), third-party license notices,
   and the `oauth_token.py` helper for XOAUTH2 access tokens.
 
+- Gmail duplicate protection (default on for `X-GM-EXT-1` destinations; `gmail_duplicate_protection = "off"` disables): probable
+  duplicates are held back before any APPEND, reported as `held`, never counted as migrated, and resolvable with `skip`.
+  Journal schema 6 (explicit, backed-up upgrade; older releases refuse it). See the README and
+  `docs/GMAIL_DUPLICATE_MERGE_DESIGN.md`.
+
 ### Performance (no change to durability guarantees)
 - Write-ahead-log journal with `synchronous=FULL` (one sync per durable commit),
   `fdatasync` instead of `fsync`, and one IMAP round trip for messages up to 128 KiB.

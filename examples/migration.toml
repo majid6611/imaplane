@@ -20,6 +20,12 @@ append_rejection_limit = 3
 # restores the older rollback-journal storage. Durability is the same; see docs/WAL_JOURNAL.md.
 # journal_mode = "auto"
 
+# Gmail destinations (X-GM-EXT-1) merge duplicates and can silently discard the bytes of an APPEND. "auto"
+# (default) checks every message first, read-only, and holds probable duplicates back (reported as `held`, never
+# counted as migrated). It raises the journal to schema 6 (verified backups); older releases then refuse the
+# journal. "off" accepts Gmail's merging; only the read-back would report it. Ignored for other servers.
+# gmail_duplicate_protection = "auto"
+
 [source]
 host = "imap.old.example"
 port = 993

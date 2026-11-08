@@ -392,11 +392,11 @@ imaplane unskip --config migration.toml --folder INBOX --uid 123 --reason "provi
 ```
 
 `skip` works only on a planned, never-attributed message that already has a
-durable tagged rejection. It requires a reason (at most 500 characters, no control
+durable tagged rejection **or a durable Gmail duplicate hold** (see below). It requires a reason (at most 500 characters, no control
 characters), appends to an audit log and changes no transfer state. A skipped
 message is reported as `skipped_by_operator`, is **not** counted as migrated, and
 keeps `complete` false and the exit code at 2 for as long as the skip stands.
-`unskip` returns the message to the normal path. `status` shows the skipped count.
+`unskip` returns the message to the normal path. `status` shows the skipped count and the held count.
 
 Before an APPEND is prepared, a destination connection that has been idle for
 2 seconds or more (for example during a slow source read) is probed with `NOOP`
@@ -404,8 +404,45 @@ and replaced if dead, then re-selected with the UIDVALIDITY check. A successful
 probe cannot promise the connection survives the APPEND itself; a failure during
 APPEND is still uncertain and never replayed.
 
-Gmail and Microsoft 365 compatibility testing is prepared but **not started; no live
-provider has been contacted**. See
+### Gmail duplicate protection
+
+Gmail **merges duplicates**. Experiments against a live test account (see
+[docs/GMAIL_DUPLICATE_MERGE_DESIGN.md](docs/GMAIL_DUPLICATE_MERGE_DESIGN.md)) showed that an APPEND of a message
+byte-identical to an existing one makes Gmail keep one copy (and re-issue its UID), and that an APPEND with the same
+`Message-ID` and body but one extra header is **accepted with `OK` while its bytes are silently discarded**. Without
+protection the exact SHA-256 read-back would report these as `mismatch`/`missing` after the fact; the data is never lost
+from the source, but the destination does not get what was sent.
+
+For destinations that advertise `X-GM-EXT-1` (Gmail) IMAPLANE therefore checks every message **before** it is prepared
+for APPEND, read-only, and **holds back** a probable duplicate. A held message:
+
+- is reported as `held` (reason and sibling), in every run for as long as the hold stands;
+- is **never** counted as migrated or confirmed; `complete` is false and the exit code is 2;
+- had **nothing sent**: no APPEND, no attempt row, no state other than `planned` (a hold is append-only evidence in the
+  `client_hold_events` table, separate from server rejections and from the rejection circuit breaker);
+- is resolved by you: `imaplane skip --reason ...` (accepted for a hold; audited; still not migrated), or fix the
+  destination and rerun (a hold is re-evaluated on every run and a `release` is recorded when the risk is gone).
+
+What is checked, in order: an identical message already `uncertain`/`accepted`/`confirmed` in this job (any folder); a
+message with the same Message-ID and body appended earlier in this run; and existing mail in the destination account,
+found with batched read-only `X-GM-RAW rfc822msgid:` searches of the `\All` mailbox (at most 100 ids per search, on a
+second read-only connection; about 3 to 5 seconds per 1,000 messages). A message with no usable Message-ID is never held.
+Existing destination messages are never modified (no `STORE`, `EXPUNGE`, `COPY` or `MOVE` is ever sent).
+
+**This is risk reduction, not proof.** What Gmail merges is only partly known (identical bytes and "same Message-ID and
+body" are confirmed; other patterns are untested), so the mandatory read-back after every APPEND is unchanged and remains
+the authority. If the check itself fails (search timeout, `NO`/`BAD`, no `\All` mailbox), IMAPLANE **fails closed**: it stops
+the run, sends nothing, records nothing, and exits 2; a rerun tries again. Set `gmail_duplicate_protection = "off"` to
+accept Gmail's merging (then only the read-back reports it).
+
+**Journal schema 6.** The first protected run upgrades the journal explicitly (schema 4 goes through 5 to 6, each step in
+one transaction with a verified backup `journal.sqlite3.v4.bak`/`.v5.bak` next to it). A release without this feature refuses
+a schema 6 journal (it fails closed); to go back, restore the backup of your choice (this loses later progress, so do not
+mix versions on one job). Prefer migrating into a **fresh** Gmail account where possible.
+
+Gmail and Microsoft 365 compatibility testing is **in progress**: a read-only Gmail probe, a 1,000-message Gmail to Dovecot copy,
+and controlled duplicate-merge experiments on a dedicated test account have been done (Microsoft 365 has not been contacted; the
+Gmail duplicate protection has not yet had its live acceptance run). See
 [docs/PROVIDER_COMPATIBILITY_TESTING.md](docs/PROVIDER_COMPATIBILITY_TESTING.md) and, for
 Google, [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md). Supporting tools in
 `scripts/`: `imap_snapshot.py` (independent read-only snapshot and comparison),
@@ -461,7 +498,7 @@ and cannot alter a run.
     because it would put the "disk" spool back in RAM.
   - Neither key is part of the job binding, so they can be changed between runs.
 - No built-in OAuth browser/device authorization or token-refresh grant client,
-  Gmail label deduplication, provider-specific transformations,
+  Gmail label deduplication beyond the duplicate protection above, provider-specific transformations,
   batch accounts, subscriptions, quota preflight, ongoing synchronization or
   automatic incremental passes. Treat Gmail virtual/label folders carefully:
   different source folder instances are copied independently.

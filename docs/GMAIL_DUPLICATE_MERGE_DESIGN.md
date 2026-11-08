@@ -422,3 +422,27 @@ extension (skip is refused).
 * Confirm that a **search failure stops the run** (fail closed) rather than deferring just that message.
 * Approve the **live untested-pattern experiments** (section 12) before or after implementation; they do not block P0-P3.
 * The batched search was verified only up to 400 ids and on a small account; P2 keeps a 100-id bound and the live acceptance run checks it on more data.
+
+## 17. Implementation status and deviations from this design (2026-11-07)
+
+Implemented in separate local commits P0-P5 (not pushed). Decisions taken after review: **explicit schema 6** instead of the lazy
+table (section 13.3); **fail closed** on a failed check (13.6); live experiments X1-X5 done (12.1) and P6 live acceptance still to be approved.
+
+Deviations and clarifications, so the document matches the code:
+
+* **Schema 6, explicit.** `Journal::upgrade_to_v6` (4 -> 5 -> 6, each step one transaction with a verified backup `*.v4.bak`, `*.v5.bak`); the
+  engine performs it at the start of a protected run, before any transfer. Older binaries refuse schema 6 (tested with the previous release binary).
+  A journal is never upgraded when `gmail_duplicate_protection = "off"` or the destination is not Gmail-like.
+* **A hold creates the planned row.** `record_hold` inserts the `planned` transfer row (if missing) in the same transaction as the event,
+  so `skip` and the status counts work; no attempt row, no fence, no other state.
+* **Where the check runs:** after the source message was read and its INTERNALDATE check, immediately before the destination liveness probe and
+  `prepare_append`; it writes nothing except the hold/release evidence.
+* **Comparison is deliberately broader than Gmail's merging (X2-X4):** Message-ID compared lowercase and with or without angle brackets; same
+  Message-ID and body counts whatever the other headers (Gmail kept messages with a changed Subject or Date separate). More holds, never fewer.
+* **Source header pass** reads at most the first 64 KiB of each header with `BODY.PEEK[HEADER]<0.65536>`; a Message-ID beyond that is found by a
+  single-id search at check time. Ids that cannot be placed safely in a quoted search (non-ASCII, quotes) are not searched (never a hold).
+* **Existing hits** are compared by fetching the whole message (BODY.PEEK) with the existing size cap; a hit larger than `max_message_bytes` stops the
+  run (fail closed) rather than guessing.
+* **Spooled messages** (large, streaming on) are keyed by streaming the spool (`keys_from_reader`), never held whole in memory.
+* **Not implemented / out of scope:** P4 post-hoc `classification` of a read-back mismatch (the read-back result itself is unchanged and still
+  reported as before); Trash and Spam siblings; mail added by other clients during a run; the live acceptance P6.
