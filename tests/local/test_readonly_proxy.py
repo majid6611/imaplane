@@ -107,6 +107,30 @@ class ConfinedTwoFolders(unittest.TestCase):
             self.assertFalse(g('a1 ' + bad)[0], bad)
 
 
+class ConfinedNoWriteGuard(unittest.TestCase):
+    """--max-appends 0 (no_write): reads and SELECT pass; every write-capable command is refused by the guard itself."""
+
+    def g(self, t):
+        return p.guard(t.encode() + b'\r\n', 0, 'IMAPLANE-Test', ['[Gmail]/All Mail'], no_write=True)
+
+    def test_reads_and_select_are_allowed(self):
+        for ok in ['SELECT "IMAPLANE-Test"', 'EXAMINE "IMAPLANE-Test"', 'EXAMINE "[Gmail]/All Mail"', 'STATUS "IMAPLANE-Test" (MESSAGES)', 'LIST "" "*"',
+                   'UID SEARCH ALL', 'UID FETCH 1:* (UID FLAGS BODY.PEEK[])', 'UNSELECT', 'NOOP', 'CAPABILITY', 'ENABLE UTF8=ACCEPT']:
+            self.assertTrue(self.g('a1 ' + ok)[0], ok)
+
+    def test_every_write_capable_command_is_refused(self):
+        for bad in ['CREATE "IMAPLANE-Test"', 'create "IMAPLANE-Test"', 'APPEND "IMAPLANE-Test" {3}', 'Append "IMAPLANE-Test" (\\Seen) {3}',
+                    'APPEND "IMAPLANE-Test" {3+}', 'CLOSE', 'STORE 1 +FLAGS (\\Deleted)', 'UID STORE 1 +FLAGS (\\Deleted)', 'UID  STORE 1 FLAGS ()',
+                    'MOVE 1 X', 'UID MOVE 1 X', 'COPY 1 X', 'UID COPY 1 X', 'EXPUNGE', 'UID EXPUNGE 1', 'DELETE "IMAPLANE-Test"',
+                    'RENAME A B', 'SUBSCRIBE X', 'SELECT INBOX', 'SELECT "[Gmail]/All Mail"', 'UID FETCH 1 (BODY[])']:
+            self.assertFalse(self.g('a1 ' + bad)[0], bad)
+
+    def test_the_default_mode_still_allows_what_the_cap_allows(self):
+        gc = lambda t: p.guard(t.encode() + b'\r\n', 0, 'IMAPLANE-Test', ())
+        for ok in ['CREATE "IMAPLANE-Test"', 'APPEND "IMAPLANE-Test" {3}', 'CLOSE']:
+            self.assertTrue(gc('a1 ' + ok)[0], ok)
+
+
 class ConfinedReadOnlyExtras(unittest.TestCase):
     def test_extra_readonly_folders_can_only_be_examined(self):
         g = lambda t: p.guard(t.encode() + b'\r\n', 0, 'IMAPLANE-Test', ['[Gmail]/All Mail'])
@@ -123,6 +147,30 @@ class ProxyEndToEnd(unittest.TestCase):
     commands that never reach the upstream, and the username substitution."""
 
     def test_confined_proxy(self):
+        self._run(2, None)
+
+    def test_zero_cap_proxy_blocks_every_write_but_allows_reads(self):
+        self._run(0, self._scenario_cap0)
+
+    def _scenario_cap0(self, cmd, seen, appended):
+        auth = base64.b64encode(b'user=placeholder\x01auth=Bearer T0K\x01\x01').decode()
+        self.assertIn(b'OK', cmd(f'a0 AUTHENTICATE XOAUTH2 {auth}'))
+        before = len(seen)
+        # reads and the SELECT an existing job needs go through
+        for text in ['b1 LIST "" "*"', 'b2 SELECT "IMAPLANE-Test"', 'b3 UID SEARCH ALL', 'b4 UID FETCH 1 (UID FLAGS BODY.PEEK[])',
+                     'b5 EXAMINE "IMAPLANE-Test"', 'b6 STATUS "IMAPLANE-Test" (MESSAGES)', 'b7 UNSELECT']:
+            self.assertIn(b'OK', cmd(text), text)
+        self.assertEqual(len(seen), before + 7)
+        before = len(seen)
+        for text in ['c1 CREATE "IMAPLANE-Test"', 'c2 create "IMAPLANE-Test"', 'c3 APPEND "IMAPLANE-Test" {3}', 'c4 append "IMAPLANE-Test" (\\Seen) {3}',
+                     'c5 APPEND "IMAPLANE-Test" {3+}', 'c6 STORE 1 +FLAGS (\\Deleted)', 'c7 UID STORE 1 +FLAGS (\\Deleted)', 'c8 UID  STORE 1 FLAGS ()',
+                     'c9 MOVE 1 "IMAPLANE-Test"', 'd1 UID MOVE 1 INBOX', 'd2 EXPUNGE', 'd3 UID EXPUNGE 1', 'd4 DELETE "IMAPLANE-Test"',
+                     'd5 CLOSE', 'd6 COPY 1 "IMAPLANE-Test"', 'd7 UID COPY 1 INBOX', 'd8 RENAME "IMAPLANE-Test" X', 'd9 SELECT INBOX',
+                     'e1 UID FETCH 1 (BODY[])']:
+            self.assertIn(b'BAD proxy', cmd(text), text)
+        self.assertEqual(len(seen), before, 'a refused command reached the upstream')
+
+    def _run(self, max_appends, scenario):
         import os, shutil, socket, ssl, subprocess, tempfile, threading, json
         if not shutil.which('openssl'):
             self.skipTest('openssl is not available')
@@ -167,7 +215,7 @@ class ProxyEndToEnd(unittest.TestCase):
             os.environ['IMAP_PROXY_USER'] = 'real@example.test'
             ready = t / 'ready'
             argv = ['--upstream', 'localhost', '--upstream-port', str(lst.getsockname()[1]), '--upstream-ca', str(t / 'c.pem'), '--cert', str(t / 'c.pem'),
-                    '--key', str(t / 'k.pem'), '--confine-folder', 'IMAPLANE-Test', '--max-appends', '2', '--summary', str(t / 's.json'), '--ready-file', str(ready)]
+                    '--key', str(t / 'k.pem'), '--confine-folder', 'IMAPLANE-Test', '--max-appends', str(max_appends), '--summary', str(t / 's.json'), '--ready-file', str(ready)]
             threading.Thread(target=p.main, args=(argv,), daemon=True).start()
             for _ in range(100):
                 if ready.exists() and ready.read_text():
@@ -181,6 +229,12 @@ class ProxyEndToEnd(unittest.TestCase):
             def cmd(text):
                 c.sendall(text.encode() + b'\r\n'); return f.readline()
 
+            if max_appends == 0:
+                scenario(cmd, seen, appended)
+                self.assertEqual(appended, [])
+                self.assertIn(b'BYE', cmd('z LOGOUT'))
+                c.close()
+                return
             auth = base64.b64encode(b'user=placeholder\x01auth=Bearer T0K\x01\x01').decode()
             self.assertIn(b'OK', cmd(f'a0 AUTHENTICATE XOAUTH2 {auth}'))
             sent = [l for l in seen if l.startswith(b'a0 AUTHENTICATE')][0].split(b' ')[3]

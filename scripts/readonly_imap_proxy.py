@@ -24,7 +24,9 @@ What it guarantees (and what the unit tests in tests/local/test_readonly_proxy.p
   * CONFINED-WRITE MODE (--confine-folder NAME --max-appends N): for the destination of a provider test. CREATE, SELECT,
     EXAMINE, STATUS, APPEND and CLOSE are allowed only for that single mailbox, at most N APPENDs are forwarded in the
     proxy's lifetime (a hard cap on how many messages can ever be written), and STORE, EXPUNGE, COPY, MOVE, DELETE,
-    RENAME and every other mailbox stay refused, so existing mail and labels cannot be touched.
+    RENAME and every other mailbox stay refused, so existing mail and labels cannot be touched. With --max-appends 0 the
+    proxy forwards NO write-capable command (CREATE, APPEND and CLOSE are refused as well) but still allows SELECT/EXAMINE/
+    STATUS/LIST/UNSELECT and the read-only UID FETCH/SEARCH, so an existing job can be re-checked or verified with zero writes.
   * Nothing sensitive is logged: only per-verb counts, blocked counts and byte totals go to the summary.
 """
 import argparse
@@ -37,6 +39,7 @@ import ssl
 import sys
 import threading
 
+NO_WRITE_REFUSED = ('CREATE', 'APPEND', 'CLOSE')
 ALLOWED_VERBS = {'CAPABILITY', 'NOOP', 'LOGOUT', 'ID', 'ENABLE', 'NAMESPACE', 'LIST', 'LSUB', 'STATUS', 'EXAMINE',
                  'UNSELECT', 'AUTHENTICATE', 'UID'}
 LITERAL_OK_VERBS = {'LIST', 'LSUB', 'STATUS', 'EXAMINE'}      # mailbox names may arrive as literals
@@ -82,11 +85,14 @@ def mailbox_name(text):
     return text[1:-1] if len(text) >= 2 and text[0] == text[-1] == '"' else text
 
 
-def guard(line, cut, confine=None, extra_ro=()):
+def guard(line, cut, confine=None, extra_ro=(), no_write=False):
     """Decide one client command line. Returns (allowed, reason). `cut` is the highest UID the client may name.
     With `confine` (a mailbox name) the proxy is in confined-write mode: in addition to the read-only commands it
     allows CREATE, SELECT, EXAMINE, STATUS, APPEND and CLOSE, but ONLY for that one mailbox; everything else that
-    could change a mailbox (STORE, EXPUNGE, COPY, MOVE, DELETE, RENAME, ...) stays refused."""
+    could change a mailbox (STORE, EXPUNGE, COPY, MOVE, DELETE, RENAME, ...) stays refused.
+    With `no_write` (the proxy's --max-appends 0) CREATE, APPEND and CLOSE are refused too: SELECT, EXAMINE, STATUS, LIST and the
+    read-only UID FETCH/SEARCH remain, which is what a verification or duplicate-check run needs. CLOSE is refused because it
+    silently expunges any \\Deleted message of a writable selection; UNSELECT leaves the mailbox without that effect."""
     parsed = split_command(line)
     if parsed is None:
         return False, 'malformed command'
@@ -94,6 +100,8 @@ def guard(line, cut, confine=None, extra_ro=()):
     if confine is not None:
         if verb not in ALLOWED_VERBS | CONFINED_EXTRA:
             return False, f'{verb} is not allowed (confined proxy)'
+        if no_write and verb in NO_WRITE_REFUSED:
+            return False, f'{verb} is not allowed (--max-appends 0: no write-capable command)'
         if verb in ('CREATE', 'SELECT', 'EXAMINE', 'STATUS'):
             name = (re.match(r'"[^"]*"|\S+', rest) or re.match('', '')).group(0) if verb == 'STATUS' else rest
             allowed = confined_set(confine) | (set(extra_ro) if verb in ('EXAMINE', 'STATUS') else set())
@@ -334,9 +342,8 @@ def serve_connection(client, args, sl, user, stats, ctx):
             if state['auth_tag']:                     # a SASL continuation line, not a command
                 up.send(rewrite_auth(line.strip(), user) + b'\r\n')
                 continue
-            ok, reason = guard(line, sl.cut if sl is not None else 0, args.confine_folder, args.readonly_folder or ())
-            if ok and args.confine_folder and args.max_appends == 0 and split_command(line)[1] in ('CREATE', 'SELECT', 'APPEND', 'CLOSE'):
-                ok, reason = False, 'diagnostic mode (--max-appends 0): no write-capable command is allowed'
+            ok, reason = guard(line, sl.cut if sl is not None else 0, args.confine_folder, args.readonly_folder or (),
+                               no_write=args.max_appends == 0)
             parsed = split_command(line)
             tag = parsed[0] if parsed else '*'
             verb = parsed[1] if parsed else '?'
@@ -413,7 +420,7 @@ def main(argv=None):
     ap.add_argument('--count', type=int, help='read-only mode: expose only the oldest N INBOX messages')
     ap.add_argument('--confine-folder', action='append', help='confined-write mode: allow CREATE/SELECT/APPEND only for this mailbox (repeatable)')
     ap.add_argument('--readonly-folder', action='append', help='confined mode: an additional mailbox that may only be EXAMINEd (repeatable)')
-    ap.add_argument('--max-appends', type=int, default=0, help='confined mode: hard cap on APPENDs over the proxy lifetime')
+    ap.add_argument('--max-appends', type=int, default=0, help='confined mode: hard cap on APPENDs over the proxy lifetime; 0 = no write-capable command at all (CREATE, APPEND, CLOSE refused), SELECT/EXAMINE and reads still work')
     ap.add_argument('--max-append-bytes', type=int, default=10 << 20)
     ap.add_argument('--upstream-ca', help='extra CA file for the upstream (tests and local rehearsals only)')
     ap.add_argument('--summary', required=True)
@@ -423,7 +430,7 @@ def main(argv=None):
     user = os.environ['IMAP_PROXY_USER']
     if args.confine_folder:
         if args.max_appends < 0:
-            sys.exit('--max-appends must be >= 0 (0 = diagnostic, read-only)')
+            sys.exit('--max-appends must be >= 0 (0 = no writes, reads only)')
         sl, info = None, {'mode': 'confined-write', 'folder_confined_to': 'set', 'max_appends': args.max_appends}
     else:
         if not args.token_file or not args.count:
