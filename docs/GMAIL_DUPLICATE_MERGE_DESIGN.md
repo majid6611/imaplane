@@ -234,10 +234,10 @@ Measured against the live Gmail test account through the guard proxy, with zero 
 | Same Message-ID **and** body, any header differs (E7) | merged; **appended bytes silently discarded**, APPEND reports success | CONFIRMED (once) |
 | Same Message-ID, different body | separate messages | CONFIRMED (same label and different label) |
 | No Message-ID | stored separately; no Message-ID added | CONFIRMED (one message only) |
-| Same body, **different** Message-ID | unknown | UNTESTED |
-| Same Message-ID and body, changed Subject/Date | unknown (E7 changed an unrelated header only) | UNTESTED |
-| Message-ID case/bracket variants with identical bodies | unknown (the search is insensitive; the store may not be) | UNTESTED |
-| Two identical messages with no Message-ID | unknown | UNTESTED |
+| Same body, **different** Message-ID | separate messages (X1) | CONFIRMED (once) |
+| Same Message-ID and body, **Subject** changed / **Date** header changed | separate messages, nothing discarded (X2b, X3) | CONFIRMED (once each) |
+| Message-ID upper-case variant, identical body | separate messages (X4); the search still finds both (superset) | CONFIRMED (once); bracket-less variant UNTESTED with identical body |
+| Two identical messages with no Message-ID | merged like any identical bytes; first UID vanished (X5) | CONFIRMED (once) |
 | Sibling in Trash or Spam | unknown; All Mail search does not see it | UNTESTED, out of scope by decision |
 | Sibling appended less than about 5 s ago | not visible to search | CONFIRMED (E5) |
 | Messages added to the account by another client during the run | not covered | UNTESTED |
@@ -245,6 +245,26 @@ Measured against the live Gmail test account through the guard proxy, with zero 
 **Consequence (your point 2): the key is not known.** The check below is a *risk reducer built on observed patterns*, not a predictor. It
 is deliberately broader than the proven pattern where that is cheap (same Message-ID and same body, whatever the headers), and it never replaces
 the SHA-256 read-back, which stays mandatory and unchanged. An unknown merge pattern is caught afterward, not prevented.
+
+### 12.1 Follow-up experiments X1-X5 (live, 2026-11-07, label `IMAPLANE-Exp-C`, 9 APPENDs, proxy cap 10)
+
+New label created by the harness; no existing label, message, Trash or Spam was touched; the proxy forwarded 9 APPENDs and refused nothing
+(no STORE/EXPUNGE/MOVE/DELETE ever attempted). Raw per-step records: `~/.config/imaplane/gmail-dest/exp/steps2.jsonl`.
+
+| Step | Result |
+| --- | --- |
+| X1 same body, different Message-ID | 2 messages (UIDs 1,2; distinct X-GM-MSGID) |
+| X2 same Message-ID and body, **Subject** changed | 3rd and 4th message stay separate (no merge, nothing discarded) |
+| X3 same Message-ID and body, **Date header** changed | separate (5 messages after X3) |
+| X4 same body, Message-ID upper-cased | separate; Message-ID search returns both (superset, as measured earlier) |
+| X5 two byte-identical messages without Message-ID | merged: one message, UID 8 vanished, UID 9 holds it (same X-GM-MSGID) |
+
+**Interpretation, stated carefully.** Together with E7 (an *extra* header was ignored and the bytes were discarded) these results show
+the merge key is **narrower than "Message-ID plus body"**: changing Subject or the Date header prevented the merge, adding an unrelated
+header did not. The key plausibly includes the principal headers; it is *not* known. Consequences for the design: (1) the `SAME_ID_AND_BODY_EXISTING`
+hold remains a deliberate **over-approximation** (it may hold a message Gmail would have stored separately; the operator then decides with
+`skip`, never a silent loss); (2) it is still **never complete**: an unknown merge rule is caught only by the mandatory read-back;
+(3) the exact-content hold (`SAME_CONTENT_*`, covering X5 and E1) is the only rule confirmed to match Gmail exactly.
 
 ## 13. Final design (for review; nothing implemented)
 
