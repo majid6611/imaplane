@@ -774,6 +774,74 @@ impl Connection {
             limit,
         })
     }
+
+    /// The mailbox the server marks `\All` (Gmail: "All Mail"), found by its special-use attribute and not by
+    /// name, so localization does not matter.
+    fn all_mail_folder(&mut self) -> Result<Option<String>> {
+        self.reset(OVERHEAD * 16);
+        let response = self
+            .session
+            .run_command_and_read_response("LIST \"\" \"*\"")
+            .safe()?;
+        decode_all_mail(&response, self.encoding)
+    }
+
+    /// UIDs (in the selected mailbox) whose Message-ID matches ANY of `ids`, using Gmail's X-GM-RAW search in
+    /// one command. The match is a superset (case and brackets are ignored by the server); callers compare
+    /// the actual messages. At most [`SEARCH_BATCH`] ids and only ids that pass [`searchable_id`].
+    fn search_message_ids(&mut self, ids: &[String]) -> Result<Vec<u32>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if ids.len() > SEARCH_BATCH || ids.iter().any(|i| !searchable_id(i)) {
+            bail!("invalid duplicate-check search batch");
+        }
+        let terms: Vec<String> = ids.iter().map(|i| format!("rfc822msgid:{i}")).collect();
+        self.reset(OVERHEAD * 16);
+        let (data, _) = self
+            .session
+            .run(format!("UID SEARCH X-GM-RAW \"{}\"", terms.join(" OR ")))
+            .safe()?;
+        parse_search(&data)
+    }
+
+    /// The first `HEADER_PEEK` bytes of the header of each requested message (BODY.PEEK: nothing is marked
+    /// seen). A UID the server does not return is absent from the map.
+    fn header_blocks(&mut self, uids: &[u32]) -> Result<std::collections::HashMap<u32, Vec<u8>>> {
+        use imap_proto::AttributeValue as A;
+        let mut all = std::collections::HashMap::new();
+        for chunk in uids.chunks(HEADER_BATCH) {
+            self.reset(OVERHEAD * 16 + HEADER_BATCH * (HEADER_PEEK + 512));
+            let (data, _) = self
+                .session
+                .run(format!(
+                    "UID FETCH {} (UID BODY.PEEK[HEADER]<0.{HEADER_PEEK}>)",
+                    uid_set(chunk)
+                ))
+                .safe()?;
+            let mut rest = data.as_slice();
+            while !rest.is_empty() {
+                let (next, r) = Response::from_bytes(rest)
+                    .map_err(|_| anyhow::anyhow!("invalid header FETCH response"))?;
+                if let Response::Fetch(_, attributes) = r {
+                    let uid = attributes
+                        .iter()
+                        .find_map(|a| if let A::Uid(u) = a { Some(*u) } else { None });
+                    let block = attributes.iter().find_map(|a| match a {
+                        A::BodySection { data: Some(d), .. } => Some(d.to_vec()),
+                        _ => None,
+                    });
+                    if let (Some(uid), Some(block)) = (uid, block) {
+                        if chunk.contains(&uid) {
+                            all.insert(uid, block);
+                        }
+                    }
+                }
+                rest = next;
+            }
+        }
+        Ok(all)
+    }
     fn reset(&mut self, bytes: usize) {
         self.session.take_all_unsolicited().for_each(drop);
         self.control.reset(bytes);
@@ -1251,6 +1319,19 @@ impl Source {
         diag_connect("source", &result);
         Ok(Self(result?))
     }
+
+    /// Header blocks (first 64 KiB) of many source messages for the duplicate check. BODY.PEEK only.
+    pub fn header_blocks(
+        &mut self,
+        uids: &[u32],
+    ) -> Result<std::collections::HashMap<u32, Vec<u8>>> {
+        observed(
+            "source",
+            "uid_fetch_headers",
+            |m: &std::collections::HashMap<u32, Vec<u8>>| vec![("count", m.len().into())],
+            || self.0.header_blocks(uids),
+        )
+    }
     pub fn folders(&mut self) -> Result<Vec<Folder>> {
         observed("source", "list", count_detail, || self.0.list())
     }
@@ -1496,6 +1577,32 @@ impl Destination {
             bail!("destination must support UIDPLUS or IMAP4rev2 for APPENDUID tracking");
         }
         Ok(Self(c))
+    }
+
+    /// True when this destination advertised Gmail's X-GM-EXT-1 extension after login.
+    pub fn is_gmail(&self) -> bool {
+        self.0.caps.contains("X-GM-EXT-1")
+    }
+    /// Name of the `\All` mailbox, if the server has exactly one.
+    pub fn all_mail_folder(&mut self) -> Result<Option<String>> {
+        observed(
+            "destination",
+            "list_all",
+            |_| Vec::new(),
+            || self.0.all_mail_folder(),
+        )
+    }
+    /// READ-ONLY duplicate-check search (see `Connection::search_message_ids`).
+    pub fn search_message_ids(&mut self, ids: &[String]) -> Result<Vec<u32>> {
+        observed("destination", "uid_search", count_detail, || {
+            self.0.search_message_ids(ids)
+        })
+    }
+    /// Message-ID and body hash of one stored message, read with BODY.PEEK, and its size.
+    pub fn message_keys(&mut self, uid: u32) -> Result<Option<(crate::dedup::Keys, u64)>> {
+        Ok(self
+            .message(uid)?
+            .map(|m| (crate::dedup::keys(&m.body), m.body.len() as u64)))
     }
     pub fn folders(&mut self) -> Result<Vec<Folder>> {
         observed("destination", "list", count_detail, || self.0.list())
@@ -2164,6 +2271,66 @@ fn list_string(value: &str, frame: &[u8]) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// Most message ids in one duplicate-check search command.
+pub const SEARCH_BATCH: usize = 100;
+const HEADER_BATCH: usize = 100;
+const HEADER_PEEK: usize = 65536;
+
+/// True when `id` can be placed in a quoted X-GM-RAW search without any escaping.
+pub fn searchable_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-/=?^_`{|}~.@".contains(&b))
+}
+
+fn parse_search(response: &[u8]) -> Result<Vec<u32>> {
+    let mut rest = response;
+    let mut found = Vec::new();
+    while !rest.is_empty() {
+        let (next, r) =
+            Response::from_bytes(rest).map_err(|_| anyhow::anyhow!("invalid SEARCH response"))?;
+        if let Response::MailboxData(imap_proto::MailboxDatum::Search(v)) = r {
+            found.extend(v);
+        }
+        rest = next;
+    }
+    if found.contains(&0) {
+        bail!("server returned invalid UID zero");
+    }
+    found.sort_unstable();
+    found.dedup();
+    Ok(found)
+}
+
+fn decode_all_mail(response: &[u8], encoding: FolderEncoding) -> Result<Option<String>> {
+    let mut rest = response;
+    let mut found: Vec<String> = Vec::new();
+    while !rest.is_empty() {
+        let (next, r) =
+            Response::from_bytes(rest).map_err(|_| anyhow::anyhow!("invalid LIST response"))?;
+        if let Response::MailboxData(imap_proto::MailboxDatum::List {
+            name_attributes,
+            name,
+            ..
+        }) = r
+        {
+            if name_attributes.contains(&imap_proto::NameAttribute::All)
+                && !name_attributes.contains(&imap_proto::NameAttribute::NoSelect)
+            {
+                found.push(encoding.decode(list_string(&name, rest)?.as_bytes())?);
+            }
+        }
+        rest = next;
+    }
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.pop()),
+        _ => bail!("server lists more than one \\All mailbox; duplicate check cannot choose"),
+    }
 }
 fn decode_list(response: &[u8], encoding: FolderEncoding) -> Result<Vec<Folder>> {
     let mut rest = response;
@@ -3484,5 +3651,46 @@ mod tests {
         let literal = b"* LIST () \"/\" {5}\r\na\\b\"c\r\n";
         let names = decode_list(literal, FolderEncoding::ModifiedUtf7).unwrap();
         assert_eq!(names[0].name, "a\\b\"c");
+    }
+
+    #[test]
+    fn search_ids_are_quoted_safely_and_batches_are_bounded() {
+        assert!(searchable_id("a.b-c_d+e@example.invalid"));
+        for bad in [
+            "", "a b", "a\"b", "a\\b", "\u{e9}@x", "a\r\nb", "a(b)", "<a@b>",
+        ] {
+            assert!(!searchable_id(bad), "{bad:?}");
+        }
+        assert!(!searchable_id(&"a".repeat(257)));
+    }
+
+    #[test]
+    fn search_responses_are_parsed_strictly() {
+        assert_eq!(
+            parse_search(b"* SEARCH 9 3 3 7\r\nA1 OK done\r\n").unwrap(),
+            vec![3, 7, 9]
+        );
+        assert_eq!(
+            parse_search(b"* SEARCH\r\nA1 OK done\r\n").unwrap(),
+            Vec::<u32>::new()
+        );
+        assert!(parse_search(b"* SEARCH 0\r\n").is_err());
+        assert!(parse_search(b"garbage\r\n").is_err());
+    }
+
+    #[test]
+    fn the_all_mailbox_is_found_by_attribute_not_by_name() {
+        let enc = FolderEncoding::ModifiedUtf7;
+        let one = b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren \\All) \"/\" \"[Gmail]/Todo el correo\"\r\n* LIST (\\HasNoChildren \\Trash) \"/\" \"[Gmail]/Trash\"\r\nA OK\r\n";
+        assert_eq!(
+            decode_all_mail(one, enc).unwrap().as_deref(),
+            Some("[Gmail]/Todo el correo")
+        );
+        assert_eq!(
+            decode_all_mail(b"* LIST () \"/\" \"INBOX\"\r\nA OK\r\n", enc).unwrap(),
+            None
+        );
+        let two = b"* LIST (\\All) \"/\" \"A\"\r\n* LIST (\\All) \"/\" \"B\"\r\nA OK\r\n";
+        assert!(decode_all_mail(two, enc).is_err());
     }
 }
