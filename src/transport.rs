@@ -1599,10 +1599,14 @@ impl Destination {
         })
     }
     /// Message-ID and body hash of one stored message, read with BODY.PEEK, and its size.
-    pub fn message_keys(&mut self, uid: u32) -> Result<Option<(crate::dedup::Keys, u64)>> {
-        Ok(self
-            .message(uid)?
-            .map(|m| (crate::dedup::keys(&m.body), m.body.len() as u64)))
+    pub fn message_keys(&mut self, uid: u32) -> Result<Option<(crate::dedup::Keys, String, u64)>> {
+        Ok(self.message(uid)?.map(|m| {
+            (
+                crate::dedup::keys(&m.body),
+                crate::journal::fingerprint(&m.body),
+                m.body.len() as u64,
+            )
+        }))
     }
     pub fn folders(&mut self) -> Result<Vec<Folder>> {
         observed("destination", "list", count_detail, || self.0.list())

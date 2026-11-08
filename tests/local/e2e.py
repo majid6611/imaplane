@@ -185,6 +185,15 @@ class Proxy:
                 s.close()
         self.thread.join(2)
 
+ALL_MAIL = '[Gmail]/All Mail'
+
+def gm_keys(raw):
+    """(normalized Message-ID or None, body bytes) as a Gmail-like provider would key a message."""
+    head, _, body = raw.partition(b'\r\n\r\n')
+    found = re.findall(rb'(?im)^message-id:[ \t]*<?([^>\r\n]*)>?[ \t]*\r?$', head)
+    return (found[0].decode(errors='replace').strip().lower() if len(found) == 1 else None), body
+
+
 class ProtocolServer:
     """Protocol fixture for rev1/rev2 negotiation and message transfer over TLS."""
     def __init__(self, cert, key, mode):
@@ -214,7 +223,12 @@ class ProtocolServer:
         self.source_fetch_no = False
         self.wrong_rejection_tag = False
         self.restart_once = False
-        self.xoauth2_token = None  # when set, AUTH=XOAUTH2 is offered and checked
+        self.xoauth2_token = None  # when set, AUTH=XOAUTH2 is offered and checked, and the server behaves Gmail-like
+        self.gmail_merge = False   # Gmail-like: an APPEND of the same Message-ID and body replaces the old message and DISCARDS the new bytes (E7)
+        self.gmail_all_mail = True # Gmail-like servers list an \\All mailbox (a read-only union view of the destination)
+        self.searches = []         # X-GM-RAW searches received: lists of the ids asked for
+        self.search_fail = None    # callable(n) -> None | 'drop' | 'no': inject failures into X-GM-RAW searches
+        self.header_fetches = 0
         self.truncate_dest_fetch_at = None  # destination body FETCH: send this many bytes, then close
         self.drop_reply_after_commit = False  # APPEND is stored but the reply is never sent
         self.truncate_source_fetch_at = None  # source body FETCH: send this many bytes, then close
@@ -300,10 +314,15 @@ class ProtocolServer:
                         client.sendall(b'* LIST () "/" {'+str(len(wire)).encode()+b'}\r\n'+wire+b'\r\n')
                         for extra_name in self.extra[user]:
                             client.sendall(b'* LIST () "/" "'+extra_name.encode()+b'"\r\n')
+                        if self.xoauth2_token and self.gmail_all_mail and user == 'destination':
+                            client.sendall(b'* LIST (\\HasNoChildren \\All) "/" "'+ALL_MAIL.encode()+b'"\r\n')
                     elif verb in [b'EXAMINE',b'SELECT']:
                         name = '台北/📬'
                         expected = name.encode() if enabled else utf7(name).encode()
                         if args[0] == b'"'+expected+b'"': selected[0] = self.DEFAULT
+                        elif self.xoauth2_token and args[0] == b'"'+ALL_MAIL.encode()+b'"':
+                            assert verb == b'EXAMINE' and user == 'destination', 'All Mail is read-only'
+                            selected[0] = ALL_MAIL
                         else:
                             chosen = args[0][1:-1].decode()
                             assert args[0][:1] == b'"' and chosen in self.extra[user], (mode,args)
@@ -326,6 +345,27 @@ class ProtocolServer:
                             uids = [i+1 for i in range(upper) if msgs()[i] is not None]
                             for uid in (uids[:-1] if self.missing_inventory and user == 'source' else uids):
                                 client.sendall(b'* '+str(uid).encode()+b' FETCH (UID '+str(uid).encode()+b')\r\n')
+                        elif self.xoauth2_token and (gm := re.fullmatch(rb'SEARCH X-GM-RAW "(.*)"', args[0])):
+                            ids = [m.lower() for m in re.findall(rb'rfc822msgid:(\S+)', gm.group(1))]
+                            self.searches.append([i.decode() for i in ids])
+                            n = len(self.searches)
+                            failure = self.search_fail(n) if self.search_fail else None
+                            if failure == 'drop': return
+                            if failure == 'no':
+                                client.sendall(tag+b' NO [UNAVAILABLE] PRIVATE search unavailable\r\n'); continue
+                            hits = [i+1 for i, m in enumerate(msgs()) if m is not None and (gm_keys(m)[0] or '').encode() in ids]
+                            client.sendall(b'* SEARCH' + b''.join(b' %d' % h for h in hits) + b'\r\n')
+                        elif (hf := re.fullmatch(rb'FETCH ([\d:,]+) \(UID BODY\.PEEK\[HEADER\]<0\.(\d+)>\)', args[0])):
+                            self.header_fetches += 1
+                            wanted = set()
+                            for part in hf.group(1).split(b','):
+                                lo, _, hi = part.partition(b':')
+                                wanted.update(range(int(lo), int(hi or lo) + 1))
+                            for uid in sorted(wanted):
+                                if uid <= len(msgs()) and msgs()[uid-1] is not None:
+                                    head = msgs()[uid-1].partition(b'\r\n\r\n')[0] + b'\r\n\r\n'
+                                    head = head[:int(hf.group(2))]
+                                    client.sendall(b'* %d FETCH (UID %d BODY[HEADER]<0> {%d}\r\n' % (uid, uid, len(head)) + head + b')\r\n')
                         elif re.fullmatch(rb'FETCH [\d:,]+ \(UID FLAGS INTERNALDATE RFC822\.SIZE\)', args[0]):
                             self.meta_fetches[user] += 1
                             wanted = set()
@@ -435,7 +475,13 @@ class ProtocolServer:
                         named = re.match(rb'APPEND "((?:[^"\\]|\\.)*)"', line.strip()[len(tag)+1:])
                         if named and named.group(1).decode(errors='replace') in self.extra[user]:
                             target = self.extra[user][named.group(1).decode()]
-                        target.append(data[:-2])
+                        stored = data[:-2]
+                        if self.gmail_merge and self.xoauth2_token:
+                            key = gm_keys(stored)
+                            old = next((i for i, m in enumerate(target) if m is not None and key[0] is not None and gm_keys(m) == key), None)
+                            if old is not None:
+                                stored = target[old]; target[old] = None   # Gmail: the old message is re-issued, the new bytes are discarded
+                        target.append(stored)
                         if self.pause_append_reply: self.hook('append_reply')
                         if self.drop_reply_after_commit: return
                         client.sendall(tag+b' OK [APPENDUID '+str(self.append_validity).encode()+b' '+str(self.append_uid_override if self.append_uid_override is not None else len(target)).encode()+b'] appended\r\n')
@@ -450,6 +496,11 @@ class ProtocolServer:
         except Exception as exc: self.errors.append(repr(exc))
     DEFAULT = '台北/📬'
     def box(self, user, name):
+        if name == ALL_MAIL:
+            union = list(self.messages[user])
+            for extra_name, box in self.extra[user].items():
+                union.extend(box)
+            return union
         return self.messages[user] if name == self.DEFAULT else self.extra[user][name]
     def hook(self, name):
         reached, resume = self.hooks[name]

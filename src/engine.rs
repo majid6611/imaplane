@@ -110,6 +110,8 @@ pub struct VerificationSummary {
     pub flag_drift: u64,
     pub uncertain: u64,
     pub blocked_by_uncertain: u64,
+    /// Messages the duplicate check is holding back in this run: NOT migrated, nothing was sent for them.
+    pub held: u64,
     /// Missing, changed or unreadable destination messages (demoted or still unconfirmed).
     pub problems: u64,
     pub statement: String,
@@ -179,6 +181,7 @@ impl Report {
             flag_drift: count(&|e| e.result == "drift"),
             uncertain: count(&|e| e.result == "uncertain"),
             blocked_by_uncertain: count(&|e| e.result == "blocked_by_uncertain"),
+            held: count(&|e| e.result == "held"),
             problems: count(&|e| {
                 matches!(
                     e.result.as_str(),
@@ -208,6 +211,12 @@ impl Report {
             v.blocked_by_uncertain,
             v.problems
         );
+        if v.held > 0 {
+            v.statement.push_str(&format!(
+                "; {} HELD by the duplicate check (NOT migrated; nothing was sent for them)",
+                v.held
+            ));
+        }
         self.verification = Some(v);
     }
     /// Attach the journal's recorded full-verification times (oldest/newest per folder), read through the
@@ -954,6 +963,7 @@ fn migrate_with(
             job.journal.snapshot(&f.source, s.validity, &uids)?;
         }
     }
+    let mut dup_guard = start_guard(c, &dp, &mut dest, job, &mut report)?;
     let mut circuit = RejectionCircuit::default();
     let spool_config = SpoolConfig {
         dir: c.spool_dir.clone().unwrap_or_else(|| c.state_dir.clone()),
@@ -1034,6 +1044,7 @@ fn migrate_with(
                 blocked
             );
         }
+        let mut scanned_through = 0usize;
         for (index, uid) in uids.iter().enumerate() {
             let key = MessageKey {
                 folder: folder.clone(),
@@ -1046,6 +1057,39 @@ fn migrate_with(
             }
             if handled.contains(uid) {
                 continue;
+            }
+            if let Some(g) = dup_guard.as_mut() {
+                if index >= scanned_through {
+                    scanned_through = index + crate::dupguard::WINDOW;
+                    let mut window = Vec::new();
+                    for u in uids[index..].iter().take(crate::dupguard::WINDOW) {
+                        if handled.contains(u) {
+                            continue;
+                        }
+                        let k = MessageKey {
+                            folder: folder.clone(),
+                            uid_validity: validity,
+                            uid: *u,
+                        };
+                        let pending = match job.journal.record(&k)? {
+                            None => true,
+                            Some(r) => {
+                                r.state == "planned"
+                                    && r.destination.is_none()
+                                    && job.journal.active_skip(&k)?.is_none()
+                            }
+                        };
+                        if pending {
+                            window.push(*u);
+                        }
+                    }
+                    if let Err(e) = source.read(|s| g.prescan(s, &window)) {
+                        report.entries.push(entry(&key, None, "failed", format!("duplicate check unavailable: {e:#}; nothing was sent and nothing was recorded; rerun to try again")));
+                        report.interrupted |= stop.load(Ordering::Relaxed);
+                        report.finish();
+                        return Ok(report);
+                    }
+                }
             }
             eprintln!(
                 "Folder {:?}: {}/{} (UID {})",
@@ -1164,6 +1208,39 @@ fn migrate_with(
                 ));
                 continue;
             }
+            let subject = match dup_guard.as_mut() {
+                Some(g) => {
+                    let subject = match subject_of(&mut payload) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            report.entries.push(entry(&key, None, "failed", format!("duplicate check unavailable: {e:#}; nothing was sent and nothing was recorded; rerun to try again")));
+                            report.finish();
+                            return Ok(report);
+                        }
+                    };
+                    match g.check(&job.journal, &key, &subject) {
+                        Ok(crate::dupguard::Verdict::Clear) => {
+                            job.journal.record_release(&key)?;
+                        }
+                        Ok(crate::dupguard::Verdict::Hold { reason, detail }) => {
+                            drop(payload);
+                            job.journal
+                                .record_hold(&key, reason, &subject.fingerprint, &detail)?;
+                            let r = job.journal.record(&key)?;
+                            report.entries.push(entry(&key, r.as_ref(), "held", format!("NOT transferred, NOT migrated: held by the duplicate check [{reason}]: {detail}. Nothing was sent. Decide with `skip --reason` (if the existing copy is the same mail), or resolve the destination and rerun")));
+                            continue;
+                        }
+                        Err(e) => {
+                            report.entries.push(entry(&key, None, "failed", format!("duplicate check unavailable: {e:#}; nothing was sent and nothing was recorded; rerun to try again")));
+                            report.interrupted |= stop.load(Ordering::Relaxed);
+                            report.finish();
+                            return Ok(report);
+                        }
+                    }
+                    Some(subject)
+                }
+                None => None,
+            };
             dest.ensure_live()?;
             let current = dest.writable_selection(&mapping.destination)?;
             if current.validity != selected.validity {
@@ -1245,6 +1322,9 @@ fn migrate_with(
                     circuit.success();
                     drop(payload); // Release source content (and any spool) before verification.
                     job.journal.acknowledge(&key, dv, du)?;
+                    if let (Some(g), Some(s)) = (dup_guard.as_mut(), subject.as_ref()) {
+                        g.note_appended(&key, s);
+                    }
                     dest.advance_baseline(du);
                     let r = job.journal.record(&key)?.unwrap();
                     report.entries.push(verify_record(
@@ -1343,7 +1423,62 @@ fn migrate_with(
     }
     report.interrupted |= stop.load(Ordering::Relaxed);
     report.finish();
+    let held = report.entries.iter().filter(|e| e.result == "held").count();
+    if held > 0 {
+        let w = format!(
+            "{held} message(s) HELD by the Gmail duplicate check: NOT migrated, nothing was sent for them; see the entries and decide with `skip --reason` or resolve the destination and rerun"
+        );
+        eprintln!("WARNING: {w}");
+        report.warnings.push(w);
+    }
     Ok(report)
+}
+
+/// Starts the Gmail duplicate protection when the destination is Gmail-like and it is not switched off.
+/// Raises the journal to schema 6 first (explicit, backed up, crash safe). A failure here stops the run
+/// before anything is sent: protection that cannot be established is never silently skipped.
+fn start_guard(
+    c: &Config,
+    password: &str,
+    dest: &mut DestinationReader<'_>,
+    job: &mut Job,
+    report: &mut Report,
+) -> Result<Option<crate::dupguard::DupGuard>> {
+    use crate::config::GmailProtection;
+    if c.gmail_duplicate_protection == GmailProtection::Off || !dest.destination.is_gmail() {
+        return Ok(None);
+    }
+    if job.journal.schema_version()? < 6 {
+        let path = c.state_dir.join("journal.sqlite3");
+        job.journal.upgrade_to_v6(&path)?;
+        let w = "journal upgraded to schema 6 for the Gmail duplicate check; verified backups were written next to it (*.bak). A pre-duplicate-check release can no longer open this journal".to_string();
+        eprintln!("NOTE: {w}");
+        report.warnings.push(w);
+    }
+    let guard = crate::dupguard::DupGuard::start(
+        &c.destination,
+        password,
+        Duration::from_secs(c.timeout_seconds),
+        c.max_message_bytes,
+    )?;
+    eprintln!(
+        "Gmail duplicate protection: on (read-only checks against {:?})",
+        guard.all_mail()
+    );
+    Ok(Some(guard))
+}
+
+fn subject_of(payload: &mut Payload) -> Result<crate::dupguard::Subject> {
+    Ok(match payload {
+        Payload::Buffered(m) => crate::dupguard::Subject {
+            keys: crate::dedup::keys(&m.body),
+            fingerprint: crate::journal::fingerprint(&m.body),
+        },
+        Payload::Spooled(s) => crate::dupguard::Subject {
+            keys: crate::dedup::keys_from_reader(s.spool.reader("dedup_spool_read")?)?,
+            fingerprint: s.sha256().to_string(),
+        },
+    })
 }
 
 fn transfer_flags(flags: &[String], supported: &[String]) -> (Vec<String>, Vec<String>) {

@@ -181,6 +181,12 @@ fn print_report(report: &engine::Report, json: bool) -> anyhow::Result<ExitCode>
         if let Some(reason) = &report.halt_reason {
             println!("Stopped: {reason}");
         }
+        let held = report.entries.iter().filter(|e| e.result == "held").count();
+        if held > 0 {
+            println!(
+                "HELD by the duplicate check: {held} message(s) are NOT migrated; nothing was sent for them (see the entries above)"
+            );
+        }
         println!("Complete for recorded snapshot: {}", report.complete);
     }
     Ok(ExitCode::from(if report.complete { 0 } else { 2 }))
@@ -283,13 +289,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 println!(
-                    "Scope: {}\nPlanned: {}\nUncertain: {}\nAccepted: {}\nContent confirmed: {} (by full SHA-256 read-back at some time; this command does not check anything live)\nSkipped by operator (not migrated): {}",
+                    "Scope: {}\nPlanned: {}\nUncertain: {}\nAccepted: {}\nContent confirmed: {} (by full SHA-256 read-back at some time; this command does not check anything live)\nSkipped by operator (not migrated): {}\nHeld by the Gmail duplicate check (not migrated, counted in Planned): {}",
                     summary.scope,
                     summary.planned,
                     summary.uncertain,
                     summary.accepted,
                     summary.confirmed,
-                    summary.skipped
+                    summary.skipped,
+                    summary.held
                 );
                 println!(
                     "Full-verification record ({}): {}",

@@ -2,6 +2,7 @@
 pub mod config;
 pub mod dedup;
 pub mod diagnostics;
+pub mod dupguard;
 pub mod engine;
 pub mod folders;
 pub mod job;

@@ -41,6 +41,16 @@ pub enum Auth {
     #[serde(alias = "oauth2")]
     Xoauth2,
 }
+/// Client-side duplicate protection for Gmail-style destinations (those advertising X-GM-EXT-1).
+/// `auto` (default) checks every message before it is appended and holds back probable duplicates, because
+/// Gmail merges duplicates and can silently discard the appended bytes. `off` accepts that risk.
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum GmailProtection {
+    #[default]
+    Auto,
+    Off,
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FolderMap {
@@ -81,6 +91,9 @@ pub struct Config {
     /// done safely, `rollback` keeps (or restores) the rollback journal. Not part of the job binding.
     #[serde(default)]
     pub journal_mode: crate::journal::JournalPref,
+    /// Gmail duplicate protection (`auto` or `off`). Not part of the job binding.
+    #[serde(default)]
+    pub gmail_duplicate_protection: GmailProtection,
 }
 fn rejection_limit() -> u32 {
     3

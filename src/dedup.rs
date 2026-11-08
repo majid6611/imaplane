@@ -151,6 +151,50 @@ pub fn keys(raw: &[u8]) -> Keys {
     }
 }
 
+/// The same keys for content that is read incrementally (a spooled message), without holding it in memory:
+/// the header is buffered (at most 1 MiB; a longer one yields no identifier) and the body is hashed as it streams.
+pub fn keys_from_reader<R: std::io::Read>(mut reader: R) -> std::io::Result<Keys> {
+    const HEADER_LIMIT: usize = 1 << 20;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut head: Vec<u8> = Vec::new();
+    let mut hasher = Sha256::new();
+    let mut body_started = false;
+    let mut message_id_value = None;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if body_started {
+            hasher.update(&buf[..n]);
+            continue;
+        }
+        head.extend_from_slice(&buf[..n]);
+        let (header, body) = split(&head);
+        if body.is_empty() && header.len() == head.len() && !head.ends_with(b"\n\n") {
+            // No empty line yet. A separator split across reads is found on the next pass.
+            if head.len() > HEADER_LIMIT {
+                // Not a plausible header: keep streaming as body-less header; no identifier.
+                head.clear();
+                head.extend_from_slice(b"\n");
+            }
+            continue;
+        }
+        message_id_value = message_id(header);
+        hasher.update(body);
+        body_started = true;
+        head = Vec::new();
+    }
+    if !body_started {
+        let (header, _) = split(&head);
+        message_id_value = message_id(header);
+    }
+    Ok(Keys {
+        message_id: message_id_value,
+        body_sha256: hex(&hasher.finalize()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +290,34 @@ mod tests {
     fn a_message_id_in_the_body_is_never_used() {
         let raw = b"Subject: s\r\n\r\nMessage-ID: <fake@x>\r\n";
         assert_eq!(keys(raw).message_id, None);
+    }
+
+    #[test]
+    fn the_streaming_keys_equal_the_whole_message_keys_for_every_fragmentation() {
+        let raw = msg(Some("<s@x>"), "X-A: 1\r\n", "body line\r\nmore\r\n");
+        for chunk in [1usize, 2, 3, 7, 64, 1000] {
+            struct Slow<'a>(&'a [u8], usize);
+            impl std::io::Read for Slow<'_> {
+                fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                    let n = self.1.min(self.0.len()).min(b.len());
+                    b[..n].copy_from_slice(&self.0[..n]);
+                    self.0 = &self.0[n..];
+                    Ok(n)
+                }
+            }
+            assert_eq!(
+                keys_from_reader(Slow(&raw, chunk)).unwrap(),
+                keys(&raw),
+                "chunk {chunk}"
+            );
+        }
+        let no_body = b"Message-ID: <a@x>\r\nSubject: s\r\n".to_vec();
+        assert_eq!(keys_from_reader(&no_body[..]).unwrap(), keys(&no_body));
+        let empty_body = b"Message-ID: <a@x>\r\n\r\n".to_vec();
+        assert_eq!(
+            keys_from_reader(&empty_body[..]).unwrap(),
+            keys(&empty_body)
+        );
     }
 
     #[test]
