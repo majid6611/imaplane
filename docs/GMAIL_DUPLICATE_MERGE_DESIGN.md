@@ -444,5 +444,12 @@ Deviations and clarifications, so the document matches the code:
 * **Existing hits** are compared by fetching the whole message (BODY.PEEK) with the existing size cap; a hit larger than `max_message_bytes` stops the
   run (fail closed) rather than guessing.
 * **Spooled messages** (large, streaming on) are keyed by streaming the spool (`keys_from_reader`), never held whole in memory.
-* **Not implemented / out of scope:** P4 post-hoc `classification` of a read-back mismatch (the read-back result itself is unchanged and still
-  reported as before); Trash and Spam siblings; mail added by other clients during a run; the live acceptance P6.
+* **P4 (implemented, strictly additive):** a `missing` or `mismatch` read-back on a Gmail-like destination gains an optional `classification`
+  (JSON entry field and a human line) and a `provider_merges` counter (only when non-zero). Two kinds, each requiring proof from the journal and from
+  messages this job itself sent, otherwise no classification: `provider_merge_new_bytes_discarded` (the bytes behind the APPENDUID are exactly the
+  bytes sent earlier for another source message) and `provider_merge_identical_copy_kept` (the UID is gone but an identical copy sent for another
+  source message is intact; one extra read-only fetch, no retry). Results, details, exit codes, `complete`, the journal and recovery are unchanged.
+  The earlier plan to match the Message-ID of the destination message was not needed.
+* **P6 (done 2026-11-08, majid.infra88@gmail.com):** in-run hold, zero-APPEND rerun, and (second run) the existing-destination path
+  (`SAME_CONTENT_EXISTING`, hit found by the batched search in `\All`, zero Gmail writes, idempotent rerun).
+* **Not implemented / out of scope:** Trash and Spam siblings; mail added by other clients during a run; merges other than the two proven kinds.

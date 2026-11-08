@@ -435,6 +435,11 @@ the authority. If the check itself fails (search timeout, `NO`/`BAD`, no `\All` 
 the run, sends nothing, records nothing, and exits 2; a rerun tries again. Set `gmail_duplicate_protection = "off"` to
 accept Gmail's merging (then only the read-back reports it).
 
+**Explaining a merge afterwards.** When a read-back (`migrate`, `verify`) reports `missing` or `mismatch` on a Gmail destination
+and the journal proves that it is the effect of a merge of identical messages, the entry gains an additive `classification`
+(for example `provider_merge_identical_copy_kept`) and the verification block a `provider_merges` count. This is a diagnosis
+only: the result, its detail, the exit code and the journal are exactly as without it, and without proof there is no classification.
+
 **Journal schema 6.** The first protected run upgrades the journal explicitly (schema 4 goes through 5 to 6, each step in
 one transaction with a verified backup `journal.sqlite3.v4.bak`/`.v5.bak` next to it). A release without this feature refuses
 a schema 6 journal (it fails closed); to go back, restore the backup of your choice (this loses later progress, so do not
@@ -442,7 +447,7 @@ mix versions on one job). Prefer migrating into a **fresh** Gmail account where 
 
 Gmail and Microsoft 365 compatibility testing is **in progress**: a read-only Gmail probe, a 1,000-message Gmail to Dovecot copy,
 and controlled duplicate-merge experiments on a dedicated test account have been done (Microsoft 365 has not been contacted; the
-Gmail duplicate protection has not yet had its live acceptance run). See
+Gmail duplicate protection had one small live acceptance run on a test account: an in-run hold and an existing-destination hold, one APPEND in total). See
 [docs/PROVIDER_COMPATIBILITY_TESTING.md](docs/PROVIDER_COMPATIBILITY_TESTING.md) and, for
 Google, [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md). Supporting tools in
 `scripts/`: `imap_snapshot.py` (independent read-only snapshot and comparison),

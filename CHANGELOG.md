@@ -42,3 +42,5 @@ may change (journal upgrades keep a verified backup and never discard evidence).
 - arm64 packages are built by the workflow but have no runtime test evidence.
 - An uncertain message whose literal was authorized and that has no destination
   candidate needs manual review by design; there is no force-retry.
+- Additive `classification` (and `provider_merges` count) on `missing`/`mismatch` read-back results that are proven to be a
+  Gmail merge of identical messages. Results, exit codes, verification and recovery are unchanged.
