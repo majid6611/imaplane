@@ -522,7 +522,12 @@ mod tests {
         ] {
             let e = classify(&io::Error::from_raw_os_error(errno));
             assert!(format!("{e:?}").starts_with(want), "{errno}: {e:?}");
-            let text = e.to_string().replace("I/O", "").replace("tmpfs/ramfs", "");
+            // The kind's own wording may contain a slash on newer toolchains ("input/output error"); only paths matter.
+            let text = e
+                .to_string()
+                .replace("I/O", "")
+                .replace("input/output", "")
+                .replace("tmpfs/ramfs", "");
             assert!(!text.contains('/'), "messages must not carry paths: {text}");
         }
     }
