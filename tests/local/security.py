@@ -139,7 +139,11 @@ with tempfile.TemporaryDirectory(prefix='imaplane-security-') as td:
         run(tls12)
         expired_key, csr, expired = td/'expired.key',td/'expired.csr',td/'expired.crt'
         subprocess.run(['openssl','req','-new','-newkey','rsa:2048','-nodes','-keyout',str(expired_key),'-out',str(csr),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        subprocess.run(['openssl','x509','-req','-in',str(csr),'-CA',str(cert),'-CAkey',str(key),'-CAcreateserial','-days','-1','-copy_extensions','copy','-out',str(expired)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        base = ['openssl','x509','-req','-in',str(csr),'-CA',str(cert),'-CAkey',str(key),'-CAcreateserial','-copy_extensions','copy','-out',str(expired)]
+        try:   # OpenSSL 3.0: a negative validity makes an already expired certificate
+            subprocess.run(base+['-days','-1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:   # OpenSSL 3.4+ rejects that; it has explicit validity bounds instead
+            subprocess.run(base+['-not_before','20200101000000Z','-not_after','20200102000000Z'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         expired_server = Server(str(expired),str(expired_key)); servers.append(expired_server)
         run(expired_server,code=1); assert expired_server.auth_count == 0
         for fault in ['missing','refuse','downgrade']:
