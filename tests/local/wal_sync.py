@@ -35,8 +35,12 @@ N = 8
 with tempfile.TemporaryDirectory(prefix='imaplane-walsync-') as tmp:
     root = Path(tmp); os.chmod(root, 0o700)
     shim = root / 'shim.so'
-    subprocess.run(['docker', 'run', '--rm', '--user', f'{os.getuid()}:{os.getgid()}', '-v', f'{ROOT}/tests/support:/s:ro', '-v', f'{root}:/o', os.environ.get('IMAPLANE_TEST_IMAGE', 'imaplane-dev:1.85.1'),
-                    'gcc', '-shared', '-fPIC', '-O2', '-o', '/o/shim.so', '/s/fsync_shim.c', '-ldl', '-lpthread'], check=True)
+    import shutil
+    if shutil.which('gcc'):   # CI runners have a compiler; the Docker image is only for hosts without one
+        subprocess.run(['gcc', '-shared', '-fPIC', '-O2', '-o', str(shim), str(ROOT / 'tests/support/fsync_shim.c'), '-ldl', '-lpthread'], check=True)
+    else:
+            subprocess.run(['docker', 'run', '--rm', '--user', f'{os.getuid()}:{os.getgid()}', '-v', f'{ROOT}/tests/support:/s:ro', '-v', f'{root}:/o', os.environ.get('IMAPLANE_TEST_IMAGE', 'imaplane-dev:1.85.1'),
+                        'gcc', '-shared', '-fPIC', '-O2', '-o', '/o/shim.so', '/s/fsync_shim.c', '-ldl', '-lpthread'], check=True)
     cert, key = root / 'tls.crt', root / 'tls.key'
     command('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost')
     password = root / 'password'; password.write_text(PASSWORD); password.chmod(0o600)
