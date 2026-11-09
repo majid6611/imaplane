@@ -450,6 +450,6 @@ Deviations and clarifications, so the document matches the code:
   bytes sent earlier for another source message) and `provider_merge_identical_copy_kept` (the UID is gone but an identical copy sent for another
   source message is intact; one extra read-only fetch, no retry). Results, details, exit codes, `complete`, the journal and recovery are unchanged.
   The earlier plan to match the Message-ID of the destination message was not needed.
-* **P6 (done 2026-11-08, majid.infra88@gmail.com):** in-run hold, zero-APPEND rerun, and (second run) the existing-destination path
+* **P6 (done 2026-11-08, dedicated Gmail test account):** in-run hold, zero-APPEND rerun, and (second run) the existing-destination path
   (`SAME_CONTENT_EXISTING`, hit found by the batched search in `\All`, zero Gmail writes, idempotent rerun).
 * **Not implemented / out of scope:** Trash and Spam siblings; mail added by other clients during a run; merges other than the two proven kinds.
