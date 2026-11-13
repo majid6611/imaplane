@@ -84,6 +84,10 @@ contents:
     dst: /usr/share/doc/imaplane/docs/PROVIDER_COMPATIBILITY_TESTING.md
     file_info:
       mode: 0644
+  - src: docs/GMAIL_DUPLICATE_MERGE_DESIGN.md
+    dst: /usr/share/doc/imaplane/docs/GMAIL_DUPLICATE_MERGE_DESIGN.md
+    file_info:
+      mode: 0644
   - src: docs/PERFORMANCE_BASELINE.md
     dst: /usr/share/doc/imaplane/docs/PERFORMANCE_BASELINE.md
     file_info:

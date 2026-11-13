@@ -452,4 +452,10 @@ Deviations and clarifications, so the document matches the code:
   The earlier plan to match the Message-ID of the destination message was not needed.
 * **P6 (done 2026-11-08, dedicated Gmail test account):** in-run hold, zero-APPEND rerun, and (second run) the existing-destination path
   (`SAME_CONTENT_EXISTING`, hit found by the batched search in `\All`, zero Gmail writes, idempotent rerun).
+* **P7 (scale run, 2026-11-13, dedicated Gmail test account, new label, cap 150):** 150 synthetic messages (121 unique; 6 identical pairs; 4 pairs with the
+  same Message-ID and body but an extra header; 3 same-Message-ID pairs with different bodies; 3 without a Message-ID). Result: exactly 140 APPENDs, 140
+  confirmed by full SHA-256 read-back, 10 held (all before any APPEND, reason `SAME_CONTENT_THIS_JOB`), no merge on Gmail (140 distinct X-GM-MSGIDs; the different-body and
+  no-Message-ID pairs stayed separate), exit code 2, `complete` false. Two destination searches of at most 100 ids cost about 180-205 ms each. A zero-APPEND rerun
+  added 4 hold-evidence rows: the same-Message-ID pairs are now also found in `\All` (`SAME_ID_AND_BODY_EXISTING`), a stronger reason for the same hold; a third run added
+  nothing (evidence is deduplicated per message and reason). No existing message or flag changed.
 * **Not implemented / out of scope:** Trash and Spam siblings; mail added by other clients during a run; merges other than the two proven kinds.
