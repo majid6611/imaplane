@@ -4,7 +4,7 @@ All notable changes are listed here. This project follows semantic versioning; w
 the version is 0.x, command-line options, report formats and journal schema versions
 may change (journal upgrades keep a verified backup and never discard evidence).
 
-## [0.1.0] - unreleased (technical preview)
+## [0.1.0] - 2026-11-14 (technical preview)
 
 ### Added
 - Additive, resumable IMAP-to-IMAP migration with read-only source access, strict
