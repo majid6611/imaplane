@@ -445,9 +445,16 @@ one transaction with a verified backup `journal.sqlite3.v4.bak`/`.v5.bak` next t
 a schema 6 journal (it fails closed); to go back, restore the backup of your choice (this loses later progress, so do not
 mix versions on one job). Prefer migrating into a **fresh** Gmail account where possible.
 
+**Known limits of the Gmail duplicate protection.** The check looks at the messages in this run, in the journal and in the destination's
+`\All` mailbox (All Mail). It does **not** see: duplicates that exist only in **Trash or Spam** (they are outside All Mail); mail that another
+client adds to the destination **while a run is in progress**; and merge patterns Gmail applies that are not yet known. In those cases the
+mandatory read-back after every APPEND is the only safeguard: it reports the outcome as `missing` or `mismatch` (with an additive
+`classification` when a merge of identical messages is proven). Empty Trash and Spam in a destination account before migrating if that matters.
+
 Gmail and Microsoft 365 compatibility testing is **in progress**: a read-only Gmail probe, a 1,000-message Gmail to Dovecot copy,
 and controlled duplicate-merge experiments on a dedicated test account have been done (Microsoft 365 has not been contacted; the
-Gmail duplicate protection had one small live acceptance run on a test account: an in-run hold and an existing-destination hold, one APPEND in total). See
+Gmail duplicate protection had two small live runs on a test account: an in-run hold and an existing-destination hold with one APPEND, and a 150-message
+run with 140 APPENDs, 10 holds and no merge; Gmail's real merge rule is still only partly known). See
 [docs/PROVIDER_COMPATIBILITY_TESTING.md](docs/PROVIDER_COMPATIBILITY_TESTING.md) and, for
 Google, [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md). Supporting tools in
 `scripts/`: `imap_snapshot.py` (independent read-only snapshot and comparison),

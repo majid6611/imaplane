@@ -44,3 +44,5 @@ may change (journal upgrades keep a verified backup and never discard evidence).
   candidate needs manual review by design; there is no force-retry.
 - Additive `classification` (and `provider_merges` count) on `missing`/`mismatch` read-back results that are proven to be a
   Gmail merge of identical messages. Results, exit codes, verification and recovery are unchanged.
+- Known limits of the Gmail duplicate protection: duplicates only in Trash or Spam, mail added by another client during a run, and unknown
+  Gmail merge patterns are not covered by the pre-APPEND check; the read-back remains the safeguard.
