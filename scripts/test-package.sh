@@ -16,6 +16,7 @@ case "$package" in
       test -x /usr/bin/imaplane-oauth-token
       test -s /usr/share/doc/imaplane/docs/WAL_JOURNAL.md
       test -s /usr/share/doc/imaplane/docs/GMAIL_DUPLICATE_MERGE_DESIGN.md
+      test -s /usr/share/doc/imaplane/assets/logo-readme.png
       apt-get remove -y imaplane >/dev/null
       test "$(cat /root/imaplane-state/sentinel)" = keep-me
       test ! -e /usr/bin/imaplane
@@ -33,6 +34,7 @@ case "$package" in
       test -x /usr/bin/imaplane-oauth-token
       test -s /usr/share/doc/imaplane/docs/WAL_JOURNAL.md
       test -s /usr/share/doc/imaplane/docs/GMAIL_DUPLICATE_MERGE_DESIGN.md
+      test -s /usr/share/doc/imaplane/assets/logo-readme.png
       dnf --disablerepo="*" remove -y imaplane >/dev/null
       test "$(cat /root/imaplane-state/sentinel)" = keep-me
       test ! -e /usr/bin/imaplane

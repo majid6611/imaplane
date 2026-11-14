@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo-readme.png" alt="IMAPLANE logo: an ibex carrying an envelope" width="160">
+</p>
+
 # IMAPLANE
 
 A Rust command-line tool for additive IMAP-to-IMAP mailbox migration on Linux.
